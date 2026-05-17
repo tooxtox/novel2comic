@@ -88,8 +88,7 @@
                         <div class="flex items-center gap-3">
                             <div class="w-10 h-10 bg-black text-white flex items-center justify-center font-bold">💻</div>
                             <div>
-                                <div class="font-bold">火山引擎 Coding</div>
-                                <div class="text-xs text-gray-500">Coding API 接口</div>
+
                             </div>
                         </div>
                     </div>
@@ -226,8 +225,12 @@
             <div class="flex justify-between items-center mb-4">
                 <h2 class="text-xl font-bold">分镜管理</h2>
                 <div class="flex gap-2">
-                    <button onclick="generateAllImages()" class="btn-primary px-4 py-2 font-medium flex items-center gap-2">
-                        <span>批量生成图片</span>
+                    <button onclick="generateAllFullPages()" class="btn-primary px-4 py-2 font-medium flex items-center gap-2">
+                        <span>批量整页生成</span>
+                        <span id="batch-full-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
+                    </button>
+                    <button onclick="generateAllImages()" class="bg-gray-700 text-white px-4 py-2 font-medium flex items-center gap-2 hover:bg-gray-800 transition-colors">
+                        <span>批量逐个生成（不推荐）</span>
                         <span id="batch-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
                     </button>
                     <button onclick="exportScript()" class="bg-white border-2 border-black px-4 py-2 font-medium hover:bg-gray-50 transition-colors">导出脚本</button>
@@ -246,18 +249,13 @@
             <div class="flex flex-wrap justify-between items-center mb-4 gap-4">
                 <h2 class="text-xl font-bold">漫画预览</h2>
                 <div class="flex gap-2">
-                    <button onclick="combineAllPages()" class="btn-primary px-4 py-2 font-medium flex items-center gap-2">
-                        <span>合并所有页面</span>
-                        <span id="combine-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
-                    </button>
                     <button onclick="downloadAll()" class="bg-white border-2 border-black px-4 py-2 font-medium hover:bg-gray-50 transition-colors">下载全部</button>
                 </div>
             </div>
-            <div id="combined-pages" class="mb-8 space-y-6"></div>
             <div id="gallery-container" class="space-y-8">
                 <div class="text-center py-20 text-gray-400">
                     <div class="text-6xl mb-4">🎨</div>
-                    <p>请先生成分镜图片</p>
+                    <p>请先生成漫画图片</p>
                 </div>
             </div>
         </div>

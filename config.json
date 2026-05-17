@@ -1,9 +1,9 @@
 {
   "llm_api_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-  "llm_api_key": "524f946a-b441-4ac0-a2c7-b42e6a9e6cb9",
+  "llm_api_key": "ark-712508e6-9449-41df-8b9b-6957eeb484cc-d83ea",
   "llm_model": "deepseek-v3-2-251201",
   "img_api_url": "https://ark.cn-beijing.volces.com/api/v3/images/generations",
-  "img_api_key": "524f946a-b441-4ac0-a2c7-b42e6a9e6cb9",
+  "img_api_key": "ark-712508e6-9449-41df-8b9b-6957eeb484cc-d83ea",
   "img_model": "doubao-seedream-4-5-251128",
   "segments_per_page": 6,
   "negative_prompt": "color, blurry, low quality, distorted, ugly"

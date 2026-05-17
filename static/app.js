@@ -3,8 +3,24 @@ let generatedImages = {};
 let isGenerating = false;
 let characters = [];
 let combinedPages = [];
+let fullPageImages = {};  // 整页生成的图片
 
 const tabs = ['config', 'input', 'characters', 'segments', 'gallery'];
+const CONCURRENT_LIMIT = 3;
+
+async function runWithConcurrency(tasks, limit) {
+    const results = [];
+    const executing = [];
+    for (const task of tasks) {
+        const p = task().then(r => { executing.splice(executing.indexOf(p), 1); return r; });
+        executing.push(p);
+        results.push(p);
+        if (executing.length >= limit) {
+            await Promise.race(executing);
+        }
+    }
+    return Promise.all(results);
+}
 
 function applyPreset(preset) {
     if (preset === 'volc') {
@@ -234,13 +250,41 @@ function renderSegments() {
         return;
     }
 
-    container.innerHTML = currentSegments.pages.map((page, pageIdx) => `
+    container.innerHTML = currentSegments.pages.map((page, pageIdx) => {
+        const hasFullPageImage = fullPageImages[pageIdx];
+        const allSelectedChars = [];
+        page.segments.forEach(seg => {
+            if (seg.selected_characters) {
+                seg.selected_characters.forEach(cIdx => {
+                    if (!allSelectedChars.includes(cIdx)) {
+                        allSelectedChars.push(cIdx);
+                    }
+                });
+            }
+        });
+        
+        return `
         <div class="comic-page p-6">
             <div class="flex justify-between items-center mb-4 pb-2 border-b-2 border-gray-200">
                 <h3 class="text-lg font-bold">第 ${page.page_number} 页</h3>
-                <button onclick="generatePageImages(${pageIdx})" class="text-sm bg-black text-white px-3 py-1 hover:bg-gray-800 transition-colors">
-                    生成本页图片
-                </button>
+                <div class="flex gap-2">
+                    <button onclick="generatePageImages(${pageIdx})" class="text-sm bg-gray-700 text-white px-3 py-1 hover:bg-gray-800 transition-colors">
+                        逐个生成（不推荐）
+                    </button>
+                    <button onclick="generateFullPage(${pageIdx})" class="text-sm bg-black text-white px-3 py-1 hover:bg-gray-800 transition-colors flex items-center gap-1">
+                        <span>整页生成</span>
+                        <span id="full-page-spinner-${pageIdx}" class="loading-spinner hidden" style="width:12px;height:12px;border-width:1px;"></span>
+                    </button>
+                </div>
+            </div>
+            ${hasFullPageImage ? `
+            <div class="mb-6 border-2 border-black p-1">
+                <div class="text-sm text-gray-600 mb-2">✅ 整页漫画</div>
+                <img src="${hasFullPageImage}" class="w-full cursor-pointer" onclick="openModal('${hasFullPageImage}')">
+            </div>
+            ` : ''}
+            <div class="text-xs text-gray-500 mb-3">
+                本页出场角色: ${allSelectedChars.length > 0 ? allSelectedChars.map(cIdx => characters[cIdx]?.name || cIdx).join(', ') : '（未选择角色）'}
             </div>
             <div class="grid md:grid-cols-2 gap-4">
                 ${page.segments.map((seg, segIdx) => {
@@ -307,7 +351,7 @@ function renderSegments() {
                 }).join('')}
             </div>
         </div>
-    `).join('');
+    `}).join('');
 }
 
 function updateSegment(pageIdx, segIdx, field, value) {
@@ -328,8 +372,8 @@ function toggleCharacter(pageIdx, segIdx, charIdx) {
     renderSegments();
 }
 
-async function generateSingleImage(pageIdx, segIdx) {
-    if (isGenerating) {
+async function generateSingleImage(pageIdx, segIdx, skipLock = false) {
+    if (!skipLock && isGenerating) {
         showToast('请等待当前生成完成', 'error');
         return;
     }
@@ -351,11 +395,13 @@ async function generateSingleImage(pageIdx, segIdx) {
         image_url: characters[charIdx].image_url || null
     })).filter(c => c.image_url);
 
-    isGenerating = true;
+    if (!skipLock) isGenerating = true;
     const btn = document.querySelector(`#segment-${pageIdx}-${segIdx} button`);
-    const originalText = btn.innerHTML;
-    btn.innerHTML = '<span class="loading-spinner" style="width:16px;height:16px;border-width:2px;"></span>';
-    btn.disabled = true;
+    const originalText = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.innerHTML = '<span class="loading-spinner" style="width:16px;height:16px;border-width:2px;"></span>';
+        btn.disabled = true;
+    }
 
     try {
         const response = await fetch('/api/generate-image', {
@@ -383,9 +429,11 @@ async function generateSingleImage(pageIdx, segIdx) {
     } catch (e) {
         showToast('请求失败: ' + e.message, 'error');
     } finally {
-        isGenerating = false;
-        btn.innerHTML = originalText;
-        btn.disabled = false;
+        if (!skipLock) isGenerating = false;
+        if (btn) {
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        }
     }
 }
 
@@ -398,6 +446,91 @@ async function generatePageImages(pageIdx) {
     showToast(`第 ${pageIdx + 1} 页生成完成`, 'success');
 }
 
+async function generateFullPage(pageIdx, skipLock = false) {
+    if (!skipLock && isGenerating) {
+        showToast('请等待当前生成完成', 'error');
+        return;
+    }
+
+    const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
+    if (!config.img_api_url) {
+        showToast('请先配置图像生成API', 'error');
+        switchTab('config');
+        return;
+    }
+
+    if (!skipLock) isGenerating = true;
+    const spinner = document.getElementById(`full-page-spinner-${pageIdx}`);
+    if (spinner) spinner.classList.remove('hidden');
+
+    const page = currentSegments.pages[pageIdx];
+
+    const characterReferences = characters
+        .filter(char => char.image_url)
+        .map(char => ({
+            name: char.name,
+            description: char.description,
+            image_url: char.image_url
+        }));
+
+    try {
+        const response = await fetch('/api/generate-page', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                page: page,
+                page_num: page.page_number,
+                api_url: config.img_api_url,
+                api_key: config.img_api_key,
+                model: config.img_model,
+                negative_prompt: config.negative_prompt,
+                character_references: characterReferences
+            })
+        });
+
+        const result = await response.json();
+        if (result.success) {
+            fullPageImages[pageIdx] = result.image_url;
+            renderSegments();
+            renderGallery();
+            showToast(`第 ${page.page_number} 页整页生成成功`, 'success');
+        } else {
+            showToast(result.error || '生成失败', 'error');
+        }
+    } catch (e) {
+        showToast('请求失败: ' + e.message, 'error');
+    } finally {
+        if (!skipLock) isGenerating = false;
+        if (spinner) spinner.classList.add('hidden');
+    }
+}
+
+async function generateAllFullPages() {
+    if (isGenerating) {
+        showToast('请等待当前生成完成', 'error');
+        return;
+    }
+
+    const spinner = document.getElementById('batch-full-spinner');
+    spinner.classList.remove('hidden');
+    isGenerating = true;
+
+    const pagesToGenerate = [];
+    for (let p = 0; p < currentSegments.pages.length; p++) {
+        if (!fullPageImages[p]) {
+            pagesToGenerate.push(p);
+        }
+    }
+
+    const tasks = pagesToGenerate.map(p => () => generateFullPage(p, true).then(() => new Promise(r => setTimeout(r, 500))));
+    await runWithConcurrency(tasks, CONCURRENT_LIMIT);
+
+    isGenerating = false;
+    spinner.classList.add('hidden');
+    showToast('批量整页生成完成', 'success');
+    switchTab('gallery');
+}
+
 async function generateAllImages() {
     if (isGenerating) {
         showToast('请等待当前生成完成', 'error');
@@ -406,62 +539,106 @@ async function generateAllImages() {
 
     const spinner = document.getElementById('batch-spinner');
     spinner.classList.remove('hidden');
+    isGenerating = true;
 
+    const tasks = [];
     for (let p = 0; p < currentSegments.pages.length; p++) {
         for (let s = 0; s < currentSegments.pages[p].segments.length; s++) {
             const key = `${p}-${s}`;
             if (!generatedImages[key]) {
-                await generateSingleImage(p, s);
-                await new Promise(r => setTimeout(r, 800));
+                const pageIdx = p, segIdx = s;
+                tasks.push(() => generateSingleImage(pageIdx, segIdx, true).then(() => new Promise(r => setTimeout(r, 300))));
             }
         }
     }
 
+    await runWithConcurrency(tasks, CONCURRENT_LIMIT);
+
+    isGenerating = false;
     spinner.classList.add('hidden');
-    showToast('批量生成完成', 'success');
+    showToast('批量逐个生成完成', 'success');
     switchTab('gallery');
 }
 
 function renderGallery() {
     const container = document.getElementById('gallery-container');
-    const hasAny = Object.keys(generatedImages).length > 0;
+    
+    const hasFullPages = Object.keys(fullPageImages).length > 0;
+    const hasIndividual = Object.keys(generatedImages).length > 0;
 
-    if (!hasAny) {
+    if (!hasFullPages && !hasIndividual) {
         container.innerHTML = `
             <div class="text-center py-20 text-gray-400">
                 <div class="text-6xl mb-4">🎨</div>
-                <p>请先生成分镜图片</p>
+                <p>请先生成漫画图片</p>
             </div>`;
         return;
     }
 
-    container.innerHTML = currentSegments.pages.map((page, pageIdx) => {
-        const pageHasImages = page.segments.some((_, segIdx) => generatedImages[`${pageIdx}-${segIdx}`]);
-        if (!pageHasImages) return '';
+    let html = '';
 
-        return `
-        <div class="comic-page p-6">
-            <h3 class="text-lg font-bold mb-4 text-center border-b-2 border-black pb-2">第 ${page.page_number} 页</h3>
-            <div class="grid grid-cols-2 gap-3">
-                ${page.segments.map((seg, segIdx) => {
-                    const key = `${pageIdx}-${segIdx}`;
-                    const img = generatedImages[key];
+    if (hasFullPages) {
+        html += `
+        <div class="mb-8">
+            <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                <span class="bg-black text-white px-2 py-1 text-sm">✓ 整页生成</span>
+            </h2>
+            <div class="space-y-6">
+                ${currentSegments.pages.map((page, pageIdx) => {
+                    const img = fullPageImages[pageIdx];
                     if (!img) return '';
                     return `
-                    <div class="border-2 border-black relative group">
-                        <img src="${img}" class="w-full h-64 object-cover cursor-pointer" onclick="openModal('${img}')">
-                        ${seg.dialogue ? `
-                        <div class="absolute bottom-0 left-0 right-0 bg-white bg-opacity-95 border-t-2 border-black p-2">
-                            <p class="text-sm font-medium">${seg.dialogue}</p>
+                    <div class="comic-page p-4">
+                        <h3 class="text-lg font-bold mb-3 text-center border-b-2 border-black pb-2">第 ${page.page_number} 页</h3>
+                        <div class="border-2 border-black">
+                            <img src="${img}" class="w-full cursor-pointer" onclick="openModal('${img}')">
                         </div>
-                        ` : ''}
                     </div>
                     `;
                 }).join('')}
             </div>
-        </div>
-        `;
-    }).join('');
+        </div>`;
+    }
+
+    if (hasIndividual) {
+        html += `
+        <div>
+            <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                <span class="bg-gray-700 text-white px-2 py-1 text-sm">单个分镜</span>
+            </h2>
+            <div class="space-y-6">
+                ${currentSegments.pages.map((page, pageIdx) => {
+                    const pageHasImages = page.segments.some((_, segIdx) => generatedImages[`${pageIdx}-${segIdx}`]);
+                    if (!pageHasImages) return '';
+
+                    return `
+                    <div class="comic-page p-6">
+                        <h3 class="text-lg font-bold mb-4 text-center border-b-2 border-black pb-2">第 ${page.page_number} 页</h3>
+                        <div class="grid grid-cols-2 gap-3">
+                            ${page.segments.map((seg, segIdx) => {
+                                const key = `${pageIdx}-${segIdx}`;
+                                const img = generatedImages[key];
+                                if (!img) return '';
+                                return `
+                                <div class="border-2 border-black relative group">
+                                    <img src="${img}" class="w-full h-64 object-cover cursor-pointer" onclick="openModal('${img}')">
+                                    ${seg.dialogue ? `
+                                    <div class="absolute bottom-0 left-0 right-0 bg-white bg-opacity-95 border-t-2 border-black p-2">
+                                        <p class="text-sm font-medium">${seg.dialogue}</p>
+                                    </div>
+                                    ` : ''}
+                                </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                    `;
+                }).join('')}
+            </div>
+        </div>`;
+    }
+
+    container.innerHTML = html;
 }
 
 function viewImage(key) {
@@ -499,17 +676,66 @@ function exportScript() {
     showToast('脚本已导出', 'success');
 }
 
-function downloadAll() {
-    Object.values(generatedImages).forEach((url, idx) => {
-        if (url.startsWith('http')) {
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `manga_${idx + 1}.png`;
-            a.target = '_blank';
-            a.click();
+async function downloadAll() {
+    const allImages = [];
+    
+    Object.entries(fullPageImages).forEach(([pageIdx, url]) => {
+        if (url) {
+            allImages.push({ url, filename: `comic_page_full_${parseInt(pageIdx) + 1}.png`, type: '整页' });
         }
     });
-    showToast('开始下载', 'success');
+    
+    Object.entries(generatedImages).forEach(([key, url]) => {
+        if (url) {
+            const [pageIdx, segIdx] = key.split('-');
+            allImages.push({ url, filename: `manga_p${parseInt(pageIdx) + 1}_s${parseInt(segIdx) + 1}.png`, type: '分镜' });
+        }
+    });
+    
+    if (allImages.length === 0) {
+        showToast('没有可下载的图片', 'error');
+        return;
+    }
+    
+    showToast(`开始下载 ${allImages.length} 张图片...`, 'info');
+    
+    let successCount = 0;
+    let failCount = 0;
+    
+    for (const img of allImages) {
+        try {
+            const response = await fetch('/api/download', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: img.url, filename: img.filename })
+            });
+            
+            if (response.ok) {
+                const blob = await response.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = img.filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(blobUrl);
+                successCount++;
+                await new Promise(r => setTimeout(r, 300));
+            } else {
+                failCount++;
+            }
+        } catch (e) {
+            console.error('Download error:', e);
+            failCount++;
+        }
+    }
+    
+    if (failCount === 0) {
+        showToast(`成功下载 ${successCount} 张图片`, 'success');
+    } else {
+        showToast(`下载完成: ${successCount} 成功, ${failCount} 失败`, 'info');
+    }
 }
 
 async function analyzeCharacters() {
