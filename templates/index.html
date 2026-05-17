@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>小说转漫画生成器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Noto Sans SC', sans-serif; }
+        .manga-border { border: 2px solid #1a1a1a; }
+        .panel-shadow { box-shadow: 4px 4px 0px #1a1a1a; }
+        .btn-primary {
+            background: #1a1a1a;
+            color: white;
+            transition: all 0.2s;
+        }
+        .btn-primary:hover {
+            transform: translate(-2px, -2px);
+            box-shadow: 4px 4px 0px #666;
+        }
+        .loading-spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #1a1a1a;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .fade-in { animation: fadeIn 0.5s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .comic-page {
+            background: white;
+            border: 3px solid #1a1a1a;
+            box-shadow: 8px 8px 0px rgba(0,0,0,0.15);
+        }
+        .segment-box {
+            border: 2px solid #333;
+            background: #fafafa;
+            transition: all 0.3s;
+        }
+        .segment-box:hover { border-color: #1a1a1a; box-shadow: 3px 3px 0px #1a1a1a; }
+        .tab-active { border-bottom: 3px solid #1a1a1a; font-weight: 700; }
+        .tab-inactive { border-bottom: 3px solid transparent; color: #666; }
+        .tab-inactive:hover { border-bottom: 3px solid #ccc; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #888; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #555; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="max-w-7xl mx-auto p-4">
+        <!-- Header -->
+        <header class="mb-6">
+            <div class="flex items-center gap-3 mb-2">
+                <div class="w-10 h-10 bg-black text-white flex items-center justify-center text-xl font-bold manga-border">漫</div>
+                <h1 class="text-3xl font-bold tracking-tight">小说转漫画生成器</h1>
+            </div>
+            <p class="text-gray-600 text-sm">使用大语言模型将小说智能分镜，调用API生成黑白漫画风格图片</p>
+        </header>
+
+        <!-- Tabs -->
+        <div class="flex gap-6 mb-6 border-b border-gray-300">
+            <button onclick="switchTab('config')" id="tab-config" class="tab-active pb-2 px-1 text-lg transition-all">API配置</button>
+            <button onclick="switchTab('input')" id="tab-input" class="tab-inactive pb-2 px-1 text-lg transition-all">小说输入</button>
+            <button onclick="switchTab('characters')" id="tab-characters" class="tab-inactive pb-2 px-1 text-lg transition-all">角色管理</button>
+            <button onclick="switchTab('segments')" id="tab-segments" class="tab-inactive pb-2 px-1 text-lg transition-all">分镜管理</button>
+            <button onclick="switchTab('gallery')" id="tab-gallery" class="tab-inactive pb-2 px-1 text-lg transition-all">漫画预览</button>
+        </div>
+
+        <!-- Config Tab -->
+        <div id="panel-config" class="fade-in">
+            <div class="bg-white p-6 manga-border panel-shadow mb-6">
+                <h2 class="text-xl font-bold mb-4">快速预设</h2>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div onclick="applyPreset('volc')" class="cursor-pointer border-2 border-gray-300 hover:border-black p-4 hover:bg-gray-50 transition-all panel-shadow">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 bg-black text-white flex items-center justify-center font-bold">🌋</div>
+                            <div>
+                                <div class="font-bold">火山引擎 v3</div>
+                                <div class="text-xs text-gray-500">标准 API 接口</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div onclick="applyPreset('volc-coding')" class="cursor-pointer border-2 border-gray-300 hover:border-black p-4 hover:bg-gray-50 transition-all panel-shadow">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 bg-black text-white flex items-center justify-center font-bold">💻</div>
+                            <div>
+                                <div class="font-bold">火山引擎 Coding</div>
+                                <div class="text-xs text-gray-500">Coding API 接口</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div onclick="applyPreset('openai')" class="cursor-pointer border-2 border-gray-300 hover:border-black p-4 hover:bg-gray-50 transition-all panel-shadow">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 bg-black text-white flex items-center justify-center font-bold">🟢</div>
+                            <div>
+                                <div class="font-bold">OpenAI 预设</div>
+                                <div class="text-xs text-gray-500">OpenAI 兼容接口</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-4 pt-4 border-t border-gray-200 flex justify-end">
+                    <button onclick="clearConfig()" class="border-2 border-black px-4 py-2 font-medium hover:bg-gray-100 transition-colors">清空配置</button>
+                </div>
+            </div>
+            
+            <div class="grid md:grid-cols-2 gap-6">
+                <div class="bg-white p-6 manga-border panel-shadow">
+                    <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                        <span class="w-6 h-6 bg-black text-white text-xs flex items-center justify-center rounded-full">1</span>
+                        大语言模型配置（文本分镜）
+                    </h2>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-1">API接口地址</label>
+                            <input type="text" id="llm-api-url" placeholder="https://api.openai.com/v1/chat/completions" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">API Key</label>
+                            <input type="password" id="llm-api-key" placeholder="sk-..." class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">模型名称</label>
+                            <input type="text" id="llm-model" placeholder="gpt-4 / gpt-3.5-turbo / 自定义" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                        </div>
+                        <div class="pt-2">
+                            <button onclick="testLLM()" id="test-llm-btn" class="w-full btn-primary flex items-center justify-center gap-2">
+                                <span>测试 LLM API</span>
+                                <span id="test-llm-spinner" class="loading-spinner hidden"></span>
+                            </button>
+                            <div id="test-llm-result" class="mt-3 text-sm"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white p-6 manga-border panel-shadow">
+                    <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                        <span class="w-6 h-6 bg-black text-white text-xs flex items-center justify-center rounded-full">2</span>
+                        图像生成配置（漫画生成）
+                    </h2>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-1">API接口地址</label>
+                            <input type="text" id="img-api-url" placeholder="https://api.stability.ai/v1/generation/..." class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">API Key / SK</label>
+                            <input type="password" id="img-api-key" placeholder="your-api-key" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">模型名称（可选）</label>
+                            <input type="text" id="img-model" placeholder="stable-diffusion-xl / 自定义" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                        </div>
+                        <div class="pt-2">
+                            <button onclick="testImage()" id="test-image-btn" class="w-full btn-primary flex items-center justify-center gap-2">
+                                <span>测试 Image API</span>
+                                <span id="test-image-spinner" class="loading-spinner hidden"></span>
+                            </button>
+                            <div id="test-image-result" class="mt-3 text-sm"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-white p-6 manga-border panel-shadow mt-6">
+                <h2 class="text-xl font-bold mb-4">高级设置</h2>
+                <div class="grid md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium mb-1">每页分镜数</label>
+                        <input type="number" id="segments-per-page" value="4" min="1" max="8" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">负面提示词</label>
+                        <input type="text" id="negative-prompt" value="color, blurry, low quality, distorted, ugly" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                    </div>
+                    <div class="flex items-end">
+                        <button onclick="saveConfig()" class="btn-primary px-6 py-3 font-medium w-full">保存配置</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Input Tab -->
+        <div id="panel-input" class="hidden fade-in">
+            <div class="bg-white p-6 manga-border panel-shadow">
+                <h2 class="text-xl font-bold mb-4">输入小说内容</h2>
+                <textarea id="novel-text" rows="16" placeholder="请在此处粘贴小说内容...&#10;&#10;支持粘贴整章或整篇小说，系统会自动分页分段。&#10;&#10;建议每次处理3000-8000字，以获得最佳分镜效果。" class="w-full p-4 border-2 border-gray-300 focus:border-black outline-none transition-colors resize-none font-mono text-sm leading-relaxed"></textarea>
+                <div class="flex justify-between items-center mt-4">
+                    <div class="text-sm text-gray-500">
+                        当前字数：<span id="char-count" class="font-bold text-black">0</span>
+                    </div>
+                    <button onclick="startSegment()" class="btn-primary px-8 py-3 font-medium text-lg flex items-center gap-2">
+                        <span>开始智能分镜</span>
+                        <span id="segment-spinner" class="loading-spinner hidden"></span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Characters Tab -->
+        <div id="panel-characters" class="hidden fade-in">
+            <div class="bg-white p-6 manga-border panel-shadow mb-6">
+                <h2 class="text-xl font-bold mb-4">角色分析</h2>
+                <div class="flex gap-2">
+                    <button onclick="analyzeCharacters()" class="btn-primary px-6 py-2 font-medium flex items-center gap-2">
+                        <span>从小说分析角色</span>
+                        <span id="analyze-spinner" class="loading-spinner hidden"></span>
+                    </button>
+                </div>
+            </div>
+
+            <div id="characters-container" class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div class="text-center py-20 text-gray-400 col-span-full">
+                    <div class="text-6xl mb-4">🎭</div>
+                    <p>请先点击"从小说分析角色"或手动添加角色</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Segments Tab -->
+        <div id="panel-segments" class="hidden fade-in">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold">分镜管理</h2>
+                <div class="flex gap-2">
+                    <button onclick="generateAllImages()" class="btn-primary px-4 py-2 font-medium flex items-center gap-2">
+                        <span>批量生成图片</span>
+                        <span id="batch-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
+                    </button>
+                    <button onclick="exportScript()" class="bg-white border-2 border-black px-4 py-2 font-medium hover:bg-gray-50 transition-colors">导出脚本</button>
+                </div>
+            </div>
+            <div id="segments-container" class="space-y-6">
+                <div class="text-center py-20 text-gray-400">
+                    <div class="text-6xl mb-4">📝</div>
+                    <p>请先输入小说内容并点击"开始智能分镜"</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Gallery Tab -->
+        <div id="panel-gallery" class="hidden fade-in">
+            <div class="flex flex-wrap justify-between items-center mb-4 gap-4">
+                <h2 class="text-xl font-bold">漫画预览</h2>
+                <div class="flex gap-2">
+                    <button onclick="combineAllPages()" class="btn-primary px-4 py-2 font-medium flex items-center gap-2">
+                        <span>合并所有页面</span>
+                        <span id="combine-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
+                    </button>
+                    <button onclick="downloadAll()" class="bg-white border-2 border-black px-4 py-2 font-medium hover:bg-gray-50 transition-colors">下载全部</button>
+                </div>
+            </div>
+            <div id="combined-pages" class="mb-8 space-y-6"></div>
+            <div id="gallery-container" class="space-y-8">
+                <div class="text-center py-20 text-gray-400">
+                    <div class="text-6xl mb-4">🎨</div>
+                    <p>请先生成分镜图片</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Image Preview Modal -->
+    <div id="image-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden z-50 flex items-center justify-center p-4" onclick="closeModal()">
+        <div class="relative max-w-4xl max-h-full" onclick="event.stopPropagation()">
+            <img id="modal-image" src="" alt="预览" class="max-w-full max-h-[85vh] object-contain border-4 border-white">
+            <button onclick="closeModal()" class="absolute -top-10 right-0 text-white text-2xl hover:text-gray-300">✕</button>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="fixed bottom-6 right-6 bg-black text-white px-6 py-3 rounded shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 z-50"></div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
