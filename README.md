@@ -173,7 +173,11 @@ A: 这是正常的，请确保 API 连接稳定
 
 ## 许可证
 
+<<<<<<< HEAD
 [MIT License](LICENSE) - Copyright (c) 2026
+=======
+MIT License
+>>>>>>> 49b90ccdee6f6a92103e7925ea924b5cbb5ed214
 
 ## 贡献
 
