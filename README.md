@@ -137,12 +137,6 @@ text2comic/
 | `/api/save-config` | POST | 保存 API 配置 |
 | `/api/load-config` | GET | 加载 API 配置 |
 
-## 注意事项
-
-### 安全提示
-- API Key 会保存在本地，请不要分享 `config.json` 文件
-- 生成的图片会保存在 `static/output/` 目录，不会上传到任何服务器
-
 ### 使用建议
 - 每次处理小说长度建议控制在 3000-8000 字
 - 生成分镜时勾选出场角色，可以让角色更一致
