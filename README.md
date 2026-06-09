@@ -1,182 +1,101 @@
-# 小说转漫画生成器
+# Text2Comic — 小说转漫画生成器
 
-一个强大的Web应用，使用大语言模型将小说内容转换为黑白漫画分镜。
+将小说内容自动转换为漫画分镜脚本，并通过 AI 图像生成 API 绘制黑白漫画风格图片。
 
 ## 功能特性
 
-### ✨ 核心功能
-- **智能分镜** - 自动将小说内容分解为漫画分镜
-- **黑白漫画风格** - 自动生成日式黑白漫画风格图像
-- **角色管理** - 自动提取角色并生成角色人设图
-- **分镜合并** - 将一页分镜合并为完整的漫画页面
+- 📝 **智能分镜** — 调用 LLM API 将小说文本自动拆分为漫画分镜脚本
+- 🎭 **角色管理** — 自动提取小说中的角色及其外貌描述，支持生成角色人设图
+- 🎨 **单图生成** — 为每个分镜单独生成漫画图片
+- 📄 **整页生成** — 支持参考角色人设图和上一页漫画，一次性生成完整一页漫画
+- 🔗 **批量生成** — 支持串行批量生成，每页自动参考上一页保持风格一致
+- 🖼️ **漫画预览** — 分镜管理和漫画画廊预览
+- ⬇️ **一键下载** — 支持批量下载所有生成的图片
 
-### 🎯 特色功能
-- **角色参考图** - 生成图像时可选择出场角色，保持角色一致性
-- **API 预设** - 支持火山引擎、OpenAI等多种API
-- **配置灵活** - 支持自定义API接口地址、模型名称
-- **分镜编辑** - 支持编辑场景描述、对话、镜头类型
+## 快速开始
 
-## 技术栈
-
-- **后端**: Flask + Python
-- **前端**: HTML + Tailwind CSS + 原生 JavaScript
-- **图像处理**: Pillow (Python Imaging Library)
-- **API兼容**: 支持OpenAI协议的接口
-
-## 安装说明
-
-### 1. 克隆项目
-
-```bash
-git clone <your-repo-url>
-cd text2comic
-```
-
-### 2. 安装依赖
+### 1. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 启动服务
+### 2. 配置 API
+
+在 `config.json` 中填写你的 API 信息，或启动后在 Web 界面中配置：
+
+```json
+{
+  "llm_api_url": "https://api.openai.com/v1/chat/completions",
+  "llm_api_key": "your-api-key",
+  "llm_model": "gpt-4",
+  "img_api_url": "https://api.openai.com/v1/images/generations",
+  "img_api_key": "your-api-key",
+  "img_model": "dall-e-3",
+  "segments_per_page": 4,
+  "negative_prompt": "color, blurry, low quality, distorted, ugly"
+}
+```
+
+> **兼容性**: 支持任何兼容 OpenAI SDK 格式的 API（如火山引擎豆包、DeepSeek、智谱等）。
+
+### 3. 运行
 
 ```bash
 python app.py
 ```
 
-然后在浏览器中打开 `http://localhost:2778`
+访问 http://localhost:2778 即可使用。
 
-## 使用指南
+### 4. 管理员登录
 
-### 第一步：配置 API
+默认账号密码可在 `app.py` 中通过环境变量配置：
 
-1. 打开浏览器访问 http://localhost:2778
-2. 点击 **API配置** Tab
-3. 选择一个预设（火山引擎 v3 / 火山引擎 Coding / OpenAI）
-4. 填写你的 **API Key**
-5. 填写你的 **模型名称**（接入点ID）
-6. 点击 **保存配置**
+```bash
+export ADMIN_USERNAME=admin
+export ADMIN_PASSWORD=your-password
+export FLASK_SECRET_KEY=random-secret-key
+```
 
-### 第二步：输入小说内容
-
-1. 点击 **小说输入** Tab
-2. 粘贴或输入你的小说内容
-3. 建议每次处理 3000-8000 字获得最佳效果
-
-### 第三步：分析角色（可选但推荐）
-
-1. 点击 **角色管理** Tab
-2. 点击 **从小说分析角色**
-3. 等待 LLM 分析完成
-4. 为每个角色点击 **生成人设图**
-5. 这样后续生成分镜时可以选择角色参考图，保持一致性
-
-### 第四步：智能分镜
-
-1. 点击 **小说输入** Tab
-2. 点击 **开始智能分镜**
-3. 等待系统生成漫画分镜
-4. 会自动跳转到 **分镜管理** Tab
-
-### 第五步：生成分镜图像
-
-1. 在 **分镜管理** Tab 中：
-2. 可以编辑每个分镜的场景描述、对话
-3. **选择出场角色**（重要！） - 勾选该分镜中出场的角色
-4. 点击 **生成图片** 单个生成，或 **批量生成图片** 全部生成
-
-### 第六步：合并漫画页
-
-1. 点击 **漫画预览** Tab
-2. 点击 **合并所有页面**
-3. 等待系统将每页的分镜合并为完整的漫画页
-4. 合并后的页面会显示在顶部
-
-## 配置说明
-
-### API 预设
-
-| 预设 | 说明 | 推荐场景 |
-|------|------|----------|
-| 火山引擎 v3 | 火山引擎标准 API | 文本分镜推荐 |
-| 火山引擎 Coding | 火山引擎 Coding API | 代码处理用 |
-| OpenAI 预设 | OpenAI 兼容接口 | 海外 API 使用 |
-
-### 高级设置
-
-- **每页分镜数** - 默认 4 个，可调整为 2-8 个
-- **负面提示词** - 用来避免不想要的风格（如彩色、模糊等）
+默认值（仅本地测试用）：
+- 用户名: `admin`
+- 密码: `changeme`
 
 ## 项目结构
 
 ```
 text2comic/
-├── app.py              # Flask 后端
-├── requirements.txt    # 依赖库
-├── config.json         # API 配置 (git ignored)
-├── README.md          # 项目说明
-├── .gitignore         # Git 忽略文件
+├── app.py                    # Flask 后端
+├── config.json               # API 配置（含敏感信息，已 gitignore）
+├── requirements.txt          # Python 依赖
 ├── templates/
-│   └── index.html     # 前端页面
+│   ├── index.html            # 主界面
+│   └── login.html            # 登录页
 ├── static/
-│   ├── app.js         # 前端交互逻辑
-│   └── output/        # 生成的图片 (git ignored)
+│   ├── app.js                # 前端逻辑
+│   ├── output/               # 生成的图片输出目录
+│   └── cache/                # 参考图缓存目录
+└── .gitignore
 ```
 
-## API 接口说明
+## 技术栈
 
-### 后端接口
+- **后端**: Flask (Python)
+- **前端**: Tailwind CSS, Vanilla JS
+- **API**: OpenAI SDK 兼容格式（兼容多种 LLM 和图像生成 API）
+- **图片处理**: Pillow
 
-| 接口 | 方法 | 说明 |
-|------|------|------|
-| `/api/segment` | POST | 小说文本转分镜 |
-| `/api/generate-image` | POST | 生成单张漫画 |
-| `/api/generate-characters` | POST | 分析小说角色 |
-| `/api/generate-character-image` | POST | 生成角色人设图 |
-| `/api/combine-page` | POST | 合并分镜为页面 |
-| `/api/save-config` | POST | 保存 API 配置 |
-| `/api/load-config` | GET | 加载 API 配置 |
+## 使用流程
 
-### 使用建议
-- 每次处理小说长度建议控制在 3000-8000 字
-- 生成分镜时勾选出场角色，可以让角色更一致
-- 图片生成时间取决于 API 响应速度，请耐心等待
-- 如果分镜效果不理想，可以在分镜管理中手动编辑
+1. **配置 API** — 填写 LLM 和图像生成的 API 地址、密钥和模型
+2. **输入小说** — 粘贴小说内容（建议 3000-8000 字）
+3. **智能分镜** — LLM 自动分析并生成分镜脚本
+4. **角色分析** — 自动提取角色，可生成人设参考图
+5. **生成漫画** — 支持逐个生成或整页生成
+6. **预览下载** — 在画廊中预览并下载
 
-### 常见问题
+## 安全说明
 
-**Q: API 测试失败怎么办？**
-A: 检查 API 地址、Key、模型名称是否正确
-
-**Q: 角色分析没有结果？**
-A: 确保小说内容足够长，有明确的角色描写
-
-**Q: 如何保持角色一致性？**
-A: 先生成角色人设图，然后在分镜中勾选对应角色
-
-**Q: 图片生成很慢？**
-A: 这是正常的，请确保 API 连接稳定
-
-## 开发计划
-
-- [ ] 支持更多图像 API（Stability AI、Midjourney等）
-- [ ] 支持上传自定义角色参考图
-- [ ] 支持漫画导出为 PDF
-- [ ] 支持批量处理长小说
-- [ ] 支持自定义分镜模板
-
-## 许可证
-
-<<<<<<< HEAD
-[MIT License](LICENSE) - Copyright (c) 2026
-=======
-MIT License
->>>>>>> 49b90ccdee6f6a92103e7925ea924b5cbb5ed214
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
----
-
-祝使用愉快！🎉
+- `config.json` 包含 API 密钥，已被加入 `.gitignore`
+- 生产环境建议通过环境变量配置管理员凭据和 Flask secret key
+- 登录会话基于服务端 session，请确保 secret_key 的安全性

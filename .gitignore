@@ -45,3 +45,11 @@ config.json
 static/output/*.png
 static/output/*.jpg
 static/output/*.jpeg
+
+# Image Cache
+static/cache/
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini

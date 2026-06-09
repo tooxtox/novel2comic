@@ -1,10 +1,10 @@
 {
-  "llm_api_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-  "llm_api_key": "",
-  "llm_model": "deepseek-v3-2-251201",
-  "img_api_url": "https://ark.cn-beijing.volces.com/api/v3/images/generations",
-  "img_api_key": "",
-  "img_model": "doubao-seedream-4-5-251128",
-  "segments_per_page": 6,
+  "llm_api_url": "https://api.openai.com/v1/chat/completions",
+  "llm_api_key": "YOUR_API_KEY_HERE",
+  "llm_model": "gpt-4",
+  "img_api_url": "https://api.openai.com/v1/images/generations",
+  "img_api_key": "YOUR_API_KEY_HERE",
+  "img_model": "dall-e-3",
+  "segments_per_page": 4,
   "negative_prompt": "color, blurry, low quality, distorted, ugly"
 }

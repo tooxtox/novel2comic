@@ -1,25 +1,183 @@
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
 from flask_cors import CORS
+from functools import wraps
 import requests
 import json
 import os
 import re
-from datetime import datetime
+import time
+import hashlib
+from datetime import datetime, timedelta
 from io import BytesIO
 import base64
 from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
-CORS(app)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'change-this-to-a-random-secret-key')
+CORS(app, supports_credentials=True)
+
+# Admin credentials — override via environment variables for production
+ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'changeme')
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), 'static', 'output')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Reference image cache directory
+CACHE_DIR = os.path.join(os.path.dirname(__file__), 'static', 'cache')
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# Cache validity period (7 days)
+CACHE_EXPIRE_DAYS = 7
+
+
+def clean_cache():
+    """Clean cache files older than 7 days"""
+    try:
+        now = time.time()
+        expire_seconds = CACHE_EXPIRE_DAYS * 24 * 3600
+        for filename in os.listdir(CACHE_DIR):
+            filepath = os.path.join(CACHE_DIR, filename)
+            if os.path.isfile(filepath):
+                file_mtime = os.path.getmtime(filepath)
+                if now - file_mtime > expire_seconds:
+                    os.remove(filepath)
+                    print(f"Cleaned expired cache: {filename}")
+    except Exception as e:
+        print(f"Cache cleanup error: {e}")
+
+
+def cache_reference_image(url, name=""):
+    """Download reference image to cache directory, return local URL path"""
+    if not url:
+        return None
+
+    try:
+        # Use URL hash as filename to avoid duplicate downloads
+        url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+
+        # Check if cache already exists
+        for ext in ['.png', '.jpg', '.jpeg', '.webp']:
+            cache_path = os.path.join(CACHE_DIR, f"{url_hash}{ext}")
+            if os.path.exists(cache_path):
+                # Update access time
+                os.utime(cache_path, None)
+                return f"/static/cache/{url_hash}{ext}"
+
+        # Download image
+        img_data = None
+        if url.startswith('http'):
+            resp = requests.get(url, timeout=30)
+            if resp.status_code == 200:
+                img_data = resp.content
+        elif url.startswith('/static'):
+            local_path = os.path.join(os.path.dirname(__file__), url.lstrip('/'))
+            if os.path.exists(local_path):
+                with open(local_path, 'rb') as f:
+                    img_data = f.read()
+        elif url.startswith('data:image'):
+            # base64 format
+            parts = url.split(',')
+            if len(parts) == 2:
+                header = parts[0]
+                if 'png' in header:
+                    ext = '.png'
+                elif 'webp' in header:
+                    ext = '.webp'
+                else:
+                    ext = '.jpg'
+                img_data = base64.b64decode(parts[1])
+
+        if img_data:
+            # Determine format
+            try:
+                img = Image.open(BytesIO(img_data))
+                ext = '.' + (img.format or 'PNG').lower()
+                if ext == '.jpeg':
+                    ext = '.jpg'
+            except:
+                ext = '.png'
+
+            cache_path = os.path.join(CACHE_DIR, f"{url_hash}{ext}")
+            with open(cache_path, 'wb') as f:
+                f.write(img_data)
+
+            print(f"Cached reference image for '{name}': /static/cache/{url_hash}{ext}")
+            return f"/static/cache/{url_hash}{ext}"
+
+    except Exception as e:
+        print(f"Cache reference image error for '{name}': {e}")
+
+    return None
+
+
+def get_cached_image_base64(cache_url):
+    """Read cached image and convert to base64"""
+    if not cache_url:
+        return None
+    try:
+        local_path = os.path.join(os.path.dirname(__file__), cache_url.lstrip('/'))
+        if os.path.exists(local_path):
+            with open(local_path, 'rb') as f:
+                img_data = f.read()
+            img_b64 = base64.b64encode(img_data).decode('utf-8')
+            ext = os.path.splitext(local_path)[1].lower()
+            if ext == '.png':
+                mime = 'image/png'
+            elif ext == '.webp':
+                mime = 'image/webp'
+            else:
+                mime = 'image/jpeg'
+            return f"data:{mime};base64,{img_b64}"
+    except Exception as e:
+        print(f"Read cached image error: {e}")
+    return None
+
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            return jsonify({'error': '请先登录', 'need_login': True}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+
 @app.route('/')
 def index():
+    if not session.get('logged_in'):
+        return render_template('login.html')
     return render_template('index.html')
 
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.json
+    username = data.get('username', '')
+    password = data.get('password', '')
+
+    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        session['logged_in'] = True
+        session['username'] = username
+        return jsonify({'success': True, 'message': '登录成功'})
+    return jsonify({'success': False, 'error': '用户名或密码错误'}), 401
+
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    session.clear()
+    return jsonify({'success': True, 'message': '已退出登录'})
+
+
+@app.route('/api/check-auth', methods=['GET'])
+def check_auth():
+    if session.get('logged_in'):
+        return jsonify({'logged_in': True, 'username': session.get('username')})
+    return jsonify({'logged_in': False})
+
+
 @app.route('/api/segment', methods=['POST'])
+@login_required
 def segment_novel():
     data = request.json
     text = data.get('text', '')
@@ -56,13 +214,7 @@ def segment_novel():
         }
 
         print(f"Calling LLM API: {api_url}")
-        print(f"Headers: {dict(headers)}")
-        print(f"Payload: {json.dumps(payload, ensure_ascii=False)}")
-        
         response = requests.post(api_url, headers=headers, json=payload, timeout=300)
-        print(f"Response status: {response.status_code}")
-        print(f"Response headers: {dict(response.headers)}")
-        print(f"Response text: {response.text}")
         response.raise_for_status()
         result = response.json()
 
@@ -127,7 +279,7 @@ def segment_novel():
             for page in parsed.get('pages', []):
                 for seg in page.get('segments', []):
                     if 'style_prompt' not in seg:
-                        seg['style_prompt'] = 'black and white manga style, detailed ink drawing'
+                        seg['style_prompt'] = 'ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga, pure monochrome, detailed ink drawing'
             return jsonify({'success': True, 'data': parsed})
         except json.JSONDecodeError as e1:
             print(f"First JSON parse error: {e1}")
@@ -137,7 +289,7 @@ def segment_novel():
                 for page in parsed.get('pages', []):
                     for seg in page.get('segments', []):
                         if 'style_prompt' not in seg:
-                            seg['style_prompt'] = 'black and white manga style, detailed ink drawing'
+                            seg['style_prompt'] = 'ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga, pure monochrome, detailed ink drawing'
                 return jsonify({'success': True, 'data': parsed})
             except json.JSONDecodeError as e2:
                 print(f"Second JSON parse error: {e2}")
@@ -149,7 +301,7 @@ def segment_novel():
                         for page in parsed.get('pages', []):
                             for seg in page.get('segments', []):
                                 if 'style_prompt' not in seg:
-                                    seg['style_prompt'] = 'black and white manga style, detailed ink drawing'
+                                    seg['style_prompt'] = 'ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga, pure monochrome, detailed ink drawing'
                         return jsonify({'success': True, 'data': parsed})
                     except json.JSONDecodeError as e3:
                         print(f"Third JSON parse error: {e3}")
@@ -162,87 +314,164 @@ def segment_novel():
         return jsonify({'error': str(e)}), 500
 
 
+def call_image_api(api_url, api_key, payload):
+    """Call image generation API, compatible with OpenAI SDK format"""
+    headers = {'Content-Type': 'application/json'}
+    if api_key:
+        headers['Authorization'] = f'Bearer {api_key}'
+
+    print(f"Calling Image API: {api_url}")
+    print(f"Payload model: {payload.get('model')}, prompt length: {len(payload.get('prompt', ''))}")
+    if 'image' in payload:
+        img_val = payload['image']
+        if isinstance(img_val, list):
+            print(f"Reference images: {len(img_val)} images")
+        else:
+            print(f"Reference image: 1 image")
+
+    response = requests.post(api_url, headers=headers, json=payload, timeout=300)
+    print(f"Image API status: {response.status_code}")
+    if response.status_code != 200:
+        print(f"Image API error response: {response.text[:2000]}")
+    response.raise_for_status()
+    result = response.json()
+
+    # Extract image URL
+    image_url = None
+    if 'data' in result:
+        data_obj = result['data']
+        if isinstance(data_obj, list) and len(data_obj) > 0:
+            image_url = data_obj[0].get('url', '') or data_obj[0].get('b64_json', '')
+        elif isinstance(data_obj, dict):
+            image_url = data_obj.get('url', '') or data_obj.get('b64_json', '')
+    elif 'images' in result and len(result['images']) > 0:
+        image_url = result['images'][0]
+    elif 'image' in result:
+        image_url = result['image']
+    elif 'output' in result:
+        image_url = result['output']
+    elif 'b64_json' in result:
+        image_url = result['b64_json']
+
+    return image_url, result
+
+
+def save_image_result(image_url, prefix="manga"):
+    """Save image URL locally, return local path"""
+    if not image_url:
+        return None, {'error': '无法获取图片'}
+
+    if image_url.startswith('http'):
+        return image_url, None
+
+    # Save base64 data locally
+    if image_url.startswith('data:image') or len(image_url) > 1000:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"{prefix}_{timestamp}.png"
+        filepath = os.path.join(OUTPUT_DIR, filename)
+
+        if image_url.startswith('data:image'):
+            image_data = image_url.split(',')[1]
+        else:
+            image_data = image_url
+
+        with open(filepath, 'wb') as f:
+            f.write(base64.b64decode(image_data))
+
+        return f'/static/output/{filename}', None
+
+    return None, {'error': '无法获取图片'}
+
+
+def prepare_ref_images(character_references, previous_page_image=None):
+    """Prepare reference images: cache locally, return base64 list"""
+    ref_images = []
+
+    # 1. Character reference images
+    if character_references and len(character_references) > 0:
+        for char in character_references:
+            img_url = char.get('image_url')
+            name = char.get('name', '')
+            if img_url:
+                cache_url = cache_reference_image(img_url, name)
+                if cache_url:
+                    img_b64 = get_cached_image_base64(cache_url)
+                    if img_b64:
+                        ref_images.append(img_b64)
+                        print(f"Loaded cached reference image for character '{name}'")
+                    else:
+                        print(f"Failed to read cached image for '{name}'")
+                else:
+                    print(f"Failed to cache reference image for '{name}'")
+
+    # 2. Previous page comic
+    if previous_page_image:
+        cache_url = cache_reference_image(previous_page_image, "previous_page")
+        if cache_url:
+            img_b64 = get_cached_image_base64(cache_url)
+            if img_b64:
+                ref_images.append(img_b64)
+                print(f"Loaded cached previous page image")
+            else:
+                print(f"Failed to read cached previous page image")
+
+    return ref_images
+
+
 @app.route('/api/generate-image', methods=['POST'])
+@login_required
 def generate_image():
     data = request.json
     prompt = data.get('prompt', '')
     api_url = data.get('api_url', '')
     api_key = data.get('api_key', '')
     model = data.get('model', '')
-    negative_prompt = data.get('negative_prompt', 'color, blurry, low quality, distorted')
+    negative_prompt = data.get('negative_prompt', 'color, colorful, vibrant, chromatic, saturated, blurry, low quality, distorted, watermark, signature, text overlay, logo')
     character_references = data.get('character_references', [])
 
     if not prompt or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
 
-    manga_prompt = f"black and white manga style, detailed ink drawing, dramatic shadows, {prompt}"
-    
+    manga_prompt = f"ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga, pure monochrome, grayscale only. detailed ink drawing, high contrast, dramatic shadows, cross-hatching, {prompt}"
+
+    # Build character reference text
     if character_references and len(character_references) > 0:
-        character_descriptions = []
+        char_sheet = []
         for char in character_references:
-            char_desc = f"{char['name']}: {char['description']}"
-            character_descriptions.append(char_desc)
-        manga_prompt += f", featuring: {'; '.join(character_descriptions)}"
-        print(f"With character references: {character_descriptions}")
+            name = char.get('name', '')
+            desc = char.get('description', '')
+            char_sheet.append(f"[CHARACTER: {name}]\nAPPEARANCE: {desc}\nThis character MUST appear exactly as described above.")
+
+        char_section = "\n\n=== CHARACTER REFERENCE SHEET ===\n" + "\n\n".join(char_sheet) + "\n\nIMPORTANT: All characters' appearance MUST strictly follow the descriptions above."
+        manga_prompt += char_section
+
+    # Prepare reference images
+    ref_images = prepare_ref_images(character_references)
 
     try:
-        headers = {'Content-Type': 'application/json'}
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
-
         payload = {
             'model': model or 'doubao-seedream-4-5-251128',
             'prompt': manga_prompt,
-            'negative_prompt': negative_prompt,
-            'width': 512,
-            'height': 768,
-            'seed': -1,
-            'steps': 30,
-            'cfg_scale': 7
+            'size': '2K',
+            'response_format': 'url',
+            'watermark': False,
         }
 
-        print(f"Calling Image API: {api_url}")
-        response = requests.post(api_url, headers=headers, json=payload, timeout=300)
-        print(f"Image API status: {response.status_code}")
-        print(f"Image API response: {response.text}")
-        response.raise_for_status()
-        result = response.json()
-
-        image_url = None
-        if 'images' in result and len(result['images']) > 0:
-            image_url = result['images'][0]
-        elif 'image' in result:
-            image_url = result['image']
-        elif 'data' in result:
-            data_obj = result['data']
-            if isinstance(data_obj, list) and len(data_obj) > 0:
-                image_url = data_obj[0].get('url', '') or data_obj[0].get('b64_json', '')
-            elif isinstance(data_obj, dict):
-                image_url = data_obj.get('url', '') or data_obj.get('b64_json', '')
-        elif 'output' in result:
-            image_url = result['output']
-        elif 'b64_json' in result:
-            image_url = result['b64_json']
-
-        if image_url and image_url.startswith('http'):
-            return jsonify({'success': True, 'image_url': image_url})
-        elif image_url and (image_url.startswith('data:image') or len(image_url) > 1000):
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"manga_{timestamp}.png"
-            filepath = os.path.join(OUTPUT_DIR, filename)
-            import base64
-
-            if image_url.startswith('data:image'):
-                image_data = image_url.split(',')[1]
-                with open(filepath, 'wb') as f:
-                    f.write(base64.b64decode(image_data))
+        # Reference images via 'image' field
+        if ref_images:
+            if len(ref_images) == 1:
+                payload['image'] = ref_images[0]
             else:
-                with open(filepath, 'wb') as f:
-                    f.write(base64.b64decode(image_url))
+                payload['image'] = ref_images
+            print(f"Included {len(ref_images)} reference image(s) in API payload")
 
-            return jsonify({'success': True, 'image_url': f'/static/output/{filename}'})
+        image_url, result = call_image_api(api_url, api_key, payload)
+        local_url, error = save_image_result(image_url, "manga")
+
+        if local_url:
+            return jsonify({'success': True, 'image_url': local_url})
         else:
-            return jsonify({'error': '无法获取图片', 'raw': result}), 500
+            return jsonify({'error': error.get('error', '无法获取图片'), 'raw': result}), 500
 
     except Exception as e:
         import traceback
@@ -252,6 +481,7 @@ def generate_image():
 
 
 @app.route('/api/save-config', methods=['POST'])
+@login_required
 def save_config():
     data = request.json
     config_path = os.path.join(os.path.dirname(__file__), 'config.json')
@@ -261,6 +491,7 @@ def save_config():
 
 
 @app.route('/api/load-config', methods=['GET'])
+@login_required
 def load_config():
     config_path = os.path.join(os.path.dirname(__file__), 'config.json')
     if os.path.exists(config_path):
@@ -270,6 +501,7 @@ def load_config():
 
 
 @app.route('/api/test-llm', methods=['POST'])
+@login_required
 def test_llm():
     data = request.json
     api_url = data.get('api_url', '')
@@ -292,13 +524,7 @@ def test_llm():
             'max_tokens': 10
         }
 
-        print(f"Testing LLM API: {api_url}")
-        print(f"Test Headers: {dict(headers)}")
-        print(f"Test Payload: {json.dumps(payload)}")
-        
         response = requests.post(api_url, headers=headers, json=payload, timeout=30)
-        print(f"LLM test response status: {response.status_code}")
-        print(f"LLM test response text: {response.text}")
         response.raise_for_status()
         result = response.json()
 
@@ -311,6 +537,7 @@ def test_llm():
 
 
 @app.route('/api/test-image', methods=['POST'])
+@login_required
 def test_image():
     data = request.json
     api_url = data.get('api_url', '')
@@ -328,14 +555,12 @@ def test_image():
         payload = {
             'model': model or 'doubao-seedream-4-5-251128',
             'prompt': 'test',
-            'width': 256,
-            'height': 256
+            'size': '2K',
+            'response_format': 'url',
+            'watermark': False,
         }
 
-        print(f"Testing Image API: {api_url}")
         response = requests.post(api_url, headers=headers, json=payload, timeout=60)
-        print(f"Image test response status: {response.status_code}")
-        print(f"Image test response text: {response.text}")
         response.raise_for_status()
         result = response.json()
 
@@ -348,6 +573,7 @@ def test_image():
 
 
 @app.route('/api/generate-characters', methods=['POST'])
+@login_required
 def generate_characters():
     data = request.json
     text = data.get('text', '')
@@ -379,7 +605,6 @@ def generate_characters():
             'temperature': 0.7
         }
 
-        print(f"Generating character analysis...")
         response = requests.post(api_url, headers=headers, json=payload, timeout=300)
         response.raise_for_status()
         result = response.json()
@@ -394,7 +619,6 @@ def generate_characters():
         content = re.sub(r'```\s*', '', content)
         content = content.strip()
 
-        print(f"Character content: {content}")
         parsed = json.loads(content)
         return jsonify({'success': True, 'data': parsed})
 
@@ -406,6 +630,7 @@ def generate_characters():
 
 
 @app.route('/api/generate-character-image', methods=['POST'])
+@login_required
 def generate_character_image():
     data = request.json
     description = data.get('description', '')
@@ -417,52 +642,24 @@ def generate_character_image():
     if not description or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
 
-    prompt = f"""black and white manga character design sheet, full body portrait, {name}, {description}, detailed line art, high contrast, dramatic lighting"""
+    prompt = f"""ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga character design sheet, pure monochrome, grayscale. full body portrait, {name}, {description}, detailed line art, high contrast, dramatic shading, cross-hatching"""
 
     try:
-        headers = {'Content-Type': 'application/json'}
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
-
         payload = {
             'model': model or 'doubao-seedream-4-5-251128',
             'prompt': prompt,
-            'negative_prompt': 'color, low quality, blurry, deformed',
-            'width': 768,
-            'height': 1024
+            'size': '2K',
+            'response_format': 'url',
+            'watermark': False,
         }
 
-        print(f"Generating character image for: {name}")
-        response = requests.post(api_url, headers=headers, json=payload, timeout=300)
-        response.raise_for_status()
-        result = response.json()
+        image_url, result = call_image_api(api_url, api_key, payload)
+        local_url, error = save_image_result(image_url, "char")
 
-        image_url = None
-        if 'images' in result and len(result['images']) > 0:
-            image_url = result['images'][0]
-        elif 'data' in result and len(result['data']) > 0:
-            image_url = result['data'][0].get('url', '')
-        elif 'b64_json' in result:
-            image_url = result['b64_json']
-
-        if image_url and image_url.startswith('http'):
-            return jsonify({'success': True, 'image_url': image_url})
-        elif image_url:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"char_{timestamp}.png"
-            filepath = os.path.join(OUTPUT_DIR, filename)
-
-            if image_url.startswith('data:image'):
-                image_data = image_url.split(',')[1]
-                with open(filepath, 'wb') as f:
-                    f.write(base64.b64decode(image_data))
-            else:
-                with open(filepath, 'wb') as f:
-                    f.write(base64.b64decode(image_url))
-
-            return jsonify({'success': True, 'image_url': f'/static/output/{filename}'})
-
-        return jsonify({'error': '无法获取图片', 'raw': result}), 500
+        if local_url:
+            return jsonify({'success': True, 'image_url': local_url})
+        else:
+            return jsonify({'error': error.get('error', '无法获取图片'), 'raw': result}), 500
 
     except Exception as e:
         import traceback
@@ -488,6 +685,7 @@ def download_image(url):
 
 
 @app.route('/api/combine-page', methods=['POST'])
+@login_required
 def combine_page():
     data = request.json
     segments = data.get('segments', [])
@@ -554,16 +752,18 @@ def combine_page():
 
 
 @app.route('/api/generate-page', methods=['POST'])
+@login_required
 def generate_page():
-    """一次生成一页完整的漫画"""
+    """Generate a full comic page in one request, supporting character reference images and previous page reference"""
     data = request.json
     page = data.get('page', {})
     page_num = data.get('page_num', 1)
     api_url = data.get('api_url', '')
     api_key = data.get('api_key', '')
     model = data.get('model', '')
-    negative_prompt = data.get('negative_prompt', 'color, blurry, low quality, distorted')
+    negative_prompt = data.get('negative_prompt', 'color, colorful, chromatic, vibrant, saturated, blurry, low quality, distorted, watermark, signature, text overlay, logo')
     character_references = data.get('character_references', [])
+    previous_page_image = data.get('previous_page_image')
 
     if not page or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
@@ -573,10 +773,6 @@ def generate_page():
         return jsonify({'error': '该页没有分镜'}), 400
 
     try:
-        headers = {'Content-Type': 'application/json'}
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
-
         segment_descriptions = []
         for idx, seg in enumerate(segments):
             desc = f"Panel {idx+1}: {seg.get('scene_description', '')}"
@@ -584,73 +780,51 @@ def generate_page():
                 desc += f" (Dialogue: {seg['dialogue']})"
             segment_descriptions.append(desc)
 
-        page_prompt = f"""black and white manga comic page, {len(segments)} panels arranged in a grid layout.
+        page_prompt = f"""ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga comic page, pure monochrome, grayscale only. {len(segments)} panels arranged in a grid layout.
 
 Panels:
 {chr(10).join(segment_descriptions)}
 
-Art style: detailed ink drawing, dramatic shadows, high contrast, professional manga quality"""
+Art style: detailed ink drawing, dramatic shadows, high contrast, cross-hatching, professional manga quality, black ink on white paper"""
+
+        if page_num and page_num > 1:
+            page_prompt += f"\n\nThis is PAGE {page_num} of the comic. It MUST maintain the exact same drawing style, visual continuity, character proportions, and shading technique as the previous page (Page {page_num-1}). The story progresses from the previous page - continue the visual narrative seamlessly."
 
         if character_references and len(character_references) > 0:
-            character_descriptions = []
+            char_sheet = []
             for char in character_references:
-                char_desc = f"{char['name']}: {char['description']}"
-                character_descriptions.append(char_desc)
-            page_prompt += f"\n\nCharacters in this page: {'; '.join(character_descriptions)}"
-            print(f"Generating page {page_num} with characters: {character_descriptions}")
+                name = char.get('name', '')
+                desc = char.get('description', '')
+                char_sheet.append(f"[CHARACTER: {name}]\nAPPEARANCE: {desc}\nThis character MUST appear exactly as described throughout ALL panels.")
+            char_section = "\n\n=== CHARACTER REFERENCE SHEET ===\n" + "\n\n".join(char_sheet) + "\n\nCRITICAL: All characters' appearance MUST be identical across all panels. Maintain absolute consistency in facial features, body type, clothing, and hairstyle throughout the entire page."
+            page_prompt += char_section
+
+        if previous_page_image:
+            page_prompt += f"\n\n=== PREVIOUS PAGE REFERENCE ===\nA reference image of the previous page (Page {page_num-1}) is provided. This page MUST have exactly the same art style, line quality, shading technique, and visual tone as the reference. Characters should look identical to how they appear in the previous page."
+
+        ref_images = prepare_ref_images(character_references, previous_page_image)
 
         payload = {
             'model': model or 'doubao-seedream-4-5-251128',
             'prompt': page_prompt,
-            'negative_prompt': negative_prompt,
-            'width': 1024,
-            'height': 1536,
-            'seed': -1,
-            'steps': 30,
-            'cfg_scale': 7
+            'size': '2K',
+            'response_format': 'url',
+            'watermark': False,
         }
 
-        print(f"Generating full comic page {page_num}")
-        response = requests.post(api_url, headers=headers, json=payload, timeout=600)
-        print(f"Page generation status: {response.status_code}")
-        response.raise_for_status()
-        result = response.json()
-
-        image_url = None
-        if 'images' in result and len(result['images']) > 0:
-            image_url = result['images'][0]
-        elif 'image' in result:
-            image_url = result['image']
-        elif 'data' in result:
-            data_obj = result['data']
-            if isinstance(data_obj, list) and len(data_obj) > 0:
-                image_url = data_obj[0].get('url', '') or data_obj[0].get('b64_json', '')
-            elif isinstance(data_obj, dict):
-                image_url = data_obj.get('url', '') or data_obj.get('b64_json', '')
-        elif 'output' in result:
-            image_url = result['output']
-        elif 'b64_json' in result:
-            image_url = result['b64_json']
-
-        if image_url and image_url.startswith('http'):
-            return jsonify({'success': True, 'image_url': image_url})
-        elif image_url and (image_url.startswith('data:image') or len(image_url) > 1000):
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"comic_page_{page_num}_full_{timestamp}.png"
-            filepath = os.path.join(OUTPUT_DIR, filename)
-            import base64
-
-            if image_url.startswith('data:image'):
-                image_data = image_url.split(',')[1]
-                with open(filepath, 'wb') as f:
-                    f.write(base64.b64decode(image_data))
+        if ref_images:
+            if len(ref_images) == 1:
+                payload['image'] = ref_images[0]
             else:
-                with open(filepath, 'wb') as f:
-                    f.write(base64.b64decode(image_url))
+                payload['image'] = ref_images
 
-            return jsonify({'success': True, 'image_url': f'/static/output/{filename}'})
+        image_url, result = call_image_api(api_url, api_key, payload)
+        local_url, error = save_image_result(image_url, f"comic_page_{page_num}_full")
+
+        if local_url:
+            return jsonify({'success': True, 'image_url': local_url})
         else:
-            return jsonify({'error': '无法获取图片', 'raw': result}), 500
+            return jsonify({'error': error.get('error', '无法获取图片'), 'raw': result}), 500
 
     except Exception as e:
         import traceback
@@ -660,15 +834,16 @@ Art style: detailed ink drawing, dramatic shadows, high contrast, professional m
 
 
 @app.route('/api/download', methods=['POST'])
+@login_required
 def download_image_proxy():
-    """代理下载图片，解决跨域下载问题"""
+    """Proxy download images to solve cross-origin download issues"""
     data = request.json
     url = data.get('url', '')
     filename = data.get('filename', 'comic_image.png')
-    
+
     if not url:
         return jsonify({'error': '缺少图片URL'}), 400
-    
+
     try:
         if url.startswith('http'):
             response = requests.get(url, timeout=60)
@@ -686,7 +861,7 @@ def download_image_proxy():
             image_data.seek(0)
         else:
             return jsonify({'error': '不支持的URL格式'}), 400
-        
+
         return send_file(
             image_data,
             mimetype='image/png',
@@ -698,4 +873,5 @@ def download_image_proxy():
 
 
 if __name__ == '__main__':
+    clean_cache()
     app.run(host='0.0.0.0', port=2778, debug=True)
