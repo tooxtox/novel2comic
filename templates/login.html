@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - 小说⇄漫画 双向转换器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Noto Sans SC', sans-serif; }
+        .manga-border { border: 2px solid #1a1a1a; }
+        .panel-shadow { box-shadow: 4px 4px 0px #1a1a1a; }
+        .btn-primary {
+            background: #1a1a1a;
+            color: white;
+            transition: all 0.2s;
+        }
+        .btn-primary:hover {
+            transform: translate(-2px, -2px);
+            box-shadow: 4px 4px 0px #666;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center">
+    <div class="max-w-md w-full mx-4">
+        <div class="bg-white p-8 manga-border panel-shadow">
+            <div class="flex items-center gap-3 mb-6 justify-center">
+                <div class="w-12 h-12 bg-black text-white flex items-center justify-center text-2xl font-bold manga-border">⇄</div>
+                <h1 class="text-2xl font-bold">小说⇄漫画 双向转换器</h1>
+            </div>
+            
+            <div id="error-message" class="hidden mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded text-sm"></div>
+            
+            <form id="login-form" onsubmit="handleLogin(event)">
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-2">用户名</label>
+                    <input type="text" id="username" required
+                        class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors"
+                        placeholder="请输入用户名">
+                </div>
+                <div class="mb-6">
+                    <label class="block text-sm font-medium mb-2">密码</label>
+                    <input type="password" id="password" required
+                        class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors"
+                        placeholder="请输入密码">
+                </div>
+                <button type="submit" id="login-btn" class="w-full btn-primary py-3 font-medium text-lg">
+                    登录
+                </button>
+            </form>
+        </div>
+        <p class="text-center text-gray-500 text-sm mt-4">管理员账号使用当前配置的API密钥</p>
+    </div>
+
+    <script>
+        async function handleLogin(e) {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const errorDiv = document.getElementById('error-message');
+            const btn = document.getElementById('login-btn');
+            
+            btn.disabled = true;
+            btn.textContent = '登录中...';
+            errorDiv.classList.add('hidden');
+            
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ username, password })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    window.location.href = '/';
+                } else {
+                    errorDiv.textContent = result.error || '登录失败';
+                    errorDiv.classList.remove('hidden');
+                }
+            } catch (err) {
+                errorDiv.textContent = '网络错误，请重试';
+                errorDiv.classList.remove('hidden');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '登录';
+            }
+        }
+    </script>
+</body>
+</html>

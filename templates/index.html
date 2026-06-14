@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>小说转漫画生成器</title>
+    <title>小说⇄漫画 双向转换器</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
     <style>
@@ -28,6 +28,19 @@
             animation: spin 1s linear infinite;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .progress-container {
+            width: 100%;
+            background-color: #e5e5e5;
+            border: 2px solid #1a1a1a;
+            height: 24px;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%;
+            background-color: #1a1a1a;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
         .fade-in { animation: fadeIn 0.5s ease-in; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         .comic-page {
@@ -54,23 +67,47 @@
     <div class="max-w-7xl mx-auto p-4">
         <!-- Header -->
         <header class="mb-6">
-            <div class="flex items-center gap-3 mb-2">
-                <div class="w-10 h-10 bg-black text-white flex items-center justify-center text-xl font-bold manga-border">漫</div>
-                <h1 class="text-3xl font-bold tracking-tight">小说转漫画生成器</h1>
+            <div class="flex items-center justify-between mb-2">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 bg-black text-white flex items-center justify-center text-xl font-bold manga-border">⇄</div>
+                    <h1 class="text-3xl font-bold tracking-tight">小说⇄漫画 双向转换器</h1>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button onclick="openConfigModal()" title="API 配置" class="w-10 h-10 flex items-center justify-center text-lg text-gray-700 hover:text-black border border-gray-300 hover:border-black transition-colors">
+                        ⚙
+                    </button>
+                    <button onclick="handleLogout()" class="text-sm text-gray-600 hover:text-black border border-gray-300 hover:border-black px-4 py-2 transition-colors">
+                        退出登录
+                    </button>
+                </div>
             </div>
-            <p class="text-gray-600 text-sm">使用大语言模型将小说智能分镜，调用API生成黑白漫画风格图片</p>
+            <p class="text-gray-600 text-sm">两大功能：使用LLM将小说转为漫画分镜 | 上传漫画图片，使用视觉模型转为小说文本</p>
         </header>
 
         <!-- Tabs -->
-        <div class="flex gap-6 mb-6 border-b border-gray-300">
-            <button onclick="switchTab('config')" id="tab-config" class="tab-active pb-2 px-1 text-lg transition-all">API配置</button>
-            <button onclick="switchTab('input')" id="tab-input" class="tab-inactive pb-2 px-1 text-lg transition-all">小说输入</button>
+        <div class="flex gap-6 mb-6 border-b border-gray-300 items-center">
+            <!-- 小说→漫画 功能组 -->
+            <button onclick="switchTab('input')" id="tab-input" class="tab-active pb-2 px-1 text-lg transition-all">小说输入</button>
             <button onclick="switchTab('characters')" id="tab-characters" class="tab-inactive pb-2 px-1 text-lg transition-all">角色管理</button>
             <button onclick="switchTab('segments')" id="tab-segments" class="tab-inactive pb-2 px-1 text-lg transition-all">分镜管理</button>
             <button onclick="switchTab('gallery')" id="tab-gallery" class="tab-inactive pb-2 px-1 text-lg transition-all">漫画预览</button>
+            <button onclick="switchTab('history')" id="tab-history" class="tab-inactive pb-2 px-1 text-lg transition-all">历史记录</button>
+            <span class="text-gray-300 text-2xl font-light mx-1">|</span>
+            <!-- 漫画→小说 功能组 -->
+            <button onclick="switchTab('comic2novel')" id="tab-comic2novel" class="tab-inactive pb-2 px-1 text-lg transition-all">漫画转小说</button>
         </div>
 
-        <!-- Config Tab -->
+        <!-- Config Modal (右上角 ⚙ 按钮触发) -->
+        <div id="config-modal" class="fixed inset-0 z-50 hidden">
+            <!-- 背景遮罩 -->
+            <div class="absolute inset-0 bg-black bg-opacity-50" onclick="closeConfigModal()"></div>
+            <!-- 弹窗内容 -->
+            <div class="relative max-w-5xl mx-auto mt-10 mb-10 bg-gray-100 rounded manga-border panel-shadow" style="max-height: calc(100vh - 5rem); overflow-y: auto;">
+                <div class="sticky top-0 bg-white border-b-2 border-gray-200 px-6 py-4 flex items-center justify-between manga-border z-10">
+                    <h2 class="text-2xl font-bold">⚙ API 配置</h2>
+                    <button onclick="closeConfigModal()" class="w-9 h-9 flex items-center justify-center text-2xl text-gray-600 hover:text-black border border-gray-300 hover:border-black transition-colors">×</button>
+                </div>
+                <div class="p-6">
         <div id="panel-config" class="fade-in">
             <div class="bg-white p-6 manga-border panel-shadow mb-6">
                 <h2 class="text-xl font-bold mb-4">快速预设</h2>
@@ -132,6 +169,7 @@
                                 <span id="test-llm-spinner" class="loading-spinner hidden"></span>
                             </button>
                             <div id="test-llm-result" class="mt-3 text-sm"></div>
+                            <div id="test-llm-progress"></div>
                         </div>
                     </div>
                 </div>
@@ -160,6 +198,7 @@
                                 <span id="test-image-spinner" class="loading-spinner hidden"></span>
                             </button>
                             <div id="test-image-result" class="mt-3 text-sm"></div>
+                            <div id="test-image-progress"></div>
                         </div>
                     </div>
                 </div>
@@ -167,36 +206,66 @@
 
             <div class="bg-white p-6 manga-border panel-shadow mt-6">
                 <h2 class="text-xl font-bold mb-4">高级设置</h2>
-                <div class="grid md:grid-cols-3 gap-4">
+                <div class="grid md:grid-cols-2 gap-6">
                     <div>
-                        <label class="block text-sm font-medium mb-1">每页分镜数</label>
-                        <input type="number" id="segments-per-page" value="4" min="1" max="8" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                        <label class="block text-sm font-medium mb-2">漫画风格（点击切换，可多选）</label>
+                        <div id="style-tag-presets" class="flex flex-wrap gap-2 mb-3"></div>
+                        <div class="flex gap-2">
+                            <input type="text" id="custom-style-input" placeholder="自定义风格，例如: cyberpunk, watercolor" class="flex-1 p-2 border-2 border-gray-300 focus:border-black outline-none transition-colors text-sm">
+                            <button type="button" onclick="addCustomStyleTag()" class="border-2 border-black px-3 py-2 text-sm font-medium hover:bg-gray-100 transition-colors whitespace-nowrap">+ 添加</button>
+                        </div>
+                        <div id="custom-style-tags" class="flex flex-wrap gap-2 mt-2"></div>
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium mb-1">负面提示词</label>
-                        <input type="text" id="negative-prompt" value="color, blurry, low quality, distorted, ugly" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-1">每页分镜数</label>
+                            <input type="number" id="segments-per-page" value="4" min="1" max="8" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">负面提示词</label>
+                            <input type="text" id="negative-prompt" value="color, colorful, chromatic, vibrant, saturated, blurry, low quality, distorted, watermark, signature, text, logo, deformed hands, extra fingers, bad anatomy, mutated" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">
+                                参考强度 reference_strength
+                                <span class="text-gray-500 font-normal">(<span id="reference-strength-value">0.60</span>)</span>
+                            </label>
+                            <input type="range" id="reference-strength" min="0" max="1" step="0.05" value="0.6"
+                                class="w-full"
+                                oninput="document.getElementById('reference-strength-value').textContent = parseFloat(this.value).toFixed(2)">
+                            <div class="flex justify-between text-xs text-gray-500 mt-1">
+                                <span>0.0 弱参考（更自由发挥）</span>
+                                <span>0.6 默认</span>
+                                <span>1.0 强参考（严格保真）</span>
+                            </div>
+                        </div>
                     </div>
-                    <div class="flex items-end">
-                        <button onclick="saveConfig()" class="btn-primary px-6 py-3 font-medium w-full">保存配置</button>
-                    </div>
+                </div>
+                <div class="mt-6 flex justify-end">
+                    <button onclick="saveConfig(); closeConfigModal();" class="btn-primary px-6 py-3 font-medium">保存配置</button>
+                </div>
+            </div>
+        </div>
                 </div>
             </div>
         </div>
 
         <!-- Input Tab -->
-        <div id="panel-input" class="hidden fade-in">
+        <div id="panel-input" class="fade-in">
             <div class="bg-white p-6 manga-border panel-shadow">
                 <h2 class="text-xl font-bold mb-4">输入小说内容</h2>
                 <textarea id="novel-text" rows="16" placeholder="请在此处粘贴小说内容...&#10;&#10;支持粘贴整章或整篇小说，系统会自动分页分段。&#10;&#10;建议每次处理3000-8000字，以获得最佳分镜效果。" class="w-full p-4 border-2 border-gray-300 focus:border-black outline-none transition-colors resize-none font-mono text-sm leading-relaxed"></textarea>
                 <div class="flex justify-between items-center mt-4">
                     <div class="text-sm text-gray-500">
                         当前字数：<span id="char-count" class="font-bold text-black">0</span>
+                        <span class="ml-3 text-xs text-blue-600">流程: 角色分析 → 上传人设图 → 分镜生成</span>
                     </div>
-                    <button onclick="startSegment()" class="btn-primary px-8 py-3 font-medium text-lg flex items-center gap-2">
-                        <span>开始智能分镜</span>
+                    <button id="start-segment-btn" onclick="startSegment()" class="btn-primary px-8 py-3 font-medium text-lg flex items-center gap-2">
+                        <span id="start-segment-label">开始智能分镜</span>
                         <span id="segment-spinner" class="loading-spinner hidden"></span>
                     </button>
                 </div>
+                <div id="segment-progress" class="mt-4"></div>
             </div>
         </div>
 
@@ -205,11 +274,12 @@
             <div class="bg-white p-6 manga-border panel-shadow mb-6">
                 <h2 class="text-xl font-bold mb-4">角色分析</h2>
                 <div class="flex gap-2">
-                    <button onclick="analyzeCharacters()" class="btn-primary px-6 py-2 font-medium flex items-center gap-2">
-                        <span>从小说分析角色</span>
+                    <button id="analyze-characters-btn" onclick="analyzeCharacters()" class="btn-primary px-6 py-2 font-medium flex items-center gap-2">
+                        <span id="analyze-characters-label">从小说分析角色</span>
                         <span id="analyze-spinner" class="loading-spinner hidden"></span>
                     </button>
                 </div>
+                <div id="analyze-progress" class="mt-4"></div>
             </div>
 
             <div id="characters-container" class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -225,17 +295,18 @@
             <div class="flex justify-between items-center mb-4">
                 <h2 class="text-xl font-bold">分镜管理</h2>
                 <div class="flex gap-2">
-                    <button onclick="generateAllFullPages()" class="btn-primary px-4 py-2 font-medium flex items-center gap-2">
-                        <span>批量整页生成</span>
+                    <button id="batch-full-btn" onclick="generateAllFullPages()" class="btn-primary px-4 py-2 font-medium flex items-center gap-2">
+                        <span id="batch-full-label">批量整页生成</span>
                         <span id="batch-full-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
                     </button>
-                    <button onclick="generateAllImages()" class="bg-gray-700 text-white px-4 py-2 font-medium flex items-center gap-2 hover:bg-gray-800 transition-colors">
-                        <span>批量逐个生成（不推荐）</span>
+                    <button id="batch-single-btn" onclick="generateAllImages()" class="bg-gray-700 text-white px-4 py-2 font-medium flex items-center gap-2 hover:bg-gray-800 transition-colors">
+                        <span id="batch-single-label">批量逐个生成（不推荐）</span>
                         <span id="batch-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
                     </button>
                     <button onclick="exportScript()" class="bg-white border-2 border-black px-4 py-2 font-medium hover:bg-gray-50 transition-colors">导出脚本</button>
                 </div>
             </div>
+            <div id="batch-progress" class="mt-4 mb-4"></div>
             <div id="segments-container" class="space-y-6">
                 <div class="text-center py-20 text-gray-400">
                     <div class="text-6xl mb-4">📝</div>
@@ -257,6 +328,91 @@
                     <div class="text-6xl mb-4">🎨</div>
                     <p>请先生成漫画图片</p>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- History Tab -->
+    <div id="panel-history" class="hidden fade-in">
+        <div class="bg-white p-6 manga-border panel-shadow">
+            <div class="flex items-center justify-between mb-4">
+                <div>
+                    <h2 class="text-2xl font-bold">📚 历史作品</h2>
+                    <p class="text-sm text-gray-500 mt-1">
+                        当前账号：<span id="history-username" class="font-mono">-</span>
+                        <span class="mx-2">·</span>
+                        共 <span id="history-count" class="font-bold">0</span> 部作品
+                    </p>
+                </div>
+                <div class="flex gap-2">
+                    <button onclick="saveCurrentToHistory()" class="border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">💾 保存当前</button>
+                    <button onclick="loadHistoryList()" class="border-2 border-gray-300 hover:border-black px-4 py-2 text-sm font-medium transition-colors">🔄 刷新</button>
+                </div>
+            </div>
+            <div id="history-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div class="col-span-full text-center text-gray-400 py-12">加载中...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Comic to Novel Tab -->
+    <div id="panel-comic2novel" class="hidden fade-in">
+        <div class="bg-white p-6 manga-border panel-shadow mb-6">
+            <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                <span class="w-6 h-6 bg-black text-white text-xs flex items-center justify-center rounded-full">📷</span>
+                上传漫画图片
+            </h2>
+            <p class="text-sm text-gray-500 mb-4">支持多张图片上传（按页面顺序），视觉AI将识别画面内容并生成小说文本</p>
+
+            <!-- Upload Area -->
+            <div class="border-2 border-dashed border-gray-300 p-8 text-center hover:border-black transition-colors cursor-pointer" onclick="document.getElementById('comic-file-input').click()">
+                <input type="file" id="comic-file-input" accept="image/*" multiple class="hidden" onchange="handleComicUpload(event)">
+                <div class="text-5xl mb-3">📤</div>
+                <p class="text-gray-600 font-medium">点击选择漫画图片</p>
+                <p class="text-sm text-gray-400 mt-1">支持 JPG / PNG / WebP，建议按页码顺序选择</p>
+            </div>
+
+            <!-- Preview Thumbnails -->
+            <div id="comic-preview-container" class="hidden mt-4">
+                <div class="flex items-center justify-between mb-2">
+                    <label class="text-sm font-medium text-gray-700">已选择 <span id="comic-file-count">0</span> 张图片</label>
+                    <button onclick="clearComicUpload()" class="text-sm text-red-600 hover:text-red-800">清空</button>
+                </div>
+                <div id="comic-preview-thumbs" class="flex gap-3 overflow-x-auto pb-2"></div>
+            </div>
+
+            <!-- Vision Model Config -->
+            <div class="mt-4 p-4 bg-gray-50 border border-gray-200">
+                <div class="flex items-center gap-4">
+                    <div class="flex-1">
+                        <label class="block text-sm font-medium mb-1">视觉模型名称（需支持图片识别）</label>
+                        <input type="text" id="vision-model" placeholder="gpt-4o / claude-3-5-sonnet / 自定义" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                    </div>
+                    <div class="flex items-end">
+                        <button onclick="startComicToNovel()" id="comic2novel-btn" class="btn-primary px-8 py-3 font-medium text-lg flex items-center gap-2">
+                            <span>开始转换</span>
+                            <span id="comic2novel-spinner" class="loading-spinner hidden"></span>
+                        </button>
+                    </div>
+                </div>
+                <div id="comic2novel-progress" class="mt-3"></div>
+            </div>
+        </div>
+
+        <!-- Output Area -->
+        <div id="comic2novel-output" class="hidden">
+            <div class="bg-white p-6 manga-border panel-shadow">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-bold flex items-center gap-2">
+                        <span>📖</span>
+                        生成的小说文本
+                    </h2>
+                    <div class="flex gap-2">
+                        <button onclick="copyNovelText()" class="border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">复制</button>
+                        <button onclick="downloadNovelText()" class="btn-primary px-4 py-2 text-sm">下载 .txt</button>
+                    </div>
+                </div>
+                <div id="comic2novel-text" class="p-4 bg-gray-50 border-2 border-gray-200 text-sm leading-relaxed whitespace-pre-wrap font-sans max-h-[70vh] overflow-y-auto"></div>
             </div>
         </div>
     </div>

@@ -1,47 +1,28 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual Environment
-venv/
-env/
-ENV/
-.venv/
-
-# IDE/Editor
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Flask
-instance/
-.webassets-cache
-
-# Project Config (contains API keys)
+# 环境变量 / 敏感凭据
+.env
+.env.*
+# 本地明文配置，避免把 API key 推到远端
 config.json
+# 个人本地配置 (含 API key, 不要提交到 git)
+# 用法: cp config.json config.local.json 然后改这个文件, app.py 会优先加载
+config.local.json
+# 调试 / 临时脚本
+_*.py
+_*.txt
+# Python / 编辑器缓存
+__pycache__/
+*.pyc
+.pytest_cache/
+# 运行时生成内容
+results/
+static/output/
+static/cache/
+static/users/
+# macOS / Windows
+.DS_Store
+Thumbs.db
 
-# Generated Outputs
-static/output/*.png
-static/output/*.jpg
-static/output/*.jpeg
+# 漫画转小说临时结果
+static/comic2novel/
+app.py
+text2comic_github_backup/

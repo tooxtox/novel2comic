@@ -4,9 +4,450 @@ let isGenerating = false;
 let characters = [];
 let combinedPages = [];
 let fullPageImages = {};  // 整页生成的图片
+let combinedPageImages = {};  // 任务3: 拼版预览生成的图片 (key: pageIdx)
+let progressInterval = null;
 
-const tabs = ['config', 'input', 'characters', 'segments', 'gallery'];
+// 漫画转小说相关状态
+let comicUploadedImages = [];  // {name, data: base64, pageIndex}
+let comicNovelResult = null;   // {novel_text, pages}
+
+const tabs = ['input', 'segments', 'characters', 'gallery', 'history', 'comic2novel'];
 const CONCURRENT_LIMIT = 3;
+const MAX_RETRIES = 3;
+
+// 漫画风格预设Tag
+const STYLE_PRESETS = [
+    { id: 'shonen', label: '热血少年', tags: 'shonen manga style, dynamic action lines, intense expressions, speed lines' },
+    { id: 'shojo', label: '少女漫画', tags: 'shojo manga style, soft lines, sparkles, romantic, delicate features' },
+    { id: 'seinen', label: '青年向', tags: 'seinen manga style, realistic proportions, detailed anatomy, mature' },
+    { id: 'chibi', label: 'Q版', tags: 'chibi style, super deformed, 2-head body proportion, cute, simplified' },
+    { id: 'ink', label: '水墨风', tags: 'sumi-e ink style, brush strokes, traditional Chinese ink painting, flowing' },
+    { id: 'noir', label: '黑色电影', tags: 'noir style, high contrast, deep shadows, dramatic lighting, film noir' },
+    { id: 'cyberpunk', label: '赛博朋克', tags: 'cyberpunk style, neon lights, futuristic, tech noir, dystopian' },
+    { id: 'horror', label: '恐怖', tags: 'horror manga style, grotesque, unsettling, dark atmosphere, psychological' },
+    { id: 'gag', label: '搞笑', tags: 'gag manga style, exaggerated expressions, comedic, simple lines' },
+    { id: 'realistic', label: '写实', tags: 'realistic style, photographic quality, detailed textures, lifelike' },
+];
+
+let selectedPresetIds = new Set();
+let customStyleTags = [];
+
+/**
+ * 带指数退避重试的 fetch
+ * 内网穿透场景下，网络波动可能导致请求失败，自动重试提高成功率
+ */
+async function fetchWithRetry(url, options = {}, maxRetries = MAX_RETRIES) {
+    let lastError;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            const response = await fetch(url, options);
+            if (!response.ok && attempt < maxRetries) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            return response;
+        } catch (e) {
+            lastError = e;
+            if (attempt < maxRetries) {
+                const delay = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 15000);
+                console.log(`Retry ${attempt + 1}/${maxRetries} for ${url} after ${Math.round(delay)}ms`);
+                await new Promise(r => setTimeout(r, delay));
+            }
+        }
+    }
+    throw lastError;
+}
+
+/**
+ * 页面加载时从服务器恢复会话数据
+ * 内网穿透断开后刷新页面，自动找回之前生成的结果
+ */
+async function recoverSession() {
+    try {
+        // 恢复分镜数据
+        const segResponse = await fetchWithRetry('/api/results/segments', { credentials: 'include' }, 1);
+        const segResult = await segResponse.json();
+        if (segResult.success && segResult.data) {
+            currentSegments = segResult.data;
+            console.log('Recovered segments from server');
+        }
+
+        // 恢复角色数据
+        const charResponse = await fetchWithRetry('/api/results/characters', { credentials: 'include' }, 1);
+        const charResult = await charResponse.json();
+        if (charResult.success && charResult.data && charResult.data.characters) {
+            characters = charResult.data.characters;
+            console.log('Recovered characters from server');
+        }
+
+        // 恢复单图映射
+        const imgResponse = await fetchWithRetry('/api/results/images', { credentials: 'include' }, 1);
+        const imgResult = await imgResponse.json();
+        if (imgResult.success && imgResult.data && imgResult.data.images) {
+            for (const item of imgResult.data.images) {
+                if (item.key) {
+                    generatedImages[item.key] = item.local_url;
+                }
+            }
+            console.log(`Recovered ${imgResult.data.images.length} images from server`);
+        }
+
+        // 恢复整页映射
+        const fpResponse = await fetchWithRetry('/api/results/full_pages', { credentials: 'include' }, 1);
+        const fpResult = await fpResponse.json();
+        if (fpResult.success && fpResult.data && fpResult.data.pages) {
+            for (const item of fpResult.data.pages) {
+                if (item.key !== undefined) {
+                    fullPageImages[item.key] = item.local_url;
+                }
+            }
+            console.log(`Recovered ${fpResult.data.pages.length} full pages from server`);
+        }
+
+        // 恢复拼版映射
+        try {
+            const cpResponse = await fetchWithRetry('/api/results/combined_pages', { credentials: 'include' }, 1);
+            const cpResult = await cpResponse.json();
+            if (cpResult.success && cpResult.data && cpResult.data.pages) {
+                for (const item of cpResult.data.pages) {
+                    if (item.key !== undefined) {
+                        combinedPageImages[item.key] = item.local_url;
+                    }
+                }
+                console.log(`Recovered ${cpResult.data.pages.length} combined pages from server`);
+            }
+        } catch (e) {
+            console.log('Combined pages recovery skipped:', e.message);
+        }
+
+        // 恢复漫画转小说结果
+        const c2nResponse = await fetchWithRetry('/api/results/comic2novel', { credentials: 'include' }, 1);
+        const c2nResult = await c2nResponse.json();
+        if (c2nResult.success && c2nResult.data && c2nResult.data.novel_text) {
+            comicNovelResult = c2nResult.data;
+            renderComicNovelResult();
+            console.log('Recovered comic-to-novel result from server');
+        }
+
+        // 恢复后重新渲染
+        if (currentSegments.pages && currentSegments.pages.length > 0) {
+            renderSegments();
+            renderGallery();
+        }
+        if (characters.length > 0) {
+            renderCharacters();
+        }
+    } catch (e) {
+        console.log('Session recovery skipped:', e.message);
+    }
+}
+
+/**
+ * 将前端当前状态同步到服务器
+ */
+async function syncResults() {
+    try {
+        await fetchWithRetry('/api/sync/results', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                segments: currentSegments,
+                characters: { characters: characters },
+                generatedImages: generatedImages,
+                fullPageImages: fullPageImages,
+                combinedPageImages: combinedPageImages,
+                comic2novel: comicNovelResult
+            })
+        }, 1);
+    } catch (e) {
+        console.log('Sync results failed:', e.message);
+    }
+}
+
+// ========== 漫画转小说功能 ==========
+
+/**
+ * 处理漫画图片上传
+ */
+function handleComicUpload(event) {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    const previewContainer = document.getElementById('comic-preview-container');
+    const thumbsContainer = document.getElementById('comic-preview-thumbs');
+    const fileCount = document.getElementById('comic-file-count');
+
+    let loaded = 0;
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            comicUploadedImages.push({
+                name: file.name,
+                data: e.target.result,
+                pageIndex: comicUploadedImages.length
+            });
+            loaded++;
+            if (loaded === files.length) {
+                renderComicPreviews();
+                previewContainer.classList.remove('hidden');
+                fileCount.textContent = comicUploadedImages.length;
+                showToast(`已加载 ${comicUploadedImages.length} 张图片`, 'success');
+            }
+        };
+        reader.readAsDataURL(file);
+    }
+}
+
+/**
+ * 渲染漫画上传预览缩略图
+ */
+function renderComicPreviews() {
+    const container = document.getElementById('comic-preview-thumbs');
+    container.innerHTML = comicUploadedImages.map((img, idx) => `
+        <div class="flex-shrink-0 w-32 border-2 border-gray-300 p-1 relative group">
+            <img src="${img.data}" class="w-full h-24 object-cover">
+            <div class="text-xs text-center text-gray-500 mt-1">第${idx + 1}页</div>
+            <button onclick="removeComicImage(${idx})" class="absolute -top-2 -right-2 bg-red-600 text-white w-5 h-5 rounded-full text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">✕</button>
+        </div>
+    `).join('');
+}
+
+/**
+ * 移除已上传的漫画图片
+ */
+function removeComicImage(idx) {
+    comicUploadedImages.splice(idx, 1);
+    if (comicUploadedImages.length === 0) {
+        document.getElementById('comic-preview-container').classList.add('hidden');
+        document.getElementById('comic2novel-output').classList.add('hidden');
+    } else {
+        renderComicPreviews();
+        document.getElementById('comic-file-count').textContent = comicUploadedImages.length;
+    }
+}
+
+/**
+ * 清空所有已上传图片
+ */
+function clearComicUpload() {
+    comicUploadedImages = [];
+    document.getElementById('comic-preview-container').classList.add('hidden');
+    document.getElementById('comic2novel-output').classList.add('hidden');
+    document.getElementById('comic-file-input').value = '';
+    showToast('已清空所有图片', 'info');
+}
+
+/**
+ * 开始漫画转小说
+ */
+async function startComicToNovel() {
+    if (comicUploadedImages.length === 0) {
+        showToast('请先上传漫画图片', 'error');
+        return;
+    }
+
+    const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
+    if (!config.llm_api_url) {
+        showToast('请先在API配置中填写LLM接口地址', 'error');
+        openConfigModal();
+        return;
+    }
+
+    const visionModel = document.getElementById('vision-model').value || 'gpt-4o';
+    const btn = document.getElementById('comic2novel-btn');
+    const spinner = document.getElementById('comic2novel-spinner');
+
+    btn.disabled = true;
+    spinner.classList.remove('hidden');
+
+    createProgressBar('comic2novel-progress');
+    startFakeProgress('comic2novel-progress-bar', 'comic2novel-progress-text', 120000);
+
+    try {
+        const response = await fetchWithRetry('/api/comic-to-novel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                images: comicUploadedImages.map(img => img.data),
+                api_url: config.llm_api_url,
+                api_key: config.llm_api_key,
+                model: visionModel
+            })
+        }, 2);
+
+        const result = await response.json();
+        finishProgress('comic2novel-progress-bar', 'comic2novel-progress-text');
+
+        if (result.success) {
+            comicNovelResult = result.data;
+            renderComicNovelResult();
+            showToast('小说生成成功！', 'success');
+            syncResults();
+        } else {
+            showToast(result.error || '转换失败', 'error');
+        }
+    } catch (e) {
+        finishProgress('comic2novel-progress-bar', 'comic2novel-progress-text');
+        showToast('请求失败: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+    }
+}
+
+/**
+ * 显示漫画转小说结果
+ */
+function renderComicNovelResult() {
+    const outputDiv = document.getElementById('comic2novel-output');
+    const textDiv = document.getElementById('comic2novel-text');
+
+    outputDiv.classList.remove('hidden');
+    textDiv.textContent = comicNovelResult.novel_text || '（未生成文本）';
+
+    outputDiv.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/**
+ * 复制小说文本到剪贴板
+ */
+function copyNovelText() {
+    if (!comicNovelResult || !comicNovelResult.novel_text) {
+        showToast('没有可复制的内容', 'error');
+        return;
+    }
+    navigator.clipboard.writeText(comicNovelResult.novel_text).then(() => {
+        showToast('已复制到剪贴板', 'success');
+    }).catch(() => {
+        const textarea = document.createElement('textarea');
+        textarea.value = comicNovelResult.novel_text;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+        showToast('已复制到剪贴板', 'success');
+    });
+}
+
+/**
+ * 下载小说文本为 .txt 文件
+ */
+function downloadNovelText() {
+    if (!comicNovelResult || !comicNovelResult.novel_text) {
+        showToast('没有可下载的内容', 'error');
+        return;
+    }
+    const blob = new Blob([comicNovelResult.novel_text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `comic_to_novel_${new Date().toISOString().slice(0, 10)}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('下载成功', 'success');
+}
+
+async function handleLogout() {
+    try {
+        await fetch('/api/logout', { method: 'POST', credentials: 'include' });
+        window.location.href = '/';
+    } catch (e) {
+        window.location.href = '/';
+    }
+}
+
+async function checkAuth() {
+    try {
+        const response = await fetch('/api/check-auth', { credentials: 'include' });
+        const result = await response.json();
+        if (!result.logged_in) {
+            window.location.href = '/';
+        }
+    } catch (e) {
+        window.location.href = '/';
+    }
+}
+
+checkAuth();
+
+function createProgressBar(containerId) {
+    const container = document.getElementById(containerId);
+    if (!container) return null;
+    const progressHtml = `
+        <div class="progress-container mt-3">
+            <div class="progress-bar" id="${containerId}-bar"></div>
+        </div>
+        <div class="text-sm text-gray-600 mt-1" id="${containerId}-text">0%</div>
+    `;
+    container.innerHTML = progressHtml;
+    return `${containerId}-bar`;
+}
+
+function startFakeProgress(progressBarId, textId, minTime = 120000) {
+    clearInterval(progressInterval);
+
+    const startTime = Date.now();
+    // 对数增长曲线：先快后慢，max=90% (留10%给完成时跳到100%)
+    // progress = 90 * (1 - exp(-elapsed * k / minTime))
+    // 当elapsed=minTime时，progress ≈ 90 * 0.95 → "两分钟走到90%"
+    const k = 3.0; // 增长系数 (调到3后, 在minTime处约走完 90% 的95%)
+
+    progressInterval = setInterval(() => {
+        const elapsed = Date.now() - startTime;
+        const t = elapsed / minTime;
+        // 对数曲线：1 - e^(-kt) 在 t=0 时为0，在 t→∞ 时趋近1
+        // k=3 时: t=0.33 → 0.63, t=1.0 → 0.95, t=1.5 → 0.989
+        const logProgress = 90 * (1 - Math.exp(-k * t));
+        // 加入小波动让进度条看起来更自然
+        const jitter = (Math.random() - 0.5) * 0.5;
+        const progress = Math.min(90, Math.max(0, logProgress + jitter));
+
+        const bar = document.getElementById(progressBarId);
+        const text = document.getElementById(textId);
+        if (bar) bar.style.width = `${progress}%`;
+        if (text) text.textContent = `${Math.floor(progress)}%`;
+    }, 200);
+}
+
+function finishProgress(progressBarId, textId) {
+    clearInterval(progressInterval);
+    const bar = document.getElementById(progressBarId);
+    const text = document.getElementById(textId);
+    if (bar) bar.style.width = '100%';
+    if (text) text.textContent = '100% - 完成';
+}
+
+function hideProgress(containerId) {
+    clearInterval(progressInterval);
+    const container = document.getElementById(containerId);
+    if (container) container.innerHTML = '';
+}
+
+/**
+ * 按钮冷却: 点击后禁用按钮, 文字改为"生成中…", 直到 finally 重新启用
+ * 避免用户连点重复请求
+ * 用法:
+ *   const btn = document.getElementById('xxx-btn');
+ *   const unlock = lockButton(btn, document.getElementById('xxx-label'));
+ *   try { ... } finally { unlock(); }
+ */
+function lockButton(btn, labelEl, busyText) {
+    if (!btn) return () => {};
+    const originalText = labelEl ? labelEl.textContent : null;
+    const wasDisabled = btn.disabled;
+    btn.disabled = true;
+    btn.classList.add('opacity-60', 'cursor-not-allowed');
+    if (labelEl && busyText) labelEl.textContent = busyText;
+    return function unlock() {
+        btn.disabled = wasDisabled;
+        btn.classList.remove('opacity-60', 'cursor-not-allowed');
+        if (labelEl && originalText !== null) labelEl.textContent = originalText;
+    };
+}
 
 async function runWithConcurrency(tasks, limit) {
     const results = [];
@@ -28,7 +469,7 @@ function applyPreset(preset) {
         document.getElementById('img-api-url').value = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
         showToast('火山引擎 v3 预设已应用，请填写 API Key 和模型名称！', 'success');
     } else if (preset === 'volc-coding') {
-        document.getElementById('llm-api-url').value = 'https://ark.cn-beijing.volces.com/api/coding/v3';
+        document.getElementById('llm-api-url').value = 'https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions';
         document.getElementById('img-api-url').value = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
         showToast('火山引擎 Coding 预设已应用，请填写 API Key 和模型名称！', 'success');
     } else if (preset === 'openai') {
@@ -56,15 +497,19 @@ async function testLLM() {
     const btn = document.getElementById('test-llm-btn');
     const spinner = document.getElementById('test-llm-spinner');
     const resultDiv = document.getElementById('test-llm-result');
-
+    
     btn.disabled = true;
     spinner.classList.remove('hidden');
     resultDiv.innerHTML = '';
+    
+    createProgressBar('test-llm-progress');
+    startFakeProgress('test-llm-progress-bar', 'test-llm-progress-text', 2000);
 
     try {
-        const response = await fetch('/api/test-llm', {
+        const response = await fetchWithRetry('/api/test-llm', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 api_url: document.getElementById('llm-api-url').value,
                 api_key: document.getElementById('llm-api-key').value,
@@ -73,6 +518,7 @@ async function testLLM() {
         });
 
         const result = await response.json();
+        finishProgress('test-llm-progress-bar', 'test-llm-progress-text');
         if (result.success) {
             resultDiv.innerHTML = `<div class="p-3 bg-green-50 border border-green-200 text-green-700 rounded">✅ ${result.message}</div>`;
             showToast('LLM API测试成功！', 'success');
@@ -81,6 +527,7 @@ async function testLLM() {
             showToast('LLM API测试失败', 'error');
         }
     } catch (e) {
+        finishProgress('test-llm-progress-bar', 'test-llm-progress-text');
         resultDiv.innerHTML = `<div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded">❌ 请求失败：${e.message}</div>`;
         showToast('LLM API测试失败', 'error');
     } finally {
@@ -97,11 +544,15 @@ async function testImage() {
     btn.disabled = true;
     spinner.classList.remove('hidden');
     resultDiv.innerHTML = '';
+    
+    createProgressBar('test-image-progress');
+    startFakeProgress('test-image-progress-bar', 'test-image-progress-text', 2000);
 
     try {
-        const response = await fetch('/api/test-image', {
+        const response = await fetchWithRetry('/api/test-image', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 api_url: document.getElementById('img-api-url').value,
                 api_key: document.getElementById('img-api-key').value,
@@ -110,6 +561,7 @@ async function testImage() {
         });
 
         const result = await response.json();
+        finishProgress('test-image-progress-bar', 'test-image-progress-text');
         if (result.success) {
             resultDiv.innerHTML = `<div class="p-3 bg-green-50 border border-green-200 text-green-700 rounded">✅ ${result.message}</div>`;
             showToast('Image API测试成功！', 'success');
@@ -118,6 +570,7 @@ async function testImage() {
             showToast('Image API测试失败', 'error');
         }
     } catch (e) {
+        finishProgress('test-image-progress-bar', 'test-image-progress-text');
         resultDiv.innerHTML = `<div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded">❌ 请求失败：${e.message}</div>`;
         showToast('Image API测试失败', 'error');
     } finally {
@@ -132,6 +585,253 @@ function switchTab(tabName) {
         document.getElementById(`panel-${t}`).classList.add('hidden');
     });
     document.getElementById(`panel-${tabName}`).classList.remove('hidden');
+    if (tabName === 'history') loadHistoryList();
+}
+
+function openConfigModal() {
+    document.getElementById('config-modal').classList.remove('hidden');
+}
+
+function closeConfigModal() {
+    document.getElementById('config-modal').classList.add('hidden');
+}
+
+// ESC 键关闭弹窗
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        closeConfigModal();
+    }
+});
+
+// ===== 历史记录管理 =====
+async function loadHistoryList() {
+    const container = document.getElementById('history-list');
+    const countEl = document.getElementById('history-count');
+    const usernameEl = document.getElementById('history-username');
+    if (!container) return;
+
+    container.innerHTML = '<div class="col-span-full text-center text-gray-400 py-12">加载中...</div>';
+
+    try {
+        const response = await fetchWithRetry('/api/history', { credentials: 'include' });
+        const result = await response.json();
+        if (!result.success) throw new Error(result.error || '加载失败');
+
+        usernameEl.textContent = result.username || '-';
+        countEl.textContent = (result.works || []).length;
+
+        if (!result.works || result.works.length === 0) {
+            container.innerHTML = '<div class="col-span-full text-center text-gray-400 py-12">还没有历史作品，<br>生成漫画后点击「保存当前」即可永久保存</div>';
+            return;
+        }
+
+        // 拉取每个作品的详情（含图片列表和首张预览图）
+        container.innerHTML = '';
+        for (const work of result.works) {
+            const card = document.createElement('div');
+            card.className = 'manga-border bg-gray-50 p-4 flex flex-col';
+            card.innerHTML = `<div class="aspect-video bg-gray-200 mb-3 flex items-center justify-center text-gray-400 text-sm">加载中...</div>`;
+            container.appendChild(card);
+
+            try {
+                const detailResp = await fetchWithRetry(`/api/history/${work.work_id}`, { credentials: 'include' });
+                const detail = await detailResp.json();
+                if (detail.success) {
+                    const firstImg = (detail.images || [])[0];
+                    const title = work.title || '未命名';
+                    const created = formatDateTime(work.created_at);
+                    const updated = formatDateTime(work.updated_at);
+                    const imgCount = (detail.images || []).length;
+                    card.innerHTML = `
+                        <div class="aspect-video bg-gray-200 mb-3 flex items-center justify-center overflow-hidden">
+                            ${firstImg ? `<img src="${firstImg}" class="w-full h-full object-cover" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'text-gray-400 text-sm\\'>无预览</div>'">` : '<div class="text-gray-400 text-sm">无图片</div>'}
+                        </div>
+                        <h3 class="font-bold text-base mb-1 truncate" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
+                        <p class="text-xs text-gray-500 mb-1">🕐 创建: ${created}</p>
+                        <p class="text-xs text-gray-500 mb-3">📝 更新: ${updated}</p>
+                        <p class="text-xs text-gray-500 mb-3">🖼 ${imgCount} 张图片</p>
+                        <div class="flex gap-2 mt-auto">
+                            <button onclick="loadHistoryWork('${work.work_id}')" class="flex-1 border-2 border-black bg-black text-white px-2 py-1.5 text-xs font-medium hover:bg-gray-800 transition-colors">📂 加载</button>
+                            <button onclick="renameHistoryWork('${work.work_id}','${escapeHtml(title)}')" class="border-2 border-gray-300 hover:border-black px-2 py-1.5 text-xs transition-colors">✏</button>
+                            <button onclick="deleteHistoryWork('${work.work_id}')" class="border-2 border-gray-300 hover:border-red-500 hover:text-red-500 px-2 py-1.5 text-xs transition-colors">🗑</button>
+                        </div>
+                    `;
+                } else {
+                    card.innerHTML = '<div class="text-red-500 text-sm p-4">加载失败</div>';
+                }
+            } catch (e) {
+                card.innerHTML = `<div class="text-red-500 text-sm p-4">${escapeHtml(String(e.message || e))}</div>`;
+            }
+        }
+    } catch (e) {
+        container.innerHTML = `<div class="col-span-full text-center text-red-400 py-12">加载失败: ${escapeHtml(String(e.message || e))}</div>`;
+    }
+}
+
+function formatDateTime(iso) {
+    if (!iso) return '-';
+    try {
+        const d = new Date(iso);
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    } catch (e) { return iso; }
+}
+
+async function startNewWork(title) {
+    try {
+        const response = await fetchWithRetry('/api/work/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ title })
+        });
+        const result = await response.json();
+        if (!result.success) throw new Error(result.error || '创建失败');
+        return result;
+    } catch (e) {
+        showToast('创建作品失败: ' + e.message, 'error');
+        throw e;
+    }
+}
+
+async function saveCurrentState() {
+    try {
+        const response = await fetchWithRetry('/api/work/save-state', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                novel_text: document.getElementById('novel-text')?.value || '',
+                segments: currentSegments,
+                characters: characters,
+                generated_images: generatedImages,
+                full_page_images: fullPageImages,
+                combined_page_images: combinedPageImages
+            })
+        });
+        const result = await response.json();
+        if (!result.success) throw new Error(result.error || '保存失败');
+    } catch (e) {
+        console.error('saveCurrentState:', e);
+        throw e;
+    }
+}
+
+async function saveCurrentToHistory() {
+    const title = prompt('为这部作品起个名字:', `作品 ${new Date().toLocaleString()}`);
+    if (title === null) return;
+    try {
+        await startNewWork(title.trim() || undefined);
+        await saveCurrentState();
+        showToast('已保存到历史记录', 'success');
+        loadHistoryList();
+    } catch (e) {
+        // 已由startNewWork弹错
+    }
+}
+
+async function loadHistoryWork(workId) {
+    if (!confirm('加载历史作品将覆盖当前内容，确定继续？')) return;
+    try {
+        // 先调用 load 接口
+        await fetchWithRetry(`/api/history/${workId}/load`, {
+            method: 'POST',
+            credentials: 'include'
+        });
+        // 拉取完整数据
+        const detailResp = await fetchWithRetry(`/api/history/${workId}`, { credentials: 'include' });
+        const detail = await detailResp.json();
+        if (!detail.success) throw new Error(detail.error || '加载失败');
+
+        const state = detail.state || {};
+        if (state.novel_text !== undefined) {
+            const el = document.getElementById('novel-text');
+            if (el) {
+                el.value = state.novel_text;
+                updateCharCount();
+            }
+        }
+        currentSegments = state.segments || { pages: [] };
+        characters = state.characters || [];
+
+        // 重建 generatedImages / fullPageImages / combinedPageImages
+        // 注意: 兼容老数据 (save 端可能没写过 combined_page_images, 默认为 {})
+        generatedImages = {};
+        const gis = state.generated_images || {};
+        for (const k in gis) generatedImages[k] = gis[k];
+        fullPageImages = {};
+        const fps = state.full_page_images || {};
+        for (const k in fps) fullPageImages[k] = fps[k];
+        combinedPageImages = {};
+        const cps = state.combined_page_images || {};
+        for (const k in cps) combinedPageImages[k] = cps[k];
+
+        // 校验完整性, 弹 toast 提示用户
+        const meta = state._meta || {};
+        const expected = [
+            ['分镜', meta.segment_count, (currentSegments.pages || []).reduce((s, p) => s + (p.segments || []).length, 0)],
+            ['角色', meta.character_count, characters.length],
+            ['人设图', meta.has_chars_with_image, characters.filter(c => (c.image_url || '').trim()).length],
+        ];
+        const mismatches = expected.filter(([_, exp, got]) => typeof exp === 'number' && exp !== got);
+
+        // 刷新各视图
+        renderCharacters();
+        renderSegments();
+        renderGallery();
+
+        if (mismatches.length > 0) {
+            console.warn('loadHistoryWork integrity:', { meta, mismatches });
+            showToast(`作品已加载, 但有 ${mismatches.length} 项数据不完整 (详见控制台)`, 'error');
+        } else {
+            showToast(`作品已加载 (${meta.segment_count || 0} 分镜, ${meta.character_count || 0} 角色, ${meta.generated_image_count || 0} 已生成图)`, 'success');
+        }
+        switchTab('input');
+    } catch (e) {
+        console.error('loadHistoryWork:', e);
+        showToast('加载失败: ' + (e.message || e), 'error');
+    }
+}
+
+async function deleteHistoryWork(workId) {
+    if (!confirm('确定删除这部作品？此操作不可恢复（图片和文字都将清除）。')) return;
+    try {
+        const response = await fetchWithRetry(`/api/history/${workId}`, {
+            method: 'DELETE',
+            credentials: 'include'
+        });
+        const result = await response.json();
+        if (result.success) {
+            showToast('已删除', 'success');
+            loadHistoryList();
+        } else {
+            showToast('删除失败: ' + (result.error || ''), 'error');
+        }
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'error');
+    }
+}
+
+async function renameHistoryWork(workId, oldTitle) {
+    const newTitle = prompt('修改作品名:', oldTitle);
+    if (newTitle === null || newTitle.trim() === '' || newTitle === oldTitle) return;
+    try {
+        const response = await fetchWithRetry(`/api/history/${workId}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ title: newTitle.trim() })
+        });
+        const result = await response.json();
+        if (result.success) {
+            showToast('已重命名', 'success');
+            loadHistoryList();
+        } else {
+            showToast('重命名失败: ' + (result.error || ''), 'error');
+        }
+    } catch (e) {
+        showToast('重命名失败: ' + e.message, 'error');
+    }
 }
 
 function showToast(message, type = 'info') {
@@ -140,10 +840,42 @@ function showToast(message, type = 'info') {
     toast.style.background = type === 'error' ? '#dc2626' : type === 'success' ? '#16a34a' : '#1a1a1a';
     toast.style.transform = 'translateY(0)';
     toast.style.opacity = '1';
-    setTimeout(() => {
+    // 清除之前可能存在的计时器
+    if (toast._hideTimer) {
+        clearTimeout(toast._hideTimer);
+        toast._hideTimer = null;
+    }
+    // 若为持久 toast, 不自动隐藏
+    if (toast.dataset.persistent === '1') return;
+    toast._hideTimer = setTimeout(() => {
         toast.style.transform = 'translateY(20px)';
         toast.style.opacity = '0';
+        toast._hideTimer = null;
     }, 3000);
+}
+
+// 长时间显示的"加载中"提示, 返回 id 用于 dismiss
+function showLoadingToast(message) {
+    const toast = document.getElementById('toast');
+    toast.textContent = message;
+    toast.style.background = '#1a1a1a';
+    toast.style.transform = 'translateY(0)';
+    toast.style.opacity = '1';
+    // 显式标记为"持久toast", 阻止 showToast 默认3秒后自动隐藏
+    toast.dataset.persistent = '1';
+    return 'toast';
+}
+
+function dismissLoadingToast(id) {
+    if (id !== 'toast') return;
+    const toast = document.getElementById('toast');
+    if (toast._hideTimer) {
+        clearTimeout(toast._hideTimer);
+        toast._hideTimer = null;
+    }
+    toast.dataset.persistent = '';
+    toast.style.transform = 'translateY(20px)';
+    toast.style.opacity = '0';
 }
 
 function updateCharCount() {
@@ -152,6 +884,75 @@ function updateCharCount() {
 }
 
 document.getElementById('novel-text').addEventListener('input', updateCharCount);
+
+// ===== 风格Tag管理 =====
+function renderStylePresets() {
+    const container = document.getElementById('style-tag-presets');
+    container.innerHTML = '';
+    STYLE_PRESETS.forEach(preset => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.dataset.id = preset.id;
+        const isSelected = selectedPresetIds.has(preset.id);
+        btn.className = isSelected
+            ? 'px-3 py-1.5 text-sm font-medium border-2 border-black bg-black text-white transition-all'
+            : 'px-3 py-1.5 text-sm font-medium border-2 border-gray-300 hover:border-black transition-all';
+        btn.textContent = preset.label;
+        btn.onclick = () => togglePresetStyle(preset.id);
+        container.appendChild(btn);
+    });
+}
+
+function renderCustomStyleTags() {
+    const container = document.getElementById('custom-style-tags');
+    container.innerHTML = '';
+    customStyleTags.forEach((tag, idx) => {
+        const chip = document.createElement('span');
+        chip.className = 'inline-flex items-center gap-1 px-2 py-1 text-sm border-2 border-black bg-gray-100';
+        chip.innerHTML = `<span>${escapeHtml(tag)}</span><button type="button" onclick="removeCustomStyleTag(${idx})" class="text-gray-500 hover:text-black font-bold">×</button>`;
+        container.appendChild(chip);
+    });
+}
+
+function togglePresetStyle(id) {
+    if (selectedPresetIds.has(id)) {
+        selectedPresetIds.delete(id);
+    } else {
+        selectedPresetIds.add(id);
+    }
+    renderStylePresets();
+}
+
+function addCustomStyleTag() {
+    const input = document.getElementById('custom-style-input');
+    const value = input.value.trim();
+    if (!value) return;
+    if (customStyleTags.includes(value)) {
+        showToast('该风格已存在', 'error');
+        return;
+    }
+    customStyleTags.push(value);
+    input.value = '';
+    renderCustomStyleTags();
+}
+
+function removeCustomStyleTag(idx) {
+    customStyleTags.splice(idx, 1);
+    renderCustomStyleTags();
+}
+
+function getStyleTagsString() {
+    const parts = [];
+    STYLE_PRESETS.forEach(p => {
+        if (selectedPresetIds.has(p.id)) parts.push(p.tags);
+    });
+    parts.push(...customStyleTags);
+    return parts.join(', ');
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 
 async function saveConfig() {
     const config = {
@@ -162,7 +963,13 @@ async function saveConfig() {
         img_api_key: document.getElementById('img-api-key').value,
         img_model: document.getElementById('img-model').value,
         segments_per_page: parseInt(document.getElementById('segments-per-page').value) || 4,
-        negative_prompt: document.getElementById('negative-prompt').value
+        negative_prompt: document.getElementById('negative-prompt').value,
+        reference_strength: (() => {
+            const v = parseFloat(document.getElementById('reference-strength')?.value);
+            return isNaN(v) ? 0.6 : Math.max(0, Math.min(1, v));
+        })(),
+        style_preset_ids: Array.from(selectedPresetIds),
+        custom_style_tags: customStyleTags.slice()
     };
 
     localStorage.setItem('manga_config', JSON.stringify(config));
@@ -171,6 +978,7 @@ async function saveConfig() {
         await fetch('/api/save-config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify(config)
         });
     } catch (e) {}
@@ -178,19 +986,47 @@ async function saveConfig() {
     showToast('配置已保存', 'success');
 }
 
-function loadConfig() {
+async function loadConfig() {
+    // 先尝试从服务端加载配置
+    try {
+        const response = await fetch('/api/load-config', { credentials: 'include' });
+        if (response.ok) {
+            const serverConfig = await response.json();
+            if (serverConfig && Object.keys(serverConfig).length > 0) {
+                localStorage.setItem('manga_config', JSON.stringify(serverConfig));
+                applyConfigToForm(serverConfig);
+                return;
+            }
+        }
+    } catch (e) {}
+    // 回退到localStorage
     const saved = localStorage.getItem('manga_config');
     if (saved) {
-        const config = JSON.parse(saved);
-        document.getElementById('llm-api-url').value = config.llm_api_url || '';
-        document.getElementById('llm-api-key').value = config.llm_api_key || '';
-        document.getElementById('llm-model').value = config.llm_model || '';
-        document.getElementById('img-api-url').value = config.img_api_url || '';
-        document.getElementById('img-api-key').value = config.img_api_key || '';
-        document.getElementById('img-model').value = config.img_model || '';
-        document.getElementById('segments-per-page').value = config.segments_per_page || 4;
-        document.getElementById('negative-prompt').value = config.negative_prompt || '';
+        applyConfigToForm(JSON.parse(saved));
     }
+}
+
+function applyConfigToForm(config) {
+    document.getElementById('llm-api-url').value = config.llm_api_url || '';
+    document.getElementById('llm-api-key').value = config.llm_api_key || '';
+    document.getElementById('llm-model').value = config.llm_model || '';
+    document.getElementById('img-api-url').value = config.img_api_url || '';
+    document.getElementById('img-api-key').value = config.img_api_key || '';
+    document.getElementById('img-model').value = config.img_model || '';
+    document.getElementById('segments-per-page').value = config.segments_per_page || 4;
+    document.getElementById('negative-prompt').value = config.negative_prompt || '';
+    const rsEl = document.getElementById('reference-strength');
+    if (rsEl) {
+        rsEl.value = (config.reference_strength ?? 0.6);
+        const rsLabel = document.getElementById('reference-strength-value');
+        if (rsLabel) rsLabel.textContent = parseFloat(rsEl.value).toFixed(2);
+    }
+
+    // 恢复风格Tag选择
+    selectedPresetIds = new Set(config.style_preset_ids || []);
+    customStyleTags = (config.custom_style_tags || []).slice();
+    renderStylePresets();
+    renderCustomStyleTags();
 }
 
 async function startSegment() {
@@ -203,17 +1039,37 @@ async function startSegment() {
     const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
     if (!config.llm_api_url) {
         showToast('请先配置大语言模型API', 'error');
-        switchTab('config');
+        openConfigModal();
         return;
+    }
+
+    // 任务: 人设图缺失拦截
+    // - 角色列表为空 → 不阻塞, 让 LLM 在 /api/segment 里自动提取 (兼容老流程)
+    // - 角色列表有但还有人没设人设图 → 弹模态框, 让用户选 "去补" / "继续不用"
+    const missingImages = (characters || []).filter(c => !(c.image_url || '').trim());
+    if (missingImages.length > 0) {
+        const goAhead = await showMissingPersonaModal(missingImages);
+        if (!goAhead) return;  // 用户跳去补图, 啥都不做
+        // 用户选"仍然继续", 进入正常流程
     }
 
     const spinner = document.getElementById('segment-spinner');
     spinner.classList.remove('hidden');
 
+    const unlock = lockButton(
+        document.getElementById('start-segment-btn'),
+        document.getElementById('start-segment-label'),
+        '⏳ 分镜生成中…'
+    );
+
+    createProgressBar('segment-progress');
+    startFakeProgress('segment-progress-bar', 'segment-progress-text', 120000);
+
     try {
-        const response = await fetch('/api/segment', {
+        const response = await fetchWithRetry('/api/segment', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 text: text,
                 api_url: config.llm_api_url,
@@ -224,18 +1080,56 @@ async function startSegment() {
         });
 
         const result = await response.json();
+        finishProgress('segment-progress-bar', 'segment-progress-text');
         if (result.success) {
+            // 任务5: 新分镜 = 新作品, 先清空前次的图片缓存 (旧图、引用图、work/images)
+            try {
+                await fetchWithRetry('/api/clear-cache', { method: 'POST', credentials: 'include' }, 1);
+            } catch (e) { console.log('clear-cache skipped:', e.message); }
+            generatedImages = {};
+            fullPageImages = {};
+            combinedPageImages = {};
+            renderGallery();
+
             currentSegments = result.data;
+            // 任务4: 一次 LLM 调用同时拿到分镜 + 角色
+            const newChars = Array.isArray(result.characters) ? result.characters : [];
+            const hadChars = characters && characters.length > 0;
+            if (newChars.length > 0) {
+                if (!hadChars) {
+                    characters = newChars;
+                } else {
+                    const existing = new Set(characters.map(c => (c.name || '').trim()));
+                    for (const c of newChars) {
+                        if (c && c.name && !existing.has((c.name || '').trim())) {
+                            characters.push(c);
+                        }
+                    }
+                }
+                renderCharacters();
+                syncResults();
+            }
             renderSegments();
-            showToast(`成功生成 ${currentSegments.pages.length} 页分镜`, 'success');
-            switchTab('segments');
+            syncResults();
+            const charCount = newChars.length;
+            const charMsg = charCount > 0 ? `，并自动提取 ${charCount} 个角色` : '';
+            showToast(`成功生成 ${currentSegments.pages.length} 页分镜${charMsg}，旧图片已清除`, 'success');
+            // 任务5: 自动保存到当前作品
+            saveCurrentState().catch(e => console.log('auto save work error:', e));
+            if (newChars.length > 0) {
+                switchTab('characters');
+            } else {
+                switchTab('segments');
+            }
         } else {
             showToast(result.error || '分镜失败', 'error');
         }
     } catch (e) {
+        finishProgress('segment-progress-bar', 'segment-progress-text');
         showToast('请求失败: ' + e.message, 'error');
     } finally {
         spinner.classList.add('hidden');
+        unlock();
     }
 }
 
@@ -252,6 +1146,7 @@ function renderSegments() {
 
     container.innerHTML = currentSegments.pages.map((page, pageIdx) => {
         const hasFullPageImage = fullPageImages[pageIdx];
+        const hasCombinedPage = combinedPageImages;
         const allSelectedChars = [];
         page.segments.forEach(seg => {
             if (seg.selected_characters) {
@@ -271,9 +1166,13 @@ function renderSegments() {
                     <button onclick="generatePageImages(${pageIdx})" class="text-sm bg-gray-700 text-white px-3 py-1 hover:bg-gray-800 transition-colors">
                         逐个生成（不推荐）
                     </button>
-                    <button onclick="generateFullPage(${pageIdx})" class="text-sm bg-black text-white px-3 py-1 hover:bg-gray-800 transition-colors flex items-center gap-1">
+                    <button onclick="generateFullPage(${pageIdx}, false, null, this)" class="text-sm bg-black text-white px-3 py-1 hover:bg-gray-800 transition-colors flex items-center gap-1">
                         <span>整页生成</span>
                         <span id="full-page-spinner-${pageIdx}" class="loading-spinner hidden" style="width:12px;height:12px;border-width:1px;"></span>
+                    </button>
+                    <button onclick="combinePage(${pageIdx}, this)" class="text-sm bg-yellow-400 text-black border-2 border-black px-3 py-1 hover:bg-yellow-300 transition-colors flex items-center gap-1" title="任务3: 用本页已生成的 segment 图 + dialogue 自动拼版 (自适应网格 + 4 种气泡)">
+                        <span>拼版预览</span>
+                        <span id="combine-spinner-${pageIdx}" class="loading-spinner hidden" style="width:12px;height:12px;border-width:1px;"></span>
                     </button>
                 </div>
             </div>
@@ -281,6 +1180,15 @@ function renderSegments() {
             <div class="mb-6 border-2 border-black p-1">
                 <div class="text-sm text-gray-600 mb-2">✅ 整页漫画</div>
                 <img src="${hasFullPageImage}" class="w-full cursor-pointer" onclick="openModal('${hasFullPageImage}')">
+            </div>
+            ` : ''}
+            ${hasCombinedPage[pageIdx] ? `
+            <div class="mb-6 border-2 border-yellow-500 p-1 bg-yellow-50">
+                <div class="text-sm text-gray-700 mb-2 flex justify-between items-center">
+                    <span>📒 拼版预览 (任务3 - 自适应网格 + 4 种气泡)</span>
+                    <button onclick="combinePage(${pageIdx}, this)" class="text-xs text-blue-700 hover:underline">重新拼版</button>
+                </div>
+                <img src="${hasCombinedPage[pageIdx]}" class="w-full cursor-pointer border-2 border-black" onclick="openModal('${hasCombinedPage[pageIdx]}')">
             </div>
             ` : ''}
             <div class="text-xs text-gray-500 mb-3">
@@ -291,6 +1199,19 @@ function renderSegments() {
                     const key = `${pageIdx}-${segIdx}`;
                     const hasImage = generatedImages[key];
                     const selectedChars = seg.selected_characters || [];
+                    // 计算该分镜实际可用的参考图数量
+                    const refCount = selectedChars.filter(cIdx => characters[cIdx] && characters[cIdx].image_url).length;
+                    const refBadge = refCount > 0
+                        ? `<span class="ml-1 inline-flex items-center justify-center text-[10px] font-bold bg-yellow-300 text-black px-1.5 py-0.5 rounded leading-none" title="该分镜将使用 ${refCount} 张角色参考图">${refCount}参考</span>`
+                        : '';
+                    // 任务2: 镜头语言枚举选项 (与服务端 STYLE_TAG_MAP 一致)
+                    const camOpts = ['俯视','仰视','平视','斜视','主观视角'];
+                    const compOpts = ['三分法','对称','中心对称','框架式','引导线'];
+                    const moodOpts = ['紧张','紫蓝','紫红','暧昧','悲伤','温馨','压抑','恐怖'];
+                    const scaleOpts = ['大远景','远景','全景','中景','近景','特写','大特写'];
+                    const lightOpts = ['硬光','背光','顶光','荧光灯','光斑','柔光','侧光','剪影'];
+                    const typeOpts = ['静态','动态','回忆','梦境'];
+                    const optHtml = (opts, cur) => `<option value=''>(无)</option>` + opts.map(o => `<option ${o===cur?'selected':''}>${o}</option>`).join('');
                     return `
                     <div class="segment-box p-4 relative" id="segment-${key}">
                         <div class="flex justify-between items-start mb-2">
@@ -303,41 +1224,80 @@ function renderSegments() {
                                 ${characters.length === 0 ? `
                                     <span class="text-xs text-gray-400">请先到"角色管理"生成角色</span>
                                 ` : characters.map((char, charIdx) => `
-                                    <label class="flex items-center gap-1 text-xs bg-gray-100 px-2 py-1 rounded cursor-pointer hover:bg-gray-200">
-                                        <input type="checkbox" 
-                                            ${selectedChars.includes(charIdx) ? 'checked' : ''} 
+                                    <label class="flex items-center gap-1 text-xs bg-gray-100 px-2 py-1 rounded cursor-pointer hover:bg-gray-200 ${!char.image_url ? 'opacity-50' : ''}" title="${char.image_url ? '该角色已生成人设图，将作为参考' : '该角色尚未生成人设图，无法作为参考'}">
+                                        <input type="checkbox"
+                                            ${selectedChars.includes(charIdx) ? 'checked' : ''}
+                                            ${!char.image_url ? 'disabled' : ''}
                                             onchange="toggleCharacter(${pageIdx}, ${segIdx}, ${charIdx})"
                                             class="mr-1">
-                                        ${char.name}
+                                        ${char.name}${!char.image_url ? ' (无图)' : ''}
                                     </label>
                                 `).join('')}
                             </div>
                         </div>
                         <div class="mb-2">
                             <label class="text-xs text-gray-500 font-medium">场景描述</label>
-                            <textarea 
+                            <textarea
                                 onchange="updateSegment(${pageIdx}, ${segIdx}, 'scene_description', this.value)"
-                                class="w-full p-2 border border-gray-300 text-sm mt-1 resize-none focus:border-black outline-none" 
-                                rows="3">${seg.scene_description || ''}</textarea>
+                                class="w-full p-2 border border-gray-300 text-sm mt-1 resize-none focus:border-black outline-none"
+                                rows="2">${seg.scene_description || ''}</textarea>
                         </div>
                         <div class="mb-2">
-                            <label class="text-xs text-gray-500 font-medium">对话/旁白</label>
-                            <textarea 
+                            <label class="text-xs text-gray-500 font-medium">对话/旁白 (类型决定气泡形状)</label>
+                            <textarea
                                 onchange="updateSegment(${pageIdx}, ${segIdx}, 'dialogue', this.value)"
-                                class="w-full p-2 border border-gray-300 text-sm mt-1 resize-none focus:border-black outline-none" 
-                                rows="2">${seg.dialogue || ''}</textarea>
+                                class="w-full p-2 border border-gray-300 text-sm mt-1 resize-none focus:border-black outline-none"
+                                rows="1">${seg.dialogue || ''}</textarea>
+                            <select onchange="updateSegment(${pageIdx}, ${segIdx}, 'dialogue_type', this.value)"
+                                class="mt-1 text-xs border border-gray-300 focus:border-black outline-none p-1 bg-white"
+                                title="任务3: 选择对话气泡形状">
+                                <option value="dialogue" ${(!seg.dialogue_type || seg.dialogue_type==='dialogue')?'selected':''}>💬 对话气泡 (圆角矩形+尾巴)</option>
+                                <option value="thought" ${seg.dialogue_type==='thought'?'selected':''}>💭 心理活动 (云形)</option>
+                                <option value="shout" ${seg.dialogue_type==='shout'?'selected':''}>💥 大喊 (锯齿/爆炸)</option>
+                                <option value="narration" ${seg.dialogue_type==='narration'?'selected':''}>📜 旁白叙述 (矩形)</option>
+                            </select>
                         </div>
+                        <details class="mb-2" ${seg.camera_angle || seg.composition || seg.mood || seg.shot_scale || seg.lighting || seg.of_type ? 'open' : ''}>
+                            <summary class="text-xs text-gray-500 font-medium cursor-pointer select-none">镜头语言 (任务2) ${(seg.camera_angle || seg.composition || seg.mood || seg.shot_scale || seg.lighting || seg.of_type) ? '<span class="text-green-600">●</span>' : ''}</summary>
+                            <div class="grid grid-cols-2 gap-2 mt-2">
+                                <div>
+                                    <label class="text-[10px] text-gray-500">视角</label>
+                                    <select onchange="updateSegment(${pageIdx}, ${segIdx}, 'camera_angle', this.value)" class="w-full p-1 text-xs border border-gray-300 focus:border-black outline-none">${optHtml(camOpts, seg.camera_angle || '')}</select>
+                                </div>
+                                <div>
+                                    <label class="text-[10px] text-gray-500">构图</label>
+                                    <select onchange="updateSegment(${pageIdx}, ${segIdx}, 'composition', this.value)" class="w-full p-1 text-xs border border-gray-300 focus:border-black outline-none">${optHtml(compOpts, seg.composition || '')}</select>
+                                </div>
+                                <div>
+                                    <label class="text-[10px] text-gray-500">情绪</label>
+                                    <select onchange="updateSegment(${pageIdx}, ${segIdx}, 'mood', this.value)" class="w-full p-1 text-xs border border-gray-300 focus:border-black outline-none">${optHtml(moodOpts, seg.mood || '')}</select>
+                                </div>
+                                <div>
+                                    <label class="text-[10px] text-gray-500">景别</label>
+                                    <select onchange="updateSegment(${pageIdx}, ${segIdx}, 'shot_scale', this.value)" class="w-full p-1 text-xs border border-gray-300 focus:border-black outline-none">${optHtml(scaleOpts, seg.shot_scale || '')}</select>
+                                </div>
+                                <div>
+                                    <label class="text-[10px] text-gray-500">光照</label>
+                                    <select onchange="updateSegment(${pageIdx}, ${segIdx}, 'lighting', this.value)" class="w-full p-1 text-xs border border-gray-300 focus:border-black outline-none">${optHtml(lightOpts, seg.lighting || '')}</select>
+                                </div>
+                                <div>
+                                    <label class="text-[10px] text-gray-500">场景类型</label>
+                                    <select onchange="updateSegment(${pageIdx}, ${segIdx}, 'of_type', this.value)" class="w-full p-1 text-xs border border-gray-300 focus:border-black outline-none">${optHtml(typeOpts, seg.of_type || '')}</select>
+                                </div>
+                            </div>
+                        </details>
                         <div class="mb-3">
-                            <label class="text-xs text-gray-500 font-medium">绘图提示词</label>
-                            <textarea 
+                            <label class="text-xs text-gray-500 font-medium">绘图提示词 (已含镜头语言升级)</label>
+                            <textarea
                                 onchange="updateSegment(${pageIdx}, ${segIdx}, 'style_prompt', this.value)"
-                                class="w-full p-2 border border-gray-300 text-sm mt-1 resize-none focus:border-black outline-none font-mono text-xs" 
+                                class="w-full p-2 border border-gray-300 text-sm mt-1 resize-none focus:border-black outline-none font-mono text-xs"
                                 rows="2">${seg.style_prompt || 'black and white manga style, detailed ink drawing'}</textarea>
                         </div>
                         <div class="flex gap-2">
-                            <button onclick="generateSingleImage(${pageIdx}, ${segIdx})" 
+                            <button onclick="generateSingleImage(${pageIdx}, ${segIdx}, false, this)"
                                 class="flex-1 bg-gray-800 text-white text-sm py-2 hover:bg-black transition-colors flex items-center justify-center gap-1">
                                 <span>生成图片</span>
+                                ${refBadge}
                             </button>
                             ${hasImage ? `<button onclick="viewImage('${key}')" class="px-3 py-2 border-2 border-black text-sm hover:bg-gray-100">查看</button>` : ''}
                         </div>
@@ -372,7 +1332,7 @@ function toggleCharacter(pageIdx, segIdx, charIdx) {
     renderSegments();
 }
 
-async function generateSingleImage(pageIdx, segIdx, skipLock = false) {
+async function generateSingleImage(pageIdx, segIdx, skipLock = false, btn = null) {
     if (!skipLock && isGenerating) {
         showToast('请等待当前生成完成', 'error');
         return;
@@ -381,13 +1341,13 @@ async function generateSingleImage(pageIdx, segIdx, skipLock = false) {
     const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
     if (!config.img_api_url) {
         showToast('请先配置图像生成API', 'error');
-        switchTab('config');
+        openConfigModal();
         return;
     }
 
     const seg = currentSegments.pages[pageIdx].segments[segIdx];
     const prompt = seg.style_prompt ? `${seg.style_prompt}, ${seg.scene_description}` : seg.scene_description;
-    
+
     const selectedChars = seg.selected_characters || [];
     const characterReferences = selectedChars.map(charIdx => ({
         name: characters[charIdx].name,
@@ -396,24 +1356,40 @@ async function generateSingleImage(pageIdx, segIdx, skipLock = false) {
     })).filter(c => c.image_url);
 
     if (!skipLock) isGenerating = true;
-    const btn = document.querySelector(`#segment-${pageIdx}-${segIdx} button`);
-    const originalText = btn ? btn.innerHTML : '';
-    if (btn) {
-        btn.innerHTML = '<span class="loading-spinner" style="width:16px;height:16px;border-width:2px;"></span>';
-        btn.disabled = true;
+    // 优先用传进来的 btn (动态生成的 segment 按钮), 否则兜底用 querySelector
+    const targetBtn = btn || document.querySelector(`#segment-${pageIdx}-${segIdx} button`);
+    const labelEl = targetBtn ? targetBtn.querySelector('span') : null;
+    const unlock = lockButton(targetBtn, labelEl, '⏳ 生成中…');
+    if (targetBtn) {
+        targetBtn.innerHTML = '<span class="loading-spinner" style="width:16px;height:16px;border-width:2px;"></span>';
+        targetBtn.disabled = true;
     }
 
     try {
-        const response = await fetch('/api/generate-image', {
+        const response = await fetchWithRetry('/api/generate-image', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 prompt: prompt,
+                style_prompt: seg.style_prompt || '',
                 api_url: config.img_api_url,
                 api_key: config.img_api_key,
                 model: config.img_model,
                 negative_prompt: config.negative_prompt,
-                character_references: characterReferences
+                style_tags: getStyleTagsString(),
+                character_references: characterReferences,
+                references: characterReferences,  // 兼容新字段名
+                reference_strength: (config.reference_strength ?? 0.6),
+                // 任务2: 镜头语言结构化字段
+                camera_angle: seg.camera_angle || '',
+                composition: seg.composition || '',
+                mood: seg.mood || '',
+                shot_scale: seg.shot_scale || '',
+                lighting: seg.lighting || '',
+                of_type: seg.of_type || '',
+                page_idx: pageIdx,
+                seg_idx: segIdx
             })
         });
 
@@ -422,6 +1398,7 @@ async function generateSingleImage(pageIdx, segIdx, skipLock = false) {
             generatedImages[`${pageIdx}-${segIdx}`] = result.image_url;
             renderSegments();
             renderGallery();
+            syncResults();  // 主动同步图片映射到服务器
             showToast('图片生成成功', 'success');
         } else {
             showToast(result.error || '生成失败', 'error');
@@ -430,9 +1407,11 @@ async function generateSingleImage(pageIdx, segIdx, skipLock = false) {
         showToast('请求失败: ' + e.message, 'error');
     } finally {
         if (!skipLock) isGenerating = false;
-        if (btn) {
-            btn.innerHTML = originalText;
-            btn.disabled = false;
+        // unlock 会自动恢复 labelEl 原文字 + 解除 disabled
+        if (targetBtn) {
+            // 重新渲染以恢复原 button 内部结构 (含 refBadge)
+            unlock();
+            renderSegments();
         }
     }
 }
@@ -446,7 +1425,7 @@ async function generatePageImages(pageIdx) {
     showToast(`第 ${pageIdx + 1} 页生成完成`, 'success');
 }
 
-async function generateFullPage(pageIdx, skipLock = false) {
+async function generateFullPage(pageIdx, skipLock = false, previousPageImage = null, btn = null) {
     if (!skipLock && isGenerating) {
         showToast('请等待当前生成完成', 'error');
         return;
@@ -455,13 +1434,17 @@ async function generateFullPage(pageIdx, skipLock = false) {
     const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
     if (!config.img_api_url) {
         showToast('请先配置图像生成API', 'error');
-        switchTab('config');
+        openConfigModal();
         return;
     }
 
     if (!skipLock) isGenerating = true;
     const spinner = document.getElementById(`full-page-spinner-${pageIdx}`);
     if (spinner) spinner.classList.remove('hidden');
+    // 动态按钮, 用 lockButton 锁住避免连点
+    const targetBtn = btn || document.querySelector(`#panel-segments button[onclick*="generateFullPage(${pageIdx}"]`);
+    const labelEl = targetBtn ? targetBtn.querySelector('span:not([id*="spinner"])') : null;
+    const unlock = lockButton(targetBtn, labelEl, '⏳ 整页生成中…');
 
     const page = currentSegments.pages[pageIdx];
 
@@ -474,9 +1457,10 @@ async function generateFullPage(pageIdx, skipLock = false) {
         }));
 
     try {
-        const response = await fetch('/api/generate-page', {
+        const response = await fetchWithRetry('/api/generate-page', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 page: page,
                 page_num: page.page_number,
@@ -484,7 +1468,12 @@ async function generateFullPage(pageIdx, skipLock = false) {
                 api_key: config.img_api_key,
                 model: config.img_model,
                 negative_prompt: config.negative_prompt,
-                character_references: characterReferences
+                style_tags: getStyleTagsString(),
+                character_references: characterReferences,
+                references: characterReferences,  // 兼容新字段名
+                reference_strength: (config.reference_strength ?? 0.6),
+                previous_page_image: previousPageImage,
+                page_idx: pageIdx
             })
         });
 
@@ -493,6 +1482,7 @@ async function generateFullPage(pageIdx, skipLock = false) {
             fullPageImages[pageIdx] = result.image_url;
             renderSegments();
             renderGallery();
+            syncResults();  // 主动同步整页图片映射到服务器
             showToast(`第 ${page.page_number} 页整页生成成功`, 'success');
         } else {
             showToast(result.error || '生成失败', 'error');
@@ -502,6 +1492,66 @@ async function generateFullPage(pageIdx, skipLock = false) {
     } finally {
         if (!skipLock) isGenerating = false;
         if (spinner) spinner.classList.add('hidden');
+        unlock();
+    }
+}
+
+async function combinePage(pageIdx, btn = null) {
+    const page = currentSegments.pages[pageIdx];
+    if (!page) {
+        showToast('找不到分镜页', 'error');
+        return;
+    }
+    const segs = page.segments;
+    const segImgs = segs.map((_, segIdx) => generatedImages[`${pageIdx}-${segIdx}`]);
+    if (segImgs.every(u => !u)) {
+        showToast('本页还没有任何分镜图, 请先生成图片', 'error');
+        return;
+    }
+    const spinner = document.getElementById(`combine-spinner-${pageIdx}`);
+    if (spinner) spinner.classList.remove('hidden');
+    showLoadingToast('正在拼版...');
+
+    // 任务: 拼版期间禁用按钮, 防止点 "重新拼版" 引发并发请求
+    const targetBtn = btn || document.querySelector(`#panel-segments button[onclick*="combinePage(${pageIdx}"]`);
+    const labelEl = targetBtn ? targetBtn.querySelector('span:not([id*="spinner"])') : null;
+    const unlock = lockButton(targetBtn, labelEl, '⏳ 拼版中…');
+
+    try {
+        const response = await fetch('/api/combine-page', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                page_idx: pageIdx,
+                segments: segs.map((s, segIdx) => ({
+                    scene_description: s.scene_description || '',
+                    dialogue: s.dialogue || '',
+                    dialogue_type: s.dialogue_type || 'dialogue',
+                    image_url: generatedImages[`${pageIdx}-${segIdx}`] || null,
+                })),
+                panel_layout: null,         // 用自适应网格
+                allow_overflow: true,       // 允许气泡越界 (后端字段名)
+                gap: 4,
+                padding: 4,
+            })
+        });
+        const result = await response.json();
+        if (result.success && result.image_url) {
+            combinedPageImages[pageIdx] = result.image_url;
+            renderSegments();
+            renderGallery();
+            syncResults();
+            showToast(`第 ${page.page_number} 页拼版完成 (${result.panel_count || segs.length} 格)`, 'success');
+        } else {
+            showToast('拼版失败: ' + (result.error || '未知错误'), 'error');
+        }
+    } catch (e) {
+        console.error('combinePage error:', e);
+        showToast('拼版请求失败: ' + e.message, 'error');
+    } finally {
+        dismissLoadingToast();
+        if (spinner) spinner.classList.add('hidden');
+        unlock();
     }
 }
 
@@ -514,6 +1564,11 @@ async function generateAllFullPages() {
     const spinner = document.getElementById('batch-full-spinner');
     spinner.classList.remove('hidden');
     isGenerating = true;
+    const unlock = lockButton(
+        document.getElementById('batch-full-btn'),
+        document.getElementById('batch-full-label'),
+        '⏳ 批量整页生成中…'
+    );
 
     const pagesToGenerate = [];
     for (let p = 0; p < currentSegments.pages.length; p++) {
@@ -522,11 +1577,23 @@ async function generateAllFullPages() {
         }
     }
 
-    const tasks = pagesToGenerate.map(p => () => generateFullPage(p, true).then(() => new Promise(r => setTimeout(r, 500))));
-    await runWithConcurrency(tasks, CONCURRENT_LIMIT);
+    createProgressBar('batch-progress');
+    startFakeProgress('batch-progress-bar', 'batch-progress-text', 120000);
+
+    // 串行生成，每页参考上一页漫画和人设图
+    let lastPageImage = null;
+    for (let i = 0; i < pagesToGenerate.length; i++) {
+        const p = pagesToGenerate[i];
+        await generateFullPage(p, true, lastPageImage);
+        await new Promise(r => setTimeout(r, 800));
+        lastPageImage = fullPageImages[p] || null;
+    }
+
+    finishProgress('batch-progress-bar', 'batch-progress-text');
 
     isGenerating = false;
     spinner.classList.add('hidden');
+    unlock();
     showToast('批量整页生成完成', 'success');
     switchTab('gallery');
 }
@@ -540,33 +1607,45 @@ async function generateAllImages() {
     const spinner = document.getElementById('batch-spinner');
     spinner.classList.remove('hidden');
     isGenerating = true;
+    const unlock = lockButton(
+        document.getElementById('batch-single-btn'),
+        document.getElementById('batch-single-label'),
+        '⏳ 批量逐个生成中…'
+    );
 
-    const tasks = [];
+    const itemsToGenerate = [];
     for (let p = 0; p < currentSegments.pages.length; p++) {
         for (let s = 0; s < currentSegments.pages[p].segments.length; s++) {
             const key = `${p}-${s}`;
             if (!generatedImages[key]) {
-                const pageIdx = p, segIdx = s;
-                tasks.push(() => generateSingleImage(pageIdx, segIdx, true).then(() => new Promise(r => setTimeout(r, 300))));
+                itemsToGenerate.push({ pageIdx: p, segIdx: s });
             }
         }
     }
 
-    await runWithConcurrency(tasks, CONCURRENT_LIMIT);
+    // 串行生成
+    let lastPageImages = {};
+    for (const item of itemsToGenerate) {
+        await generateSingleImage(item.pageIdx, item.segIdx, true);
+        lastPageImages[item.pageIdx] = generatedImages[`${item.pageIdx}-${item.segIdx}`] || null;
+        await new Promise(r => setTimeout(r, 300));
+    }
 
     isGenerating = false;
     spinner.classList.add('hidden');
+    unlock();
     showToast('批量逐个生成完成', 'success');
     switchTab('gallery');
 }
 
 function renderGallery() {
     const container = document.getElementById('gallery-container');
-    
+
     const hasFullPages = Object.keys(fullPageImages).length > 0;
     const hasIndividual = Object.keys(generatedImages).length > 0;
+    const hasCombined = Object.keys(combinedPageImages).length > 0;
 
-    if (!hasFullPages && !hasIndividual) {
+    if (!hasFullPages && !hasIndividual && !hasCombined) {
         container.innerHTML = `
             <div class="text-center py-20 text-gray-400">
                 <div class="text-6xl mb-4">🎨</div>
@@ -576,6 +1655,29 @@ function renderGallery() {
     }
 
     let html = '';
+
+    if (hasCombined) {
+        html += `
+        <div class="mb-8">
+            <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                <span class="bg-yellow-400 text-black border-2 border-black px-2 py-1 text-sm">📒 拼版预览 (任务3)</span>
+            </h2>
+            <div class="space-y-6">
+                ${currentSegments.pages.map((page, pageIdx) => {
+                    const img = combinedPageImages[pageIdx];
+                    if (!img) return '';
+                    return `
+                    <div class="comic-page p-4">
+                        <h3 class="text-lg font-bold mb-3 text-center border-b-2 border-black pb-2">第 ${page.page_number} 页</h3>
+                        <div class="border-2 border-yellow-500">
+                            <img src="${img}" class="w-full cursor-pointer" onclick="openModal('${img}')">
+                        </div>
+                    </div>
+                    `;
+                }).join('')}
+            </div>
+        </div>`;
+    }
 
     if (hasFullPages) {
         html += `
@@ -655,6 +1757,61 @@ function closeModal() {
     document.getElementById('image-modal').classList.add('hidden');
 }
 
+// ===== 人设图缺失拦截模态框 =====
+function showMissingPersonaModal(missingChars) {
+    return new Promise((resolve) => {
+        // 移除旧模态框 (避免叠加)
+        const old = document.getElementById('missing-persona-modal');
+        if (old) old.remove();
+
+        const names = missingChars.map(c => c.name || '(未命名)').join('、');
+        const html = `
+        <div id="missing-persona-modal" class="fixed inset-0 z-50 flex items-center justify-center">
+            <div class="absolute inset-0 bg-black bg-opacity-50" onclick="document.getElementById('missing-persona-modal')?._resolveCancel()"></div>
+            <div class="relative bg-white manga-border panel-shadow max-w-md w-full mx-4 p-6 z-10">
+                <h3 class="text-xl font-bold mb-3 flex items-center gap-2">🎭 角色人设图缺失</h3>
+                <p class="text-sm text-gray-700 mb-2">
+                    以下 <span class="font-bold text-red-600">${missingChars.length}</span> 个角色还没上传/生成 <b>人设图</b>:
+                </p>
+                <div class="bg-yellow-50 border-l-4 border-yellow-400 p-3 mb-4 text-sm text-gray-700 max-h-32 overflow-y-auto">
+                    ${names}
+                </div>
+                <p class="text-xs text-gray-500 mb-4">
+                    没有统一人设图, 各分镜的角色形象会不一致. 建议先去 <b>角色管理</b> 手动上传或自动生成, 再来分镜.
+                </p>
+                <div class="flex flex-col gap-2">
+                    <button id="persona-modal-go" class="btn-primary py-2 text-sm font-medium">
+                        🎨 去角色管理上传/生成
+                    </button>
+                    <button id="persona-modal-skip" class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-2 text-sm">
+                        仍然继续 (不用人设图)
+                    </button>
+                </div>
+            </div>
+        </div>
+        `;
+        const wrap = document.createElement('div');
+        wrap.innerHTML = html;
+        document.body.appendChild(wrap.firstElementChild);
+
+        const modal = document.getElementById('missing-persona-modal');
+        // 让点遮罩 = 取消
+        modal._resolveCancel = () => {
+            modal.remove();
+            resolve(false);
+        };
+        document.getElementById('persona-modal-go').onclick = () => {
+            modal.remove();
+            switchTab('characters');
+            resolve(false);
+        };
+        document.getElementById('persona-modal-skip').onclick = () => {
+            modal.remove();
+            resolve(true);
+        };
+    });
+}
+
 function exportScript() {
     const data = {
         pages: currentSegments.pages.map((page, pageIdx) => ({
@@ -707,6 +1864,7 @@ async function downloadAll() {
             const response = await fetch('/api/download', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ url: img.url, filename: img.filename })
             });
             
@@ -749,17 +1907,27 @@ async function analyzeCharacters() {
     const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
     if (!config.llm_api_url) {
         showToast('请先配置API', 'error');
-        switchTab('config');
+        openConfigModal();
         return;
     }
 
     const spinner = document.getElementById('analyze-spinner');
     spinner.classList.remove('hidden');
 
+    const unlock = lockButton(
+        document.getElementById('analyze-characters-btn'),
+        document.getElementById('analyze-characters-label'),
+        '⏳ 角色分析中…'
+    );
+
+    createProgressBar('analyze-progress');
+    startFakeProgress('analyze-progress-bar', 'analyze-progress-text', 120000);
+
     try {
-        const response = await fetch('/api/generate-characters', {
+        const response = await fetchWithRetry('/api/generate-characters', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 text: text,
                 api_url: config.llm_api_url,
@@ -769,17 +1937,21 @@ async function analyzeCharacters() {
         });
 
         const result = await response.json();
+        finishProgress('analyze-progress-bar', 'analyze-progress-text');
         if (result.success) {
             characters = result.data.characters || [];
             renderCharacters();
+            syncResults();  // 主动同步角色数据到服务器
             showToast(`成功分析 ${characters.length} 个角色`, 'success');
         } else {
             showToast(result.error || '分析失败', 'error');
         }
     } catch (e) {
+        finishProgress('analyze-progress-bar', 'analyze-progress-text');
         showToast('请求失败: ' + e.message, 'error');
     } finally {
         spinner.classList.add('hidden');
+        unlock();
     }
 }
 
@@ -800,36 +1972,127 @@ function renderCharacters() {
             <h3 class="text-lg font-bold mb-2">${char.name}</h3>
             <p class="text-sm text-gray-600 mb-3">${char.description}</p>
             ${char.image_url ? `
-            <div class="mb-3 border-2 border-gray-300">
+            <div class="mb-3 border-2 border-gray-300 relative group">
                 <img src="${char.image_url}" class="w-full h-48 object-cover cursor-pointer" onclick="openModal('${char.image_url}')">
+                <div class="absolute top-1 right-1 hidden group-hover:flex gap-1">
+                    <button onclick="event.stopPropagation(); uploadCharacterImage(${idx})" class="bg-white border-2 border-black text-xs px-2 py-1 hover:bg-yellow-200" title="手动上传/更换图片">📁 换图</button>
+                </div>
             </div>
             ` : ''}
-            <button onclick="generateCharacterImage(${idx})" class="w-full btn-primary py-2 text-sm">
-                ${char.image_url ? '重新生成人设图' : '生成人设图'}
-            </button>
+            <div class="flex gap-2">
+                <button onclick="generateCharacterImage(${idx}, this)" class="flex-1 btn-primary py-2 text-sm">
+                    ${char.image_url ? '重新生成' : '生成人设图'}
+                </button>
+                <button onclick="uploadCharacterImage(${idx})" class="flex-1 bg-gray-700 text-white py-2 text-sm hover:bg-gray-800 transition-colors">
+                    📁 ${char.image_url ? '更换' : '上传'}
+                </button>
+            </div>
+            <input type="file" id="char-upload-${idx}" accept="image/*" class="hidden" onchange="handleCharacterImageFile(${idx}, this)">
         </div>
     `).join('');
 }
 
-async function generateCharacterImage(idx) {
+// ===== 角色图片手动上传 =====
+function uploadCharacterImage(idx) {
+    const input = document.getElementById(`char-upload-${idx}`);
+    if (input) input.click();
+}
+
+function handleCharacterImageFile(idx, input) {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+        showToast('请选择图片文件', 'error');
+        input.value = '';
+        return;
+    }
+    // 限制 5MB, 避免 dataURL 太大撑爆 storage
+    if (file.size > 5 * 1024 * 1024) {
+        showToast('图片超过 5MB, 请压缩后再上传', 'error');
+        input.value = '';
+        return;
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const dataUrl = e.target.result;
+        // 缩放到最长边 1024px, 避免前端 dataURL 占用过多内存
+        compressImage(dataUrl, 1024).then((compressed) => {
+            characters[idx].image_url = compressed;
+            renderCharacters();
+            syncResults();
+            showToast(`「${characters[idx].name}」人设图已更新`, 'success');
+        }).catch((err) => {
+            // 缩放失败时直接用原图
+            characters[idx].image_url = dataUrl;
+            renderCharacters();
+            syncResults();
+            showToast(`「${characters[idx].name}」人设图已更新 (未压缩)`, 'success');
+        });
+    };
+    reader.onerror = () => {
+        showToast('读取图片失败', 'error');
+    };
+    reader.readAsDataURL(file);
+    // 清空 input, 允许再次选同一张图
+    input.value = '';
+}
+
+function compressImage(dataUrl, maxSide) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+            try {
+                const w0 = img.naturalWidth, h0 = img.naturalHeight;
+                let w = w0, h = h0;
+                if (Math.max(w, h) > maxSide) {
+                    if (w >= h) {
+                        h = Math.round(h * maxSide / w);
+                        w = maxSide;
+                    } else {
+                        w = Math.round(w * maxSide / h);
+                        h = maxSide;
+                    }
+                }
+                const canvas = document.createElement('canvas');
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, w, h);
+                // JPEG 质量 0.85, 体积比 PNG 小很多
+                resolve(canvas.toDataURL('image/jpeg', 0.85));
+            } catch (e) {
+                reject(e);
+            }
+        };
+        img.onerror = (e) => reject(new Error('image load failed'));
+        img.src = dataUrl;
+    });
+}
+
+async function generateCharacterImage(idx, btn = null) {
     const char = characters[idx];
     const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
     if (!config.img_api_url) {
         showToast('请先配置图像生成API', 'error');
-        switchTab('config');
+        openConfigModal();
         return;
     }
 
+    // 显示"基线图生成中"提示
+    const toastId = showLoadingToast(`正在为「${char.name}」生成基线人设图…`);
+
     try {
-        const response = await fetch('/api/generate-character-image', {
+        const response = await fetchWithRetry('/api/generate-character-image', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 name: char.name,
                 description: char.description,
                 api_url: config.img_api_url,
                 api_key: config.img_api_key,
-                model: config.img_model
+                model: config.img_model,
+                max_attempts: 3
             })
         });
 
@@ -837,12 +2100,26 @@ async function generateCharacterImage(idx) {
         if (result.success) {
             characters[idx].image_url = result.image_url;
             renderCharacters();
-            showToast(`${char.name} 人设图生成成功`, 'success');
+            syncResults();
+            const attemptInfo = result.attempts > 1
+                ? ` (尝试 ${result.attempts}/${result.max_attempts || 3} 次拿到合格基线图)`
+                : '';
+            dismissLoadingToast(toastId);
+            showToast(`${char.name} 人设图生成成功${attemptInfo}`, 'success');
         } else {
+            dismissLoadingToast(toastId);
             showToast(result.error || '生成失败', 'error');
         }
     } catch (e) {
+        dismissLoadingToast(toastId);
         showToast('请求失败: ' + e.message, 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.classList.remove('opacity-60', 'cursor-not-allowed');
+            // 重新渲染以恢复原 label (生成人设图 / 重新生成人设图)
+            renderCharacters();
+        }
     }
 }
 
@@ -869,6 +2146,7 @@ async function combineAllPages() {
             const response = await fetch('/api/combine-page', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({
                     segments: segmentsWithImages,
                     page_num: page.page_number
@@ -912,6 +2190,9 @@ function renderCombinedPages() {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
+    renderStylePresets();
+    renderCustomStyleTags();
     loadConfig();
     updateCharCount();
+    recoverSession();  // 尝试恢复之前可能因内网穿透断开丢失的会话数据
 });
