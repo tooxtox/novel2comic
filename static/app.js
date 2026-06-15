@@ -2,6 +2,7 @@ let currentSegments = { pages: [] };
 let generatedImages = {};
 let isGenerating = false;
 let characters = [];
+let batchPaused = false;  // 批量生成暂停控制
 let combinedPages = [];
 let fullPageImages = {};  // 整页生成的图片
 let combinedPageImages = {};  // 任务3: 拼版预览生成的图片 (key: pageIdx)
@@ -1555,6 +1556,37 @@ async function combinePage(pageIdx, btn = null) {
     }
 }
 
+// ===== 批量生成暂停控制 =====
+function toggleBatchPause() {
+    batchPaused = !batchPaused;
+    const label = document.getElementById('batch-pause-label');
+    const btn = document.getElementById('batch-pause-btn');
+    if (batchPaused) {
+        label.textContent = '▶️ 继续';
+        btn.classList.replace('border-yellow-500', 'border-green-500');
+        btn.classList.replace('bg-yellow-50', 'bg-green-50');
+        btn.classList.replace('text-yellow-700', 'text-green-700');
+        showToast('已暂停, 点击继续恢复', 'info');
+    } else {
+        label.textContent = '⏸️ 暂停';
+        btn.classList.replace('border-green-500', 'border-yellow-500');
+        btn.classList.replace('bg-green-50', 'bg-yellow-50');
+        btn.classList.replace('text-green-700', 'text-yellow-700');
+        showToast('继续生成', 'info');
+    }
+}
+
+/**
+ * 在批量循环中检查暂停状态。如果被暂停就原地等待, 直到继续或取消。
+ * 返回 false 表示被外部中止 (isGenerating=false)
+ */
+async function _checkBatchPause() {
+    while (batchPaused && isGenerating) {
+        await new Promise(r => setTimeout(r, 200));
+    }
+    return isGenerating;
+}
+
 async function generateAllFullPages() {
     if (isGenerating) {
         showToast('请等待当前生成完成', 'error');
@@ -1580,21 +1612,40 @@ async function generateAllFullPages() {
     createProgressBar('batch-progress');
     startFakeProgress('batch-progress-bar', 'batch-progress-text', 120000);
 
+    // 显示暂停按钮
+    const pauseBtn = document.getElementById('batch-pause-btn');
+    if (pauseBtn) {
+        batchPaused = false;
+        document.getElementById('batch-pause-label').textContent = '⏸️ 暂停';
+        pauseBtn.classList.remove('hidden');
+    }
+
     // 串行生成，每页参考上一页漫画和人设图
     let lastPageImage = null;
     for (let i = 0; i < pagesToGenerate.length; i++) {
+        // 暂停检查
+        const shouldContinue = await _checkBatchPause();
+        if (!shouldContinue) break;
+
         const p = pagesToGenerate[i];
         await generateFullPage(p, true, lastPageImage);
         await new Promise(r => setTimeout(r, 800));
         lastPageImage = fullPageImages[p] || null;
     }
 
+    // 隐藏暂停按钮
+    if (pauseBtn) pauseBtn.classList.add('hidden');
+    batchPaused = false;
     finishProgress('batch-progress-bar', 'batch-progress-text');
 
     isGenerating = false;
     spinner.classList.add('hidden');
     unlock();
-    showToast('批量整页生成完成', 'success');
+    if (i < pagesToGenerate.length) {
+        showToast('批量整页生成已暂停', 'info');
+    } else {
+        showToast('批量整页生成完成', 'success');
+    }
     switchTab('gallery');
 }
 
@@ -1624,17 +1675,37 @@ async function generateAllImages() {
     }
 
     // 串行生成
-    let lastPageImages = {};
+    // 显示暂停按钮
+    const pauseBtn = document.getElementById('batch-pause-btn');
+    if (pauseBtn) {
+        batchPaused = false;
+        document.getElementById('batch-pause-label').textContent = '⏸️ 暂停';
+        pauseBtn.classList.remove('hidden');
+    }
+
+    let generatedCount = 0;
     for (const item of itemsToGenerate) {
+        // 暂停检查
+        const shouldContinue = await _checkBatchPause();
+        if (!shouldContinue) break;
+
         await generateSingleImage(item.pageIdx, item.segIdx, true);
-        lastPageImages[item.pageIdx] = generatedImages[`${item.pageIdx}-${item.segIdx}`] || null;
+        generatedCount++;
         await new Promise(r => setTimeout(r, 300));
     }
+
+    // 隐藏暂停按钮
+    if (pauseBtn) pauseBtn.classList.add('hidden');
+    batchPaused = false;
 
     isGenerating = false;
     spinner.classList.add('hidden');
     unlock();
-    showToast('批量逐个生成完成', 'success');
+    if (generatedCount < itemsToGenerate.length) {
+        showToast('批量逐个生成已暂停', 'info');
+    } else {
+        showToast('批量逐个生成完成', 'success');
+    }
     switchTab('gallery');
 }
 
@@ -1969,8 +2040,11 @@ function renderCharacters() {
 
     container.innerHTML = characters.map((char, idx) => `
         <div class="bg-white p-4 manga-border panel-shadow">
-            <h3 class="text-lg font-bold mb-2">${char.name}</h3>
-            <p class="text-sm text-gray-600 mb-3">${char.description}</p>
+            <div class="flex justify-between items-start mb-2">
+                <h3 class="text-lg font-bold">${escapeHtml(char.name)}</h3>
+                <button onclick="togglePromptEditor(${idx})" class="text-xs border border-gray-300 rounded px-2 py-0.5 hover:bg-gray-100 transition-colors" title="编辑人设图生成提示词" id="prompt-toggle-${idx}">✏️ Prompt</button>
+            </div>
+            <p class="text-sm text-gray-600 mb-3">${escapeHtml(char.description)}</p>
             ${char.image_url ? `
             <div class="mb-3 border-2 border-gray-300 relative group">
                 <img src="${char.image_url}" class="w-full h-48 object-cover cursor-pointer" onclick="openModal('${char.image_url}')">
@@ -1979,6 +2053,10 @@ function renderCharacters() {
                 </div>
             </div>
             ` : ''}
+            <div id="prompt-editor-${idx}" class="hidden mb-3">
+                <label class="block text-xs font-medium text-gray-600 mb-1">图像生成提示词 (空=自动生成)</label>
+                <textarea id="char-prompt-${idx}" rows="3" class="w-full text-xs border border-gray-300 rounded p-2 font-mono" onchange="saveCharPrompt(${idx}, this.value)">${escapeHtml(char.char_prompt || '')}</textarea>
+            </div>
             <div class="flex gap-2">
                 <button onclick="generateCharacterImage(${idx}, this)" class="flex-1 btn-primary py-2 text-sm">
                     ${char.image_url ? '重新生成' : '生成人设图'}
@@ -1990,6 +2068,22 @@ function renderCharacters() {
             <input type="file" id="char-upload-${idx}" accept="image/*" class="hidden" onchange="handleCharacterImageFile(${idx}, this)">
         </div>
     `).join('');
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function togglePromptEditor(idx) {
+    const editor = document.getElementById(`prompt-editor-${idx}`);
+    if (editor) editor.classList.toggle('hidden');
+}
+
+function saveCharPrompt(idx, value) {
+    if (!characters[idx]) return;
+    characters[idx].char_prompt = value;
+    syncResults();
 }
 
 // ===== 角色图片手动上传 =====
@@ -2089,6 +2183,7 @@ async function generateCharacterImage(idx, btn = null) {
             body: JSON.stringify({
                 name: char.name,
                 description: char.description,
+                prompt: char.char_prompt || '',  // 用户自定义 prompt, 空 = 自动生成
                 api_url: config.img_api_url,
                 api_key: config.img_api_key,
                 model: config.img_model,

@@ -1173,6 +1173,8 @@ def generate_character_image():
     api_url = data.get('api_url', '')
     api_key = data.get('api_key', '')
     model = data.get('model', '')
+    # 如果前端传了自定义 prompt, 优先使用 (人设 prompt 编辑功能)
+    custom_prompt = (data.get('prompt') or '').strip()
     # 基线图重试上限 (1-5, 默认 3)
     try:
         max_attempts = int(data.get('max_attempts') or 3)
@@ -1185,9 +1187,10 @@ def generate_character_image():
 
     last_error = None
     for attempt in range(1, max_attempts + 1):
-        # 第一次: 标准基线 prompt
-        # 后续: 更强调"单一角色、干净背景"以拿到合格基线图
-        if attempt == 1:
+        # 有自定义 prompt 就始终用它 (不区分第几次)
+        if custom_prompt:
+            prompt = custom_prompt.rstrip('.') + f", {name}, {description}. Strictly black and white manga, no color, pure monochrome."
+        elif attempt == 1:
             prompt = f"ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga character design sheet, pure monochrome, grayscale. full body portrait, {name}, {description}, detailed line art, high contrast, dramatic shading, cross-hatching, single character only, plain background, reference sheet style"
         else:
             prompt = (
