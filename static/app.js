@@ -767,27 +767,46 @@ async function loadHistoryWork(workId) {
         const cps = state.combined_page_images || {};
         for (const k in cps) combinedPageImages[k] = cps[k];
 
-        // 校验完整性, 弹 toast 提示用户
+        // 校验完整性, 仅写入控制台不再弹红色 toast
+        // (旧 _meta 字段可能与实际数据有偏差, 这个检查仅作为调试用)
         const meta = state._meta || {};
+        const segNow = (currentSegments.pages || []).reduce((s, p) => s + (p.segments || []).length, 0);
         const expected = [
-            ['分镜', meta.segment_count, (currentSegments.pages || []).reduce((s, p) => s + (p.segments || []).length, 0)],
+            ['分镜', meta.segment_count, segNow],
             ['角色', meta.character_count, characters.length],
-            ['人设图', meta.has_chars_with_image, characters.filter(c => (c.image_url || '').trim()).length],
         ];
         const mismatches = expected.filter(([_, exp, got]) => typeof exp === 'number' && exp !== got);
+        if (mismatches.length > 0) {
+            console.info('loadHistoryWork integrity (informational):', { meta, mismatches });
+        }
 
         // 刷新各视图
         renderCharacters();
         renderSegments();
         renderGallery();
 
-        if (mismatches.length > 0) {
-            console.warn('loadHistoryWork integrity:', { meta, mismatches });
-            showToast(`作品已加载, 但有 ${mismatches.length} 项数据不完整 (详见控制台)`, 'error');
-        } else {
-            showToast(`作品已加载 (${meta.segment_count || 0} 分镜, ${meta.character_count || 0} 角色, ${meta.generated_image_count || 0} 已生成图)`, 'success');
+        // 加载成功的提示, 不再做完整性红色警告
+        showToast(`作品已加载 (${segNow} 分镜, ${characters.length} 角色, ${Object.keys(generatedImages).length} 已生成图)`, 'success');
+
+        // 加载成功后立即同步到服务器会话, 防止刷新/重连后丢图
+        // 覆盖式存盘 (work_id 已经由后端 /load 设置到 session 里)
+        syncResults().catch((e) => {
+            console.warn('loadHistoryWork syncResults after load failed:', e);
+        });
+
+        // 检查角色人设图: 打印每个角色的 image_url 解析情况, 方便排查
+        const charDiag = characters.map((c, i) => ({
+            idx: i,
+            name: c.name,
+            has_image: !!(c.image_url || '').trim(),
+            image_url: c.image_url,
+        }));
+        console.log('loadHistoryWork characters image status:', charDiag);
+        const missingCharImg = charDiag.filter(c => !c.has_image).length;
+        if (missingCharImg > 0) {
+            showToast(`已加载, ${missingCharImg} 个角色缺人设图 (请检查作品目录 images/)`, 'error');
         }
-        switchTab('input');
+        switchTab('gallery');  // 切到画廊直接看到所有图
     } catch (e) {
         console.error('loadHistoryWork:', e);
         showToast('加载失败: ' + (e.message || e), 'error');
@@ -1333,6 +1352,76 @@ function toggleCharacter(pageIdx, segIdx, charIdx) {
     renderSegments();
 }
 
+// 乱码检测和修复函数
+async function checkAndFixGarble(imageUrl, originalPrompt, pageIdx, segIdx, config) {
+    try {
+        // 1. 检测乱码
+        const checkResp = await fetchWithRetry('/api/check-text-garble', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                image_url: imageUrl,
+                api_url: config.llm_api_url,
+                api_key: config.llm_api_key,
+                model: config.llm_model || 'minimax-vl'
+            })
+        });
+        const checkResult = await checkResp.json();
+        
+        if (!checkResult.success) {
+            console.warn('[GarbleCheck] 检测失败:', checkResult.error);
+            return { fixed: false, reason: '检测失败' };
+        }
+        
+        const analysis = checkResult.analysis;
+        console.log('[GarbleCheck] 分析结果:', analysis);
+        
+        // 如果没有乱码，直接返回
+        if (!analysis.has_garble || analysis.garble_level === 'none') {
+            return { fixed: false, reason: '无乱码' };
+        }
+        
+        // 2. 检测到乱码，调用修复接口
+        showToast(`检测到文字乱码 (${analysis.garble_level})，正在自动修复...`, 'warning');
+        
+        const fixResp = await fetchWithRetry('/api/fix-text-garble', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                image_url: imageUrl,
+                original_prompt: originalPrompt,
+                api_url: config.llm_api_url,
+                api_key: config.llm_api_key,
+                model: config.llm_model || 'minimax-vl',
+                img_api_url: config.img_api_url,
+                img_api_key: config.img_api_key,
+                img_model: config.img_model,
+                page_idx: pageIdx,
+                seg_idx: segIdx
+            })
+        });
+        const fixResult = await fixResp.json();
+        
+        if (fixResult.success) {
+            showToast('乱码修复成功！', 'success');
+            return { 
+                fixed: true, 
+                newImageUrl: fixResult.image_url,
+                analysis: analysis,
+                fixedPrompt: fixResult.fixed_prompt
+            };
+        } else {
+            console.warn('[FixGarble] 修复失败:', fixResult.error);
+            return { fixed: false, reason: fixResult.error };
+        }
+    } catch (e) {
+        console.error('[GarbleCheck] 异常:', e);
+        return { fixed: false, reason: e.message };
+    }
+}
+
 async function generateSingleImage(pageIdx, segIdx, skipLock = false, btn = null) {
     if (!skipLock && isGenerating) {
         showToast('请等待当前生成完成', 'error');
@@ -1396,11 +1485,32 @@ async function generateSingleImage(pageIdx, segIdx, skipLock = false, btn = null
 
         const result = await response.json();
         if (result.success) {
-            generatedImages[`${pageIdx}-${segIdx}`] = result.image_url;
+            let finalImageUrl = result.image_url;
+            generatedImages[`${pageIdx}-${segIdx}`] = finalImageUrl;
             renderSegments();
             renderGallery();
             syncResults();  // 主动同步图片映射到服务器
             showToast('图片生成成功', 'success');
+            
+            // 自动检测乱码并修复（最多重试 1 次）
+            if (config.llm_api_url && seg.dialogue) {  // 只有分镜有对白时才检测
+                const garbleResult = await checkAndFixGarble(
+                    finalImageUrl, 
+                    prompt, 
+                    pageIdx, 
+                    segIdx, 
+                    config
+                );
+                
+                if (garbleResult.fixed && garbleResult.newImageUrl) {
+                    // 修复成功，更新图片
+                    finalImageUrl = garbleResult.newImageUrl;
+                    generatedImages[`${pageIdx}-${segIdx}`] = finalImageUrl;
+                    renderSegments();
+                    renderGallery();
+                    syncResults();
+                }
+            }
         } else {
             showToast(result.error || '生成失败', 'error');
         }
@@ -1480,11 +1590,33 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
 
         const result = await response.json();
         if (result.success) {
-            fullPageImages[pageIdx] = result.image_url;
+            let finalImageUrl = result.image_url;
+            fullPageImages[pageIdx] = finalImageUrl;
             renderSegments();
             renderGallery();
             syncResults();  // 主动同步整页图片映射到服务器
             showToast(`第 ${page.page_number} 页整页生成成功`, 'success');
+            
+            // 自动检测乱码并修复（最多重试 1 次）
+            if (config.llm_api_url) {
+                // 整页图也需要检测，但 prompt 用页面描述
+                const pagePrompt = page.segments.map(s => s.scene_description).join(', ');
+                const garbleResult = await checkAndFixGarble(
+                    finalImageUrl, 
+                    pagePrompt, 
+                    pageIdx, 
+                    null,  // 整页图没有 segIdx
+                    config
+                );
+                
+                if (garbleResult.fixed && garbleResult.newImageUrl) {
+                    finalImageUrl = garbleResult.newImageUrl;
+                    fullPageImages[pageIdx] = finalImageUrl;
+                    renderSegments();
+                    renderGallery();
+                    syncResults();
+                }
+            }
         } else {
             showToast(result.error || '生成失败', 'error');
         }
@@ -2010,10 +2142,42 @@ async function analyzeCharacters() {
         const result = await response.json();
         finishProgress('analyze-progress-bar', 'analyze-progress-text');
         if (result.success) {
-            characters = result.data.characters || [];
+            const newChars = result.data.characters || [];
+            // 合并而非替换: 用名字去重, 名字相同的优先保留新分析结果
+            // 但保留旧的图片 (image_url, char_prompt), 避免人设图丢失
+            const merged = [];
+            const matchedOldIdx = new Set();
+            for (const nc of newChars) {
+                const ncName = (nc.name || '').trim();
+                const oldIdx = characters.findIndex(oc => (oc.name || '').trim() === ncName);
+                if (oldIdx !== -1) {
+                    matchedOldIdx.add(oldIdx);
+                    // 新数据优先, 但保留旧的 image_url 和 char_prompt
+                    const old = characters[oldIdx];
+                    merged.push({
+                        ...old,    // 保留图片/prompt
+                        ...nc,     // 新的描述/名字等
+                        image_url: old.image_url || nc.image_url || '',
+                        char_prompt: old.char_prompt || nc.char_prompt || '',
+                    });
+                } else {
+                    merged.push({ ...nc, char_prompt: nc.char_prompt || '' });
+                }
+            }
+            // 也保留旧的角色 (防止 LLM 没分析出来的角色消失)
+            for (let i = 0; i < characters.length; i++) {
+                if (!matchedOldIdx.has(i)) {
+                    merged.push(characters[i]);
+                }
+            }
+            characters = merged;
             renderCharacters();
             syncResults();  // 主动同步角色数据到服务器
-            showToast(`成功分析 ${characters.length} 个角色`, 'success');
+            const keptCount = merged.length - newChars.length;
+            const msg = keptCount > 0
+                ? `分析 ${newChars.length} 个角色, 保留旧角色 ${keptCount} 个`
+                : `成功分析 ${characters.length} 个角色`;
+            showToast(msg, 'success');
         } else {
             showToast(result.error || '分析失败', 'error');
         }
@@ -2055,7 +2219,11 @@ function renderCharacters() {
             ` : ''}
             <div id="prompt-editor-${idx}" class="hidden mb-3">
                 <label class="block text-xs font-medium text-gray-600 mb-1">图像生成提示词 (空=自动生成)</label>
-                <textarea id="char-prompt-${idx}" rows="3" class="w-full text-xs border border-gray-300 rounded p-2 font-mono" onchange="saveCharPrompt(${idx}, this.value)">${escapeHtml(char.char_prompt || '')}</textarea>
+                <textarea id="char-prompt-${idx}" rows="3" class="w-full text-xs border border-gray-300 rounded p-2 font-mono" oninput="saveCharPrompt(${idx}, this.value)" onblur="saveCharPrompt(${idx}, this.value)">${escapeHtml(char.char_prompt || '')}</textarea>
+                <div class="text-xs text-gray-500 mt-1">
+                    实时同步 · 当前提示词:
+                    <code class="text-gray-800" id="char-prompt-preview-${idx}">${escapeHtml(char.char_prompt || '(自动生成)')}</code>
+                </div>
             </div>
             <div class="flex gap-2">
                 <button onclick="generateCharacterImage(${idx}, this)" class="flex-1 btn-primary py-2 text-sm">
@@ -2082,8 +2250,17 @@ function togglePromptEditor(idx) {
 
 function saveCharPrompt(idx, value) {
     if (!characters[idx]) return;
+    // 始终更新内存, 防止用户改完没失焦直接点按钮
     characters[idx].char_prompt = value;
-    syncResults();
+    // 实时预览回显 (无字符=空, 空=自动生成)
+    const preview = document.getElementById(`char-prompt-preview-${idx}`);
+    if (preview) preview.textContent = value.trim() || '(自动生成)';
+    // 标记需要同步, debounce 到 1s 后再发请求, 避免每键一调
+    if (!window._charPromptTimers) window._charPromptTimers = {};
+    if (window._charPromptTimers[idx]) clearTimeout(window._charPromptTimers[idx]);
+    window._charPromptTimers[idx] = setTimeout(() => {
+        syncResults();
+    }, 1000);
 }
 
 // ===== 角色图片手动上传 =====
@@ -2165,6 +2342,11 @@ function compressImage(dataUrl, maxSide) {
 
 async function generateCharacterImage(idx, btn = null) {
     const char = characters[idx];
+    // 强制从 DOM 同步最新 prompt 到内存 (用户可能还在输入没失焦)
+    const promptEl = document.getElementById(`char-prompt-${idx}`);
+    if (promptEl && characters[idx]) {
+        characters[idx].char_prompt = promptEl.value;
+    }
     const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
     if (!config.img_api_url) {
         showToast('请先配置图像生成API', 'error');

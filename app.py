@@ -1003,6 +1003,258 @@ def generate_image():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/check-text-garble', methods=['POST'])
+@login_required
+def check_text_garble():
+    """检测图片中的文字是否乱码"""
+    data = request.json
+    image_url = data.get('image_url', '')
+    api_url = data.get('api_url', '')
+    api_key = data.get('api_key', '')
+    model = data.get('model', '')
+
+    if not image_url or not api_url:
+        return jsonify({'error': '缺少必要参数'}), 400
+
+    try:
+        # 读取图片转base64
+        if image_url.startswith('/static/'):
+            # 本地文件
+            file_path = os.path.join(os.path.dirname(__file__), image_url[1:])  # 去掉开头的/
+            if os.path.exists(file_path):
+                with open(file_path, 'rb') as f:
+                    img_data = base64.b64encode(f.read()).decode('utf-8')
+                image_base64 = f"data:image/png;base64,{img_data}"
+            else:
+                return jsonify({'error': f'图片文件不存在: {file_path}'}), 404
+        elif image_url.startswith('http'):
+            # 下载远程图片
+            resp = requests.get(image_url, timeout=30)
+            resp.raise_for_status()
+            img_data = base64.b64encode(resp.content).decode('utf-8')
+            image_base64 = f"data:image/png;base64,{img_data}"
+        else:
+            return jsonify({'error': '不支持的图片URL格式'}), 400
+
+        # 调用LLM视觉模型检测乱码
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+
+        prompt = """请检查这张漫画图片中的文字（对话气泡、旁白框、音效文字等）是否存在以下问题：
+1. 文字完全乱码（无法辨认的符号、乱码字符）
+2. 文字部分乱码（有些字是乱码，有些字正常）
+3. 文字正常（清晰可读的中文字符）
+
+请只返回JSON格式：
+{
+  "has_garble": true/false,
+  "garble_level": "none"/"partial"/"full",
+  "description": "简要描述文字状况"
+}
+
+如果图片中没有文字，返回 {"has_garble": false, "garble_level": "none", "description": "图片中没有文字"}"""
+
+        payload = {
+            'model': model or 'minimax-vl',
+            'messages': [
+                {
+                    'role': 'user',
+                    'content': [
+                        {'type': 'text', 'text': prompt},
+                        {'type': 'image_url', 'image_url': {'url': image_base64}}
+                    ]
+                }
+            ],
+            'max_tokens': 500,
+            'temperature': 0.3
+        }
+
+        print(f"[GarbleCheck] Calling LLM: {api_url}, model: {payload['model']}")
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+
+        # 解析返回
+        content = ''
+        if 'choices' in result and len(result['choices']) > 0:
+            content = result['choices'][0].get('message', {}).get('content', '')
+        elif 'data' in result:
+            content = str(result['data'])
+
+        # 提取JSON
+        content = re.sub(r'```json\s*', '', content)
+        content = re.sub(r'```\s*', '', content)
+        content = content.strip()
+
+        try:
+            analysis = json.loads(content)
+        except:
+            # 尝试从文本中提取JSON
+            match = re.search(r'\{[^}]+\}', content)
+            if match:
+                analysis = json.loads(match.group())
+            else:
+                analysis = {'has_garble': False, 'garble_level': 'none', 'description': content}
+
+        print(f"[GarbleCheck] Result: {analysis}")
+        return jsonify({'success': True, 'analysis': analysis})
+
+    except Exception as e:
+        import traceback
+        print(f"[GarbleCheck] Error: {e}")
+        print(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/fix-text-garble', methods=['POST'])
+@login_required
+def fix_text_garble():
+    """分析乱码并生成修复后的图片"""
+    data = request.json
+    image_url = data.get('image_url', '')
+    original_prompt = data.get('original_prompt', '')
+    api_url = data.get('api_url', '')
+    api_key = data.get('api_key', '')
+    model = data.get('model', '')
+    img_api_url = data.get('img_api_url', '')
+    img_api_key = data.get('img_api_key', '')
+    img_model = data.get('img_model', '')
+    page_idx = data.get('page_idx')
+    seg_idx = data.get('seg_idx')
+
+    if not image_url or not api_url or not img_api_url:
+        return jsonify({'error': '缺少必要参数'}), 400
+
+    try:
+        # 1. 读取图片转base64
+        if image_url.startswith('/static/'):
+            file_path = os.path.join(os.path.dirname(__file__), image_url[1:])
+            if os.path.exists(file_path):
+                with open(file_path, 'rb') as f:
+                    img_data = base64.b64encode(f.read()).decode('utf-8')
+                image_base64 = f"data:image/png;base64,{img_data}"
+            else:
+                return jsonify({'error': f'图片文件不存在'}), 404
+        elif image_url.startswith('http'):
+            resp = requests.get(image_url, timeout=30)
+            resp.raise_for_status()
+            img_data = base64.b64encode(resp.content).decode('utf-8')
+            image_base64 = f"data:image/png;base64,{img_data}"
+        else:
+            return jsonify({'error': '不支持的图片URL格式'}), 400
+
+        # 2. 调用LLM分析乱码原因并生成修复prompt
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+
+        analysis_prompt = f"""这张漫画图片中的文字出现了乱码。请分析乱码原因，并生成一个修复后的图片生成prompt。
+
+原始prompt:
+{original_prompt}
+
+请返回JSON格式：
+{{
+  "garble_cause": "乱码原因分析（如：模型不支持中文、字体渲染错误等）",
+  "fix_strategy": "修复策略（如：移除文字描述、改用英文、简化文字等）",
+  "fixed_prompt": "修复后的完整prompt（英文，用于重新生成图片）"
+}}
+
+修复策略建议：
+1. 如果是中文乱码，尝试在prompt中明确指定"Chinese characters"或移除文字描述
+2. 如果是字体渲染问题，尝试简化文字描述或改用英文
+3. 在prompt末尾添加："NO TEXT, NO LETTERS, NO WORDS, NO WRITING" 来避免生成文字
+4. 或者明确指定："with clear Chinese dialogue text in speech bubbles"
+
+请只返回JSON，不要其他内容。"""
+
+        payload = {
+            'model': model or 'minimax-vl',
+            'messages': [
+                {
+                    'role': 'user',
+                    'content': [
+                        {'type': 'text', 'text': analysis_prompt},
+                        {'type': 'image_url', 'image_url': {'url': image_base64}}
+                    ]
+                }
+            ],
+            'max_tokens': 1000,
+            'temperature': 0.5
+        }
+
+        print(f"[FixGarble] Step 1: Analyzing garble cause...")
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+
+        content = ''
+        if 'choices' in result and len(result['choices']) > 0:
+            content = result['choices'][0].get('message', {}).get('content', '')
+
+        content = re.sub(r'```json\s*', '', content)
+        content = re.sub(r'```\s*', '', content)
+        content = content.strip()
+
+        try:
+            analysis = json.loads(content)
+        except:
+            match = re.search(r'\{[^}]+\}', content)
+            if match:
+                analysis = json.loads(match.group())
+            else:
+                return jsonify({'error': '无法解析LLM返回', 'raw': content}), 500
+
+        print(f"[FixGarble] Analysis: {analysis}")
+        fixed_prompt = analysis.get('fixed_prompt', original_prompt)
+
+        # 3. 用修复后的prompt重新生成图片
+        print(f"[FixGarble] Step 2: Regenerating image with fixed prompt...")
+
+        # 构建图片生成请求
+        manga_prompt = f"ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, pure monochrome, grayscale only. detailed ink drawing, high contrast, dramatic shadows, cross-hatching, {fixed_prompt}"
+
+        img_payload = {
+            'model': img_model or 'doubao-seedream-3-0-t2i-250415',
+            'prompt': manga_prompt,
+            'size': '2K',
+            'response_format': 'url',
+            'watermark': False,
+        }
+
+        image_url_new, result_new = call_image_api(img_api_url, img_api_key, img_payload)
+        work_id, work_username = get_current_work_id()
+        local_url, error = save_image_result(image_url_new, "manga_fixed", work_id, work_username)
+
+        if local_url:
+            # 保存图片映射
+            if page_idx is not None and seg_idx is not None:
+                images_data = load_session_data('images') or {'images': []}
+                images_data['images'].append({
+                    'key': f'{page_idx}-{seg_idx}',
+                    'local_url': local_url,
+                    'timestamp': datetime.now().isoformat(),
+                    'fixed': True
+                })
+                save_session_data('images', images_data)
+
+            return jsonify({
+                'success': True,
+                'image_url': local_url,
+                'analysis': analysis,
+                'fixed_prompt': fixed_prompt
+            })
+        else:
+            return jsonify({'error': error.get('error', '重新生成失败'), 'raw': result_new}), 500
+
+    except Exception as e:
+        import traceback
+        print(f"[FixGarble] Error: {e}")
+        print(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/save-config', methods=['POST'])
 @login_required
 def save_config():
@@ -1944,11 +2196,85 @@ def history_detail(work_id):
 
     images_dir = os.path.join(work_dir, 'images')
     image_files = []
+    # 字典: 文件名 stem (无后缀) -> 完整 URL
+    image_by_stem = {}
+    # 按写入顺序排列的人设图列表 (char_*.png)
+    char_images = []
+    # 整页图映射: pageIdx -> URL
+    full_page_images_rebuilt = {}
+    # 分镜图映射: "pageIdx-segIdx" -> URL
+    seg_images_rebuilt = {}
     if os.path.isdir(images_dir):
         for fn in sorted(os.listdir(images_dir)):
             if fn.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
                 rel = os.path.relpath(os.path.join(images_dir, fn), os.path.join(os.path.dirname(__file__), 'static'))
-                image_files.append('/static/' + rel.replace(os.sep, '/'))
+                url = '/static/' + rel.replace(os.sep, '/')
+                image_files.append(url)
+                stem = os.path.splitext(fn)[0]
+                image_by_stem[stem] = url
+                # 收集人设图 (char_*.png 模式), 用于按顺序匹配
+                if stem.startswith('char_') or stem.startswith('character_'):
+                    char_images.append(url)
+                # 整页图: comic_page_<N>_full_*.png
+                elif stem.startswith('comic_page_') and '_full_' in stem:
+                    # 提取 pageIdx: comic_page_1_full_20260616_090916 -> 1
+                    parts = stem.split('_')
+                    if len(parts) >= 3:
+                        try:
+                            page_idx = int(parts[2])
+                            full_page_images_rebuilt[page_idx] = url
+                        except ValueError:
+                            pass
+                # 分镜图: comic_page_<N>_seg_<M>_*.png
+                elif stem.startswith('comic_page_') and '_seg_' in stem:
+                    # 提取 pageIdx-segIdx: comic_page_1_seg_2_20260616_... -> 1-2
+                    parts = stem.split('_')
+                    if len(parts) >= 5:
+                        try:
+                            page_idx = int(parts[2])
+                            seg_idx = int(parts[4])
+                            seg_images_rebuilt[f'{page_idx}-{seg_idx}'] = url
+                        except ValueError:
+                            pass
+
+    # 容错: 老数据 / 早期数据可能没有完整字段, 补齐默认值
+    state.setdefault('novel_text', '')
+    state.setdefault('segments', {'pages': []})
+    state.setdefault('characters', [])
+    state.setdefault('generated_images', {})
+    state.setdefault('full_page_images', {})
+    state.setdefault('combined_page_images', {})
+
+    # 从磁盘重建图片 URL 映射 (如果 state 里是空的)
+    # 分镜图
+    if not state['generated_images']:
+        state['generated_images'] = seg_images_rebuilt
+    # 整页图
+    if not state['full_page_images']:
+        state['full_page_images'] = full_page_images_rebuilt
+
+    # 重建角色人设图 image_url:
+    # 1. 如果 state.characters[].image_url 已存在且对应文件存在, 保留
+    # 2. 否则按多种命名约定匹配 (兼容 char_0, char_20260616_090739 等)
+    # 3. 最后按 images_dir 中 char_*.png 顺序分配给没图片的角色
+    chars = state.get('characters', [])
+    used_urls = set()
+    for char in chars:
+        url = char.get('image_url', '')
+        # 如果已有 image_url 且能在当前 work_dir 的 images/ 中找到, 才算有效
+        if url and url.startswith('/') and 'images/' + os.path.basename(url) in [os.path.join('images', os.path.basename(u)) for u in image_files]:
+            used_urls.add(url)
+            continue
+        # 否则清空, 后面会重新分配
+        char['image_url'] = ''
+
+    # 按顺序把 char_images 分配给没图片的角色
+    unassigned_chars = [c for c in chars if not c.get('image_url')]
+    for i, char in enumerate(unassigned_chars):
+        if i < len(char_images):
+            char['image_url'] = char_images[i]
+            used_urls.add(char_images[i])
+        # 超出 char_images 数量的角色保持空 image_url
 
     return jsonify({
         'success': True,
