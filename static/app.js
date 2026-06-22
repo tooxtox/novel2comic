@@ -8,27 +8,53 @@ let fullPageImages = {};  // 整页生成的图片
 let combinedPageImages = {};  // 任务3: 拼版预览生成的图片 (key: pageIdx)
 let progressInterval = null;
 
+// WebSocket 实时进度
+let socket = null;
+let socketConnected = false;
+let activeTaskIds = new Set();  // 当前正在跟踪的 task_id 集合
+let taskProgressCallbacks = {};  // task_id -> { onProgress, onComplete, onError }
+
 // 漫画转小说相关状态
 let comicUploadedImages = [];  // {name, data: base64, pageIndex}
 let comicNovelResult = null;   // {novel_text, pages}
 
-const tabs = ['input', 'segments', 'characters', 'gallery', 'history', 'comic2novel'];
+const tabs = ['input', 'segments', 'characters', 'garble', 'gallery', 'history', 'comic2novel'];
 const CONCURRENT_LIMIT = 3;
 const MAX_RETRIES = 3;
 
-// 漫画风格预设Tag
+// 漫画风格预设Tag (按地区/类型分类)
 const STYLE_PRESETS = [
-    { id: 'shonen', label: '热血少年', tags: 'shonen manga style, dynamic action lines, intense expressions, speed lines' },
-    { id: 'shojo', label: '少女漫画', tags: 'shojo manga style, soft lines, sparkles, romantic, delicate features' },
-    { id: 'seinen', label: '青年向', tags: 'seinen manga style, realistic proportions, detailed anatomy, mature' },
-    { id: 'chibi', label: 'Q版', tags: 'chibi style, super deformed, 2-head body proportion, cute, simplified' },
-    { id: 'ink', label: '水墨风', tags: 'sumi-e ink style, brush strokes, traditional Chinese ink painting, flowing' },
-    { id: 'noir', label: '黑色电影', tags: 'noir style, high contrast, deep shadows, dramatic lighting, film noir' },
-    { id: 'cyberpunk', label: '赛博朋克', tags: 'cyberpunk style, neon lights, futuristic, tech noir, dystopian' },
-    { id: 'horror', label: '恐怖', tags: 'horror manga style, grotesque, unsettling, dark atmosphere, psychological' },
-    { id: 'gag', label: '搞笑', tags: 'gag manga style, exaggerated expressions, comedic, simple lines' },
-    { id: 'realistic', label: '写实', tags: 'realistic style, photographic quality, detailed textures, lifelike' },
+    // ===== 日漫 =====
+    { id: 'shonen', label: '热血少年', category: '日漫', tags: 'shonen manga style, dynamic action lines, intense expressions, speed lines' },
+    { id: 'shojo', label: '少女漫画', category: '日漫', tags: 'shojo manga style, soft lines, sparkles, romantic, delicate features' },
+    { id: 'seinen', label: '青年向', category: '日漫', tags: 'seinen manga style, realistic proportions, detailed anatomy, mature' },
+    { id: 'chibi', label: 'Q版', category: '日漫', tags: 'chibi style, super deformed, 2-head body proportion, cute, simplified' },
+    { id: 'gag', label: '搞笑', category: '日漫', tags: 'gag manga style, exaggerated expressions, comedic, simple lines' },
+    { id: 'horror', label: '恐怖', category: '日漫', tags: 'horror manga style, grotesque, unsettling, dark atmosphere, psychological' },
+    // ===== 美漫 =====
+    { id: 'american_comic', label: '经典美漫', category: '美漫', tags: 'american comic book style, bold outlines, halftone dots, vibrant inking, superhero proportions' },
+    { id: 'graphic_novel', label: '图像小说', category: '美漫', tags: 'graphic novel style, detailed rendering, cinematic panels, mature storytelling' },
+    { id: 'noir', label: '黑色电影', category: '美漫', tags: 'noir style, high contrast, deep shadows, dramatic lighting, film noir' },
+    { id: 'cartoon', label: '美式卡通', category: '美漫', tags: 'american cartoon style, bold outlines, exaggerated shapes, playful' },
+    // ===== 韩漫 =====
+    { id: 'webtoon', label: 'Webtoon', category: '韩漫', tags: 'korean webtoon style, vertical scroll format, clean lines, vibrant colors, modern' },
+    { id: 'manhwa', label: '传统韩漫', category: '韩漫', tags: 'manhwa style, korean comic, detailed eyes, smooth lineart, modern aesthetic' },
+    { id: 'korean_drama', label: '韩剧风', category: '韩漫', tags: 'korean drama inspired manhwa, realistic faces, fashion forward, romantic' },
+    // ===== 国漫 =====
+    { id: 'ink', label: '水墨风', category: '国漫', tags: 'sumi-e ink style, brush strokes, traditional Chinese ink painting, flowing' },
+    { id: 'guofeng', label: '国风', category: '国漫', tags: 'chinese guofeng style, traditional hanfu, oriental aesthetics, elegant' },
+    { id: 'wuxia', label: '武侠', category: '国漫', tags: 'wuxia manhua style, martial arts, flowing robes, dynamic action, chinese fantasy' },
+    { id: 'xianxia', label: '仙侠', category: '国漫', tags: 'xianxia style, immortal cultivation, ethereal, mystical clouds, oriental fantasy' },
+    // ===== 其他 =====
+    { id: 'cyberpunk', label: '赛博朋克', category: '其他', tags: 'cyberpunk style, neon lights, futuristic, tech noir, dystopian' },
+    { id: 'realistic', label: '写实', category: '其他', tags: 'realistic style, photographic quality, detailed textures, lifelike' },
+    { id: 'watercolor', label: '水彩', category: '其他', tags: 'watercolor style, soft washes, flowing pigments, artistic' },
+    { id: 'sketch', label: '素描', category: '其他', tags: 'pencil sketch style, graphite, cross hatching, rough lines' },
+    { id: 'minimalist', label: '极简', category: '其他', tags: 'minimalist style, simple lines, negative space, clean composition' },
 ];
+
+// 风格分类顺序
+const STYLE_CATEGORIES = ['日漫', '美漫', '韩漫', '国漫', '其他'];
 
 let selectedPresetIds = new Set();
 let customStyleTags = [];
@@ -56,6 +82,123 @@ async function fetchWithRetry(url, options = {}, maxRetries = MAX_RETRIES) {
         }
     }
     throw lastError;
+}
+
+// ========== WebSocket 实时进度 ==========
+
+/**
+ * 初始化 WebSocket 连接, 接收后端推送的 task_progress 事件
+ * 连接失败时静默降级到 fake progress (startFakeProgress 仍然可用)
+ */
+function initWebSocket() {
+    try {
+        // 使用 socket.io 客户端 (从 CDN 加载, 见 index.html)
+        if (typeof io === 'undefined') {
+            console.warn('[WebSocket] socket.io client not loaded, fallback to fake progress');
+            return;
+        }
+        socket = io({
+            transports: ['websocket', 'polling'],
+            withCredentials: true
+        });
+
+        socket.on('connect', () => {
+            socketConnected = true;
+            console.log('[WebSocket] connected, sid=', socket.id);
+        });
+
+        socket.on('disconnect', () => {
+            socketConnected = false;
+            console.log('[WebSocket] disconnected');
+        });
+
+        socket.on('connect_error', (err) => {
+            socketConnected = false;
+            console.warn('[WebSocket] connect error:', err.message);
+        });
+
+        socket.on('task_progress', (data) => {
+            handleTaskProgress(data);
+        });
+    } catch (e) {
+        console.warn('[WebSocket] init failed:', e.message);
+    }
+}
+
+/**
+ * 处理后端推送的进度事件, 按 task_id 分发到对应回调
+ */
+function handleTaskProgress(data) {
+    const { task_id, progress, message, stage, extra } = data;
+    if (!task_id) return;
+
+    const cb = taskProgressCallbacks[task_id];
+    if (!cb) return;
+
+    // 更新进度条 UI
+    if (cb.progressBarId && cb.textId) {
+        const bar = document.getElementById(cb.progressBarId);
+        const text = document.getElementById(cb.textId);
+        if (bar) bar.style.width = `${progress}%`;
+        if (text) text.textContent = `${progress}% - ${message}`;
+    }
+
+    // 触发 onProgress 回调
+    if (cb.onProgress) {
+        try { cb.onProgress(progress, message, stage, extra); } catch (e) { console.warn(e); }
+    }
+
+    // 完成或出错时清理
+    if (stage === 'done' || stage === 'error' || progress >= 100) {
+        if (stage === 'error' && cb.onError) {
+            try { cb.onError(message); } catch (e) { console.warn(e); }
+        } else if (stage === 'done' && cb.onComplete) {
+            try { cb.onComplete(extra || {}); } catch (e) { console.warn(e); }
+        }
+        // 停止 fake progress (如果有)
+        clearInterval(progressInterval);
+        // 清理回调
+        delete taskProgressCallbacks[task_id];
+        activeTaskIds.delete(task_id);
+    }
+}
+
+/**
+ * 为某个任务注册进度回调, 并生成唯一 task_id
+ * 返回 { task_id, startFake: () => void } 用于在 WebSocket 不可用时降级
+ */
+function registerTaskProgress(containerId, callbacks = {}) {
+    const task_id = 'task_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    const progressBarId = `${containerId}-bar`;
+    const textId = `${containerId}-text`;
+
+    createProgressBar(containerId);
+
+    taskProgressCallbacks[task_id] = {
+        progressBarId,
+        textId,
+        onProgress: callbacks.onProgress,
+        onComplete: callbacks.onComplete,
+        onError: callbacks.onError
+    };
+    activeTaskIds.add(task_id);
+
+    return {
+        task_id,
+        // 降级方案: WebSocket 不可用时启动 fake progress
+        startFallback: (minTime = 120000) => {
+            if (!socketConnected) {
+                startFakeProgress(progressBarId, textId, minTime);
+            }
+        },
+        // 强制完成 (HTTP 请求返回时调用, 兜底)
+        finish: () => {
+            clearInterval(progressInterval);
+            delete taskProgressCallbacks[task_id];
+            activeTaskIds.delete(task_id);
+            finishProgress(progressBarId, textId);
+        }
+    };
 }
 
 /**
@@ -262,8 +405,9 @@ async function startComicToNovel() {
     btn.disabled = true;
     spinner.classList.remove('hidden');
 
-    createProgressBar('comic2novel-progress');
-    startFakeProgress('comic2novel-progress-bar', 'comic2novel-progress-text', 120000);
+    // WebSocket 实时进度 (不可用时降级到 fake progress)
+    const task = registerTaskProgress('comic2novel-progress');
+    task.startFallback(120000);
 
     try {
         const response = await fetchWithRetry('/api/comic-to-novel', {
@@ -274,12 +418,13 @@ async function startComicToNovel() {
                 images: comicUploadedImages.map(img => img.data),
                 api_url: config.llm_api_url,
                 api_key: config.llm_api_key,
-                model: visionModel
+                model: visionModel,
+                task_id: task.task_id
             })
         }, 2);
 
         const result = await response.json();
-        finishProgress('comic2novel-progress-bar', 'comic2novel-progress-text');
+        task.finish();
 
         if (result.success) {
             comicNovelResult = result.data;
@@ -290,7 +435,7 @@ async function startComicToNovel() {
             showToast(result.error || '转换失败', 'error');
         }
     } catch (e) {
-        finishProgress('comic2novel-progress-bar', 'comic2novel-progress-text');
+        task.finish();
         showToast('请求失败: ' + e.message, 'error');
     } finally {
         btn.disabled = false;
@@ -587,6 +732,7 @@ function switchTab(tabName) {
     });
     document.getElementById(`panel-${tabName}`).classList.remove('hidden');
     if (tabName === 'history') loadHistoryList();
+    if (tabName === 'garble') renderGarblePanel();
 }
 
 function openConfigModal() {
@@ -908,18 +1054,45 @@ document.getElementById('novel-text').addEventListener('input', updateCharCount)
 // ===== 风格Tag管理 =====
 function renderStylePresets() {
     const container = document.getElementById('style-tag-presets');
+    if (!container) return;
     container.innerHTML = '';
-    STYLE_PRESETS.forEach(preset => {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.dataset.id = preset.id;
-        const isSelected = selectedPresetIds.has(preset.id);
-        btn.className = isSelected
-            ? 'px-3 py-1.5 text-sm font-medium border-2 border-black bg-black text-white transition-all'
-            : 'px-3 py-1.5 text-sm font-medium border-2 border-gray-300 hover:border-black transition-all';
-        btn.textContent = preset.label;
-        btn.onclick = () => togglePresetStyle(preset.id);
-        container.appendChild(btn);
+
+    // 按分类分组渲染
+    STYLE_CATEGORIES.forEach(category => {
+        const presetsInCategory = STYLE_PRESETS.filter(p => p.category === category);
+        if (presetsInCategory.length === 0) return;
+
+        const groupDiv = document.createElement('div');
+        groupDiv.className = 'mb-3';
+
+        // 分类标题
+        const title = document.createElement('div');
+        title.className = 'text-xs font-bold text-gray-700 mb-2 flex items-center gap-1';
+        const categoryEmoji = {
+            '日漫': '🇯🇵', '美漫': '🇺🇸', '韩漫': '🇰🇷', '国漫': '🇨🇳', '其他': '🎨'
+        }[category] || '🎨';
+        title.innerHTML = `<span>${categoryEmoji}</span><span>${category}</span>`;
+        groupDiv.appendChild(title);
+
+        // 风格按钮组
+        const btnGroup = document.createElement('div');
+        btnGroup.className = 'flex flex-wrap gap-2';
+
+        presetsInCategory.forEach(preset => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.dataset.id = preset.id;
+            const isSelected = selectedPresetIds.has(preset.id);
+            btn.className = isSelected
+                ? 'px-3 py-1.5 text-sm font-medium border-2 border-black bg-black text-white transition-all'
+                : 'px-3 py-1.5 text-sm font-medium border-2 border-gray-300 hover:border-black transition-all';
+            btn.textContent = preset.label;
+            btn.onclick = () => togglePresetStyle(preset.id);
+            btnGroup.appendChild(btn);
+        });
+
+        groupDiv.appendChild(btnGroup);
+        container.appendChild(groupDiv);
     });
 }
 
@@ -941,6 +1114,7 @@ function togglePresetStyle(id) {
         selectedPresetIds.add(id);
     }
     renderStylePresets();
+    updateStyleSummary();
 }
 
 function addCustomStyleTag() {
@@ -954,11 +1128,55 @@ function addCustomStyleTag() {
     customStyleTags.push(value);
     input.value = '';
     renderCustomStyleTags();
+    updateStyleSummary();
 }
 
 function removeCustomStyleTag(idx) {
     customStyleTags.splice(idx, 1);
     renderCustomStyleTags();
+    updateStyleSummary();
+}
+
+// 切换风格面板展开/折叠
+function toggleStylePanel() {
+    const content = document.getElementById('style-panel-content');
+    const icon = document.getElementById('style-toggle-icon');
+    if (!content) return;
+    if (content.classList.contains('hidden')) {
+        content.classList.remove('hidden');
+        icon.textContent = '▲';
+    } else {
+        content.classList.add('hidden');
+        icon.textContent = '▼';
+    }
+}
+
+// 清空所有已选风格
+function clearAllStyles() {
+    selectedPresetIds.clear();
+    customStyleTags = [];
+    renderStylePresets();
+    renderCustomStyleTags();
+    updateStyleSummary();
+    showToast('已清空所有风格', 'info');
+}
+
+// 更新风格摘要 (显示在面板标题旁)
+function updateStyleSummary() {
+    const summaryEl = document.getElementById('style-summary');
+    if (!summaryEl) return;
+    const presetCount = selectedPresetIds.size;
+    const customCount = customStyleTags.length;
+    const total = presetCount + customCount;
+    if (total === 0) {
+        summaryEl.textContent = '(未选择风格, 将使用默认黑白漫画风格)';
+    } else {
+        const presetLabels = STYLE_PRESETS
+            .filter(p => selectedPresetIds.has(p.id))
+            .map(p => p.label);
+        const allLabels = [...presetLabels, ...customStyleTags];
+        summaryEl.textContent = `已选 ${total} 项: ${allLabels.join(', ')}`;
+    }
 }
 
 function getStyleTagsString() {
@@ -1047,6 +1265,7 @@ function applyConfigToForm(config) {
     customStyleTags = (config.custom_style_tags || []).slice();
     renderStylePresets();
     renderCustomStyleTags();
+    updateStyleSummary();
 }
 
 async function startSegment() {
@@ -1082,8 +1301,9 @@ async function startSegment() {
         '⏳ 分镜生成中…'
     );
 
-    createProgressBar('segment-progress');
-    startFakeProgress('segment-progress-bar', 'segment-progress-text', 120000);
+    // WebSocket 实时进度 (不可用时降级到 fake progress)
+    const task = registerTaskProgress('segment-progress');
+    task.startFallback(120000);
 
     try {
         const response = await fetchWithRetry('/api/segment', {
@@ -1095,12 +1315,13 @@ async function startSegment() {
                 api_url: config.llm_api_url,
                 api_key: config.llm_api_key,
                 model: config.llm_model,
-                segments_per_page: config.segments_per_page || 4
+                segments_per_page: config.segments_per_page || 4,
+                task_id: task.task_id
             })
         });
 
         const result = await response.json();
-        finishProgress('segment-progress-bar', 'segment-progress-text');
+        task.finish();
         if (result.success) {
             // 任务5: 新分镜 = 新作品, 先清空前次的图片缓存 (旧图、引用图、work/images)
             try {
@@ -1145,7 +1366,7 @@ async function startSegment() {
             showToast(result.error || '分镜失败', 'error');
         }
     } catch (e) {
-        finishProgress('segment-progress-bar', 'segment-progress-text');
+        task.finish();
         showToast('请求失败: ' + e.message, 'error');
     } finally {
         spinner.classList.add('hidden');
@@ -1422,6 +1643,709 @@ async function checkAndFixGarble(imageUrl, originalPrompt, pageIdx, segIdx, conf
     }
 }
 
+// ========== 文字乱码清理面板 (独立 Tab) ==========
+
+// 乱码清理状态
+// garbleState 结构: {
+//   [key]: {
+//     pageIdx, segIdx, segNum, dialogue, sceneDesc, imageUrl,
+//     selected: bool,           // 用户勾选
+//     status: 'idle'|'checking'|'checked'|'fixing'|'fixed'|'error',
+//     analysis: { has_garble, garble_level, description } | null,
+//     fixedImageUrl: string | null,   // 修复后的预览图 (分镜级, 已废弃, 保留兼容)
+//     fixedPrompt: string | null,
+//     error: string | null
+//   }
+// }
+// 页面级别状态: garblePageState[pageIdx] = {
+//   pageIdx, pageNum, pageImageUrl (整页原图),
+//   selectedSegs: number,            // 该页勾选的分镜数
+//   status: 'idle'|'fixing'|'fixed'|'error',
+//   fixedImageUrl: string | null,    // 整页修复预览图
+//   fixedPrompt: string | null,
+//   error: string | null
+// }
+let garbleState = {};
+let garblePageState = {};
+
+/**
+ * 渲染乱码清理面板
+ */
+function renderGarblePanel() {
+    const container = document.getElementById('garble-container');
+    if (!container) return;
+
+    // 同步最新分镜和图片数据到 garbleState / garblePageState
+    syncGarbleState();
+
+    const keys = Object.keys(garbleState);
+    const hasAny = keys.length > 0;
+
+    if (!hasAny) {
+        container.innerHTML = `
+            <div class="text-center py-20 text-gray-400">
+                <div class="text-6xl mb-4">🧹</div>
+                <p>请先在"分镜管理"生成图片,然后回到此页面勾选需要清理乱码的分镜</p>
+            </div>`;
+        updateGarbleSummary();
+        return;
+    }
+
+    // 按页分组渲染
+    const byPage = {};
+    keys.forEach(k => {
+        const item = garbleState[k];
+        if (!byPage[item.pageIdx]) byPage[item.pageIdx] = [];
+        byPage[item.pageIdx].push(item);
+    });
+
+    let html = '';
+    Object.keys(byPage).sort((a, b) => Number(a) - Number(b)).forEach(pageIdx => {
+        const pageState = garblePageState[pageIdx] || {};
+        const pageNum = currentSegments.pages[pageIdx]?.page_number || (Number(pageIdx) + 1);
+        const items = byPage[pageIdx];
+        const pageImg = pageState.pageImageUrl || '';
+        const fixedImg = pageState.fixedImageUrl || '';
+        const selectedCount = items.filter(i => i.selected).length;
+        const pageStatus = pageState.status || 'idle';
+
+        html += `<div class="comic-page p-4" id="garble-page-${pageIdx}">
+            <div class="flex justify-between items-center mb-3 pb-2 border-b-2 border-gray-200">
+                <h3 class="text-lg font-bold flex items-center gap-2">
+                    第 ${pageNum} 页
+                    ${pageStatus !== 'idle' ? renderGarblePageBadge(pageStatus) : ''}
+                    ${selectedCount > 0 ? `<span class="text-xs font-normal text-blue-600">已勾选 ${selectedCount} 个分镜</span>` : ''}
+                </h3>
+                <div class="flex gap-2">
+                    <button onclick="garbleSelectPage(${pageIdx}, true)" class="text-xs bg-gray-100 hover:bg-gray-200 px-2 py-1">全选本页</button>
+                    <button onclick="garbleSelectPage(${pageIdx}, false)" class="text-xs bg-gray-100 hover:bg-gray-200 px-2 py-1">取消本页</button>
+                </div>
+            </div>
+
+            <!-- 整页原图 + 修复预览对比 -->
+            ${pageImg ? `
+                <div class="grid md:grid-cols-2 gap-4 mb-4" id="garble-page-preview-${pageIdx}">
+                    <div class="border-2 border-gray-300 p-2">
+                        <div class="text-xs text-gray-500 mb-1 font-bold">📄 整页原图</div>
+                        <img src="${pageImg}" class="w-full max-h-96 object-contain cursor-pointer" onclick="openModal('${pageImg}')">
+                    </div>
+                    ${fixedImg ? `
+                        <div class="border-2 border-green-500 p-2 bg-green-50">
+                            <div class="text-xs text-green-700 mb-1 font-bold">✅ 整页修复预览</div>
+                            <img src="${fixedImg}" class="w-full max-h-96 object-contain cursor-pointer" onclick="openModal('${fixedImg}')">
+                            <div class="flex gap-2 mt-2">
+                                <button onclick="garbleAcceptPageFix(${pageIdx})" class="flex-1 bg-green-600 text-white text-sm py-2 hover:bg-green-700 transition-colors font-bold">✓ 采用并覆盖原图</button>
+                                <button onclick="garbleRejectPageFix(${pageIdx})" class="flex-1 bg-red-100 text-red-700 text-sm py-2 hover:bg-red-200 transition-colors">✗ 丢弃</button>
+                            </div>
+                        </div>
+                    ` : `
+                        <div class="border-2 border-dashed border-gray-200 p-2 flex items-center justify-center text-gray-400 text-sm">
+                            ${pageStatus === 'fixing' ? '🔄 正在修复整页...' : '修复后预览将显示在此'}
+                        </div>
+                    `}
+                </div>
+                ${pageState.error ? `<div class="text-sm text-red-600 mb-3 p-2 bg-red-50">⚠ ${escapeHtml(pageState.error)}</div>` : ''}
+            ` : `
+                <div class="text-center py-8 text-gray-400 border-2 border-dashed border-gray-200 mb-4">
+                    该页暂无整页图片, 请先在"分镜管理"生成整页图
+                </div>
+            `}
+
+            <!-- 分镜列表 (用于勾选) -->
+            <div class="text-xs text-gray-500 mb-2">勾选需要修复的分镜 (修复时将整页发给 API, 不需要先检测):</div>
+            <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+                ${items.map(item => renderGarbleItem(item)).join('')}
+            </div>
+        </div>`;
+    });
+
+    container.innerHTML = html;
+    updateGarbleSummary();
+}
+
+function renderGarblePageBadge(status) {
+    const map = {
+        'fixing': { text: '修复中…', cls: 'bg-purple-100 text-purple-700' },
+        'fixed':  { text: '已修复', cls: 'bg-green-200 text-green-800' },
+        'error':  { text: '出错', cls: 'bg-red-100 text-red-700' },
+    };
+    const m = map[status] || null;
+    return m ? `<span class="text-[10px] font-bold px-2 py-1 ${m.cls}">${m.text}</span>` : '';
+}
+
+/**
+ * 渲染单个分镜卡片 (简化版, 主要用于勾选)
+ */
+function renderGarbleItem(item) {
+    const statusBadge = renderGarbleStatusBadge(item.status, item.analysis);
+    const imgSrc = item.imageUrl || '';
+
+    return `
+    <div class="segment-box p-3 relative ${item.selected ? 'border-black' : ''}" id="garble-item-${item.key}">
+        <div class="flex justify-between items-start mb-2">
+            <label class="flex items-center gap-2 text-sm font-bold cursor-pointer">
+                <input type="checkbox" ${item.selected ? 'checked' : ''} onchange="garbleToggleItem('${item.key}', this.checked)">
+                分镜 ${item.segNum}
+            </label>
+            ${statusBadge}
+        </div>
+        <div class="text-xs text-gray-600 mb-2 line-clamp-2" title="${escapeHtml(item.sceneDesc || '')}">
+            ${escapeHtml((item.sceneDesc || '').slice(0, 80))}${(item.sceneDesc || '').length > 80 ? '...' : ''}
+        </div>
+        ${item.dialogue ? `<div class="text-xs text-blue-700 mb-2 line-clamp-1">💬 ${escapeHtml(item.dialogue)}</div>` : ''}
+        ${imgSrc ? `
+            <div class="border border-gray-200 p-1">
+                <img src="${imgSrc}" class="w-full h-24 object-cover cursor-pointer" onclick="openModal('${imgSrc}')">
+            </div>
+        ` : `
+            <div class="text-center py-4 text-xs text-gray-400 border border-dashed border-gray-200">无图</div>
+        `}
+        ${item.error ? `<div class="text-xs text-red-600 mt-2">⚠ ${escapeHtml(item.error)}</div>` : ''}
+    </div>`;
+}
+
+function renderGarbleStatusBadge(status, analysis) {
+    const map = {
+        'idle':       { text: '待检测', cls: 'bg-gray-100 text-gray-600' },
+        'checking':   { text: '检测中…', cls: 'bg-blue-100 text-blue-700' },
+        'checked':    { text: '✓ 正常', cls: 'bg-green-100 text-green-700' },
+        'garble':     { text: '⚠ 疑似乱码', cls: 'bg-yellow-100 text-yellow-800' },
+        'fixing':     { text: '修复中…', cls: 'bg-purple-100 text-purple-700' },
+        'fixed':      { text: '已修复', cls: 'bg-green-200 text-green-800' },
+        'error':      { text: '出错', cls: 'bg-red-100 text-red-700' },
+    };
+    let s = status;
+    // checked 状态下, 根据 analysis 区分正常/乱码
+    if (status === 'checked' && analysis) {
+        s = analysis.has_garble && analysis.garble_level !== 'none' ? 'garble' : 'checked';
+    }
+    const m = map[s] || map['idle'];
+    return `<span class="text-[10px] font-bold px-2 py-1 ${m.cls}">${m.text}</span>`;
+}
+
+/**
+ * 同步 currentSegments + generatedImages/fullPageImages 到 garbleState / garblePageState
+ * 保留已有的检测/修复结果,只增量更新分镜基本信息
+ */
+function syncGarbleState() {
+    const newState = {};
+    const newPageState = {};
+
+    if (currentSegments.pages && currentSegments.pages.length > 0) {
+        currentSegments.pages.forEach((page, pageIdx) => {
+            // 页面级状态
+            const oldPage = garblePageState[pageIdx] || {};
+            const pageImageUrl = fullPageImages[pageIdx] || '';
+            newPageState[pageIdx] = {
+                pageIdx,
+                pageNum: page.page_number || (pageIdx + 1),
+                pageImageUrl,
+                status: oldPage.status || 'idle',
+                fixedImageUrl: oldPage.fixedImageUrl || null,
+                fixedPrompt: oldPage.fixedPrompt || null,
+                error: oldPage.error || null,
+            };
+            // 如果整页图变了, 清除旧的修复结果
+            if (oldPage.pageImageUrl && oldPage.pageImageUrl !== pageImageUrl) {
+                newPageState[pageIdx].fixedImageUrl = null;
+                newPageState[pageIdx].fixedPrompt = null;
+                newPageState[pageIdx].status = 'idle';
+            }
+
+            // 分镜级状态
+            (page.segments || []).forEach((seg, segIdx) => {
+                const key = `${pageIdx}-${segIdx}`;
+                const old = garbleState[key] || {};
+                const imageUrl = generatedImages[key] || fullPageImages[pageIdx] || '';
+                newState[key] = {
+                    key,
+                    pageIdx,
+                    segIdx,
+                    segNum: seg.segment_number || (segIdx + 1),
+                    dialogue: seg.dialogue || '',
+                    sceneDesc: seg.scene_description || '',
+                    imageUrl,
+                    // 保留旧状态
+                    selected: old.selected || false,
+                    status: old.status || 'idle',
+                    analysis: old.analysis || null,
+                    error: old.error || null,
+                };
+                // 如果图片变了, 清除旧的检测结果
+                if (old.imageUrl && old.imageUrl !== imageUrl) {
+                    newState[key].status = 'idle';
+                    newState[key].analysis = null;
+                }
+            });
+        });
+    }
+    garbleState = newState;
+    garblePageState = newPageState;
+}
+
+function garbleToggleItem(key, checked) {
+    if (garbleState[key]) {
+        garbleState[key].selected = checked;
+        updateGarbleSummary();
+    }
+}
+
+function garbleSelectAll() {
+    Object.values(garbleState).forEach(item => { item.selected = true; });
+    renderGarblePanel();
+}
+
+function garbleSelectNone() {
+    Object.values(garbleState).forEach(item => { item.selected = false; });
+    renderGarblePanel();
+}
+
+function garbleSelectAllWithImage() {
+    Object.values(garbleState).forEach(item => { item.selected = !!item.imageUrl; });
+    renderGarblePanel();
+}
+
+function garbleSelectPage(pageIdx, checked) {
+    Object.values(garbleState).forEach(item => {
+        if (item.pageIdx === pageIdx) item.selected = checked;
+    });
+    renderGarblePanel();
+}
+
+function updateGarbleSummary() {
+    const summaryEl = document.getElementById('garble-summary');
+    const fixBtn = document.getElementById('garble-fix-btn');
+    if (!summaryEl) return;
+
+    const items = Object.values(garbleState);
+    const total = items.length;
+    const selected = items.filter(i => i.selected).length;
+    const withImage = items.filter(i => i.imageUrl).length;
+    const garbleCount = items.filter(i => i.status === 'checked' && i.analysis && i.analysis.has_garble && i.analysis.garble_level !== 'none').length;
+
+    // 页面级统计
+    const pages = Object.values(garblePageState);
+    const pagesWithImage = pages.filter(p => p.pageImageUrl).length;
+    const pagesFixed = pages.filter(p => p.status === 'fixed').length;
+    const pagesWithPreview = pages.filter(p => p.fixedImageUrl).length;
+
+    if (total === 0) {
+        summaryEl.classList.add('hidden');
+        if (fixBtn) fixBtn.disabled = true;
+        return;
+    }
+
+    summaryEl.classList.remove('hidden');
+    summaryEl.innerHTML = `
+        <div class="flex flex-wrap gap-4">
+            <span>📊 总分镜: <b>${total}</b></span>
+            <span>🖼️ 有图分镜: <b>${withImage}</b></span>
+            <span>✅ 已勾选: <b class="text-blue-700">${selected}</b></span>
+            <span>📄 有整页图: <b>${pagesWithImage}</b></span>
+            <span>⚠️ 检出乱码: <b class="text-yellow-700">${garbleCount}</b></span>
+            <span>🧹 已修复页: <b class="text-green-700">${pagesFixed}</b></span>
+            <span>⏳ 待确认预览: <b class="text-purple-700">${pagesWithPreview}</b></span>
+        </div>
+    `;
+
+    // 修复按钮可用条件: 至少有一页 (有勾选分镜 + 有整页图 + 未生成预览)
+    // 不要求检测出乱码, 只要勾选了就能修复
+    const canFix = pages.some(p => {
+        if (!p.pageImageUrl || p.fixedImageUrl || p.status === 'fixing') return false;
+        const hasSelectedSeg = items.some(i => i.pageIdx === p.pageIdx && i.selected);
+        return hasSelectedSeg;
+    });
+    if (fixBtn) fixBtn.disabled = !canFix;
+}
+
+/**
+ * 一键批量检测勾选的分镜是否乱码
+ */
+async function garbleBatchCheck() {
+    const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
+    if (!config.llm_api_url) {
+        showToast('请先配置大语言模型API (用于视觉检测)', 'error');
+        openConfigModal();
+        return;
+    }
+
+    const itemsToCheck = Object.values(garbleState).filter(i => i.selected && i.imageUrl);
+    if (itemsToCheck.length === 0) {
+        showToast('请先勾选有图片的分镜', 'error');
+        return;
+    }
+
+    const spinner = document.getElementById('garble-check-spinner');
+    const label = document.getElementById('garble-check-label');
+    const btn = document.getElementById('garble-check-btn');
+    spinner.classList.remove('hidden');
+    label.textContent = `检测中 (0/${itemsToCheck.length})…`;
+    btn.disabled = true;
+
+    // WebSocket 进度
+    const task = registerTaskProgress('garble-progress', {
+        onProgress: (progress, message, stage, extra) => {
+            if (extra && extra.current !== undefined && extra.total !== undefined) {
+                label.textContent = `检测中 (${extra.current}/${extra.total})…`;
+            }
+        }
+    });
+    task.startFallback(60000);
+
+    let done = 0;
+    let garbleFound = 0;
+
+    // 并发限制: 3 个一组
+    const concurrency = 3;
+    const queue = [...itemsToCheck];
+
+    async function worker() {
+        while (queue.length > 0) {
+            const item = queue.shift();
+            if (!item) break;
+            item.status = 'checking';
+            item.error = null;
+            renderGarbleItemInline(item);
+
+            try {
+                const resp = await fetchWithRetry('/api/check-text-garble', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        image_url: item.imageUrl,
+                        api_url: config.llm_api_url,
+                        api_key: config.llm_api_key,
+                        model: config.llm_model || 'minimax-vl',
+                        task_id: task.task_id
+                    })
+                });
+                const result = await resp.json();
+                if (result.success) {
+                    item.analysis = result.analysis;
+                    item.status = 'checked';
+                    if (result.analysis.has_garble && result.analysis.garble_level !== 'none') {
+                        garbleFound++;
+                    }
+                } else {
+                    item.status = 'error';
+                    item.error = result.error || '检测失败';
+                }
+            } catch (e) {
+                item.status = 'error';
+                item.error = e.message;
+            }
+            done++;
+            // 推送进度
+            if (socketConnected) {
+                // 后端会推送, 这里只是兜底; 不直接 emit
+            }
+            const progress = Math.round((done / itemsToCheck.length) * 100);
+            // 手动更新进度条 (后端单次检测很快, 可能不会推送)
+            const bar = document.getElementById('garble-progress-bar');
+            const text = document.getElementById('garble-progress-text');
+            if (bar) bar.style.width = `${progress}%`;
+            if (text) text.textContent = `${progress}% - 已检测 ${done}/${itemsToCheck.length}`;
+            label.textContent = `检测中 (${done}/${itemsToCheck.length})…`;
+            renderGarbleItemInline(item);
+        }
+    }
+
+    try {
+        await Promise.all(Array.from({ length: concurrency }, () => worker()));
+        task.finish();
+        showToast(`检测完成, ${garbleFound} 个分镜疑似乱码`, garbleFound > 0 ? 'warning' : 'success');
+    } catch (e) {
+        task.finish();
+        showToast('批量检测出错: ' + e.message, 'error');
+    } finally {
+        spinner.classList.add('hidden');
+        label.textContent = '🔍 一键检测乱码';
+        btn.disabled = false;
+        updateGarbleSummary();
+    }
+}
+
+/**
+ * 局部刷新单个 item (避免整面板重渲染滚动跳)
+ */
+function renderGarbleItemInline(item) {
+    const el = document.getElementById(`garble-item-${item.key}`);
+    if (!el) return;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = renderGarbleItem(item);
+    el.replaceWith(tmp.firstElementChild);
+}
+
+/**
+ * 批量修复: 按页聚合, 把整页图发给 API 重新生成
+ * 不要求先检测出乱码, 只要该页有勾选分镜就能修复
+ */
+async function garbleBatchFix() {
+    const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
+    if (!config.img_api_url) {
+        showToast('请先配置图像生成API', 'error');
+        openConfigModal();
+        return;
+    }
+    // 不再需要 LLM API, 直接用分镜原文调用图像 API
+
+    // 找出所有"有勾选分镜 + 有整页图 + 未生成预览"的页面
+    const pagesToFix = Object.values(garblePageState).filter(p => {
+        if (!p.pageImageUrl || p.fixedImageUrl || p.status === 'fixing') return false;
+        const hasSelectedSeg = Object.values(garbleState).some(i => i.pageIdx === p.pageIdx && i.selected);
+        return hasSelectedSeg;
+    });
+
+    if (pagesToFix.length === 0) {
+        showToast('没有需要修复的页面 (请勾选分镜并确保该页有整页图)', 'error');
+        return;
+    }
+
+    const spinner = document.getElementById('garble-fix-spinner');
+    const label = document.getElementById('garble-fix-label');
+    const btn = document.getElementById('garble-fix-btn');
+    spinner.classList.remove('hidden');
+    label.textContent = `修复中 (0/${pagesToFix.length})…`;
+    btn.disabled = true;
+
+    const task = registerTaskProgress('garble-progress', {
+        onProgress: (progress, message, stage, extra) => {
+            if (extra && extra.current !== undefined && extra.total !== undefined) {
+                label.textContent = `修复中 (${extra.current}/${extra.total})…`;
+            }
+        }
+    });
+    task.startFallback(180000);
+
+    let done = 0;
+    const concurrency = 2;  // 图像生成更慢, 限并发 2
+
+    const queue = [...pagesToFix];
+    async function worker() {
+        while (queue.length > 0) {
+            const pageState = queue.shift();
+            if (!pageState) break;
+            pageState.status = 'fixing';
+            pageState.error = null;
+            renderGarblePageInline(pageState.pageIdx);
+
+            try {
+                // 构建该页所有勾选分镜的描述, 作为修复参考
+                const segs = Object.values(garbleState)
+                    .filter(i => i.pageIdx === pageState.pageIdx && i.selected)
+                    .sort((a, b) => a.segIdx - b.segIdx);
+                const segDescs = segs.map(s => `分镜${s.segNum}: ${s.sceneDesc}${s.dialogue ? ` (对话: ${s.dialogue})` : ''}`).join('\n');
+                const page = currentSegments.pages[pageState.pageIdx];
+                const originalPrompt = page?.page_prompt || page?.style_prompt || segDescs || 'manga page';
+
+                // 调用修复 API, 传入整页图 URL, seg_idx 为 None 表示整页修复
+                const resp = await fetchWithRetry('/api/fix-text-garble', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        image_url: pageState.pageImageUrl,
+                        original_prompt: originalPrompt,
+                        api_url: config.llm_api_url,
+                        api_key: config.llm_api_key,
+                        model: config.llm_model || 'minimax-vl',
+                        img_api_url: config.img_api_url,
+                        img_api_key: config.img_api_key,
+                        img_model: config.img_model,
+                        page_idx: pageState.pageIdx,
+                        seg_idx: null,  // 整页修复
+                        task_id: task.task_id
+                    })
+                });
+                const result = await resp.json();
+                if (result.success) {
+                    pageState.fixedImageUrl = result.image_url;
+                    pageState.fixedPrompt = result.fixed_prompt;
+                    pageState.status = 'fixed';
+                } else {
+                    pageState.status = 'error';
+                    pageState.error = result.error || '修复失败';
+                }
+            } catch (e) {
+                pageState.status = 'error';
+                pageState.error = e.message;
+            }
+            done++;
+            const progress = Math.round((done / pagesToFix.length) * 100);
+            const bar = document.getElementById('garble-progress-bar');
+            const text = document.getElementById('garble-progress-text');
+            if (bar) bar.style.width = `${progress}%`;
+            if (text) text.textContent = `${progress}% - 已修复 ${done}/${pagesToFix.length} 页`;
+            label.textContent = `修复中 (${done}/${pagesToFix.length})…`;
+            renderGarblePageInline(pageState.pageIdx);
+        }
+    }
+
+    try {
+        await Promise.all(Array.from({ length: concurrency }, () => worker()));
+        task.finish();
+        const fixed = pagesToFix.filter(p => p.fixedImageUrl).length;
+        showToast(`修复完成, ${fixed}/${pagesToFix.length} 页已生成预览, 请逐页确认`, 'success');
+    } catch (e) {
+        task.finish();
+        showToast('批量修复出错: ' + e.message, 'error');
+    } finally {
+        spinner.classList.add('hidden');
+        label.textContent = '🔧 修复选中乱码';
+        btn.disabled = false;
+        updateGarbleSummary();
+    }
+}
+
+/**
+ * 局部刷新单个 page (避免整面板重渲染滚动跳)
+ */
+function renderGarblePageInline(pageIdx) {
+    const el = document.getElementById(`garble-page-${pageIdx}`);
+    if (!el) return;
+    const pageState = garblePageState[pageIdx];
+    if (!pageState) return;
+    const items = Object.values(garbleState).filter(i => i.pageIdx === pageIdx).sort((a, b) => a.segIdx - b.segIdx);
+    const pageNum = currentSegments.pages[pageIdx]?.page_number || (Number(pageIdx) + 1);
+    const pageImg = pageState.pageImageUrl || '';
+    const fixedImg = pageState.fixedImageUrl || '';
+    const selectedCount = items.filter(i => i.selected).length;
+    const pageStatus = pageState.status || 'idle';
+
+    const html = `
+        <div class="flex justify-between items-center mb-3 pb-2 border-b-2 border-gray-200">
+            <h3 class="text-lg font-bold flex items-center gap-2">
+                第 ${pageNum} 页
+                ${pageStatus !== 'idle' ? renderGarblePageBadge(pageStatus) : ''}
+                ${selectedCount > 0 ? `<span class="text-xs font-normal text-blue-600">已勾选 ${selectedCount} 个分镜</span>` : ''}
+            </h3>
+            <div class="flex gap-2">
+                <button onclick="garbleSelectPage(${pageIdx}, true)" class="text-xs bg-gray-100 hover:bg-gray-200 px-2 py-1">全选本页</button>
+                <button onclick="garbleSelectPage(${pageIdx}, false)" class="text-xs bg-gray-100 hover:bg-gray-200 px-2 py-1">取消本页</button>
+            </div>
+        </div>
+        ${pageImg ? `
+            <div class="grid md:grid-cols-2 gap-4 mb-4">
+                <div class="border-2 border-gray-300 p-2">
+                    <div class="text-xs text-gray-500 mb-1 font-bold">📄 整页原图</div>
+                    <img src="${pageImg}" class="w-full max-h-96 object-contain cursor-pointer" onclick="openModal('${pageImg}')">
+                </div>
+                ${fixedImg ? `
+                    <div class="border-2 border-green-500 p-2 bg-green-50">
+                        <div class="text-xs text-green-700 mb-1 font-bold">✅ 整页修复预览</div>
+                        <img src="${fixedImg}" class="w-full max-h-96 object-contain cursor-pointer" onclick="openModal('${fixedImg}')">
+                        <div class="flex gap-2 mt-2">
+                            <button onclick="garbleAcceptPageFix(${pageIdx})" class="flex-1 bg-green-600 text-white text-sm py-2 hover:bg-green-700 transition-colors font-bold">✓ 采用并覆盖原图</button>
+                            <button onclick="garbleRejectPageFix(${pageIdx})" class="flex-1 bg-red-100 text-red-700 text-sm py-2 hover:bg-red-200 transition-colors">✗ 丢弃</button>
+                        </div>
+                    </div>
+                ` : `
+                    <div class="border-2 border-dashed border-gray-200 p-2 flex items-center justify-center text-gray-400 text-sm">
+                        ${pageStatus === 'fixing' ? '🔄 正在修复整页...' : '修复后预览将显示在此'}
+                    </div>
+                `}
+            </div>
+            ${pageState.error ? `<div class="text-sm text-red-600 mb-3 p-2 bg-red-50">⚠ ${escapeHtml(pageState.error)}</div>` : ''}
+        ` : `
+            <div class="text-center py-8 text-gray-400 border-2 border-dashed border-gray-200 mb-4">
+                该页暂无整页图片, 请先在"分镜管理"生成整页图
+            </div>
+        `}
+        <div class="text-xs text-gray-500 mb-2">勾选需要修复的分镜 (修复时将整页发给 API, 不需要先检测):</div>
+        <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+            ${items.map(item => renderGarbleItem(item)).join('')}
+        </div>`;
+
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    el.replaceWith(tmp.firstElementChild);
+}
+
+/**
+ * 采用整页修复: 覆盖原整页图
+ */
+async function garbleAcceptPageFix(pageIdx) {
+    const pageState = garblePageState[pageIdx];
+    if (!pageState || !pageState.fixedImageUrl) return;
+
+    const pageNum = pageState.pageNum || (pageIdx + 1);
+    if (!confirm(`确认用修复后的图片覆盖第 ${pageNum} 页的整页原图吗?\n\n修复后原图将被替换 (自动备份为 .bak), 无法撤销。`)) return;
+
+    const oldUrl = pageState.pageImageUrl;
+
+    try {
+        const resp = await fetchWithRetry('/api/accept-garble-fix', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                page_idx: pageIdx,
+                seg_idx: null,  // 整页模式
+                fixed_image_url: pageState.fixedImageUrl,
+                original_image_url: oldUrl
+            })
+        });
+        const result = await resp.json();
+        if (!result.success) {
+            showToast('覆盖失败: ' + (result.error || '未知错误'), 'error');
+            return;
+        }
+
+        // 前端更新整页图映射
+        const newUrl = result.new_url || pageState.fixedImageUrl;
+        fullPageImages[pageIdx] = newUrl;
+        // 同步该页所有分镜的 imageUrl (因为整页图变了)
+        Object.values(garbleState).forEach(item => {
+            if (item.pageIdx === pageIdx && !generatedImages[item.key]) {
+                item.imageUrl = newUrl;
+            }
+        });
+
+        // 更新 garblePageState
+        pageState.pageImageUrl = newUrl;
+        pageState.fixedImageUrl = null;
+        pageState.fixedPrompt = null;
+        pageState.status = 'fixed';
+
+        renderGarblePageInline(pageIdx);
+        renderSegments();
+        renderGallery();
+        syncResults();
+        updateGarbleSummary();
+        showToast(`第 ${pageNum} 页已采用修复图`, 'success');
+    } catch (e) {
+        showToast('覆盖失败: ' + e.message, 'error');
+    }
+}
+
+/**
+ * 丢弃整页修复预览
+ */
+function garbleRejectPageFix(pageIdx) {
+    const pageState = garblePageState[pageIdx];
+    if (!pageState) return;
+    pageState.fixedImageUrl = null;
+    pageState.fixedPrompt = null;
+    pageState.status = 'idle';
+    renderGarblePageInline(pageIdx);
+    updateGarbleSummary();
+    showToast('已丢弃修复预览', 'info');
+}
+
+// 兼容旧函数名 (避免其他地方调用报错)
+async function garbleAcceptFix(key) {
+    const item = garbleState[key];
+    if (!item) return;
+    return garbleAcceptPageFix(item.pageIdx);
+}
+
+function garbleRejectFix(key) {
+    const item = garbleState[key];
+    if (!item) return;
+    return garbleRejectPageFix(item.pageIdx);
+}
+
 async function generateSingleImage(pageIdx, segIdx, skipLock = false, btn = null) {
     if (!skipLock && isGenerating) {
         showToast('请等待当前生成完成', 'error');
@@ -1455,6 +2379,13 @@ async function generateSingleImage(pageIdx, segIdx, skipLock = false, btn = null
         targetBtn.disabled = true;
     }
 
+    // WebSocket 实时进度 (单张图生成, 仅在非批量模式下显示进度条)
+    let task = null;
+    if (!skipLock) {
+        task = registerTaskProgress(`single-progress-${pageIdx}-${segIdx}`);
+        task.startFallback(60000);
+    }
+
     try {
         const response = await fetchWithRetry('/api/generate-image', {
             method: 'POST',
@@ -1479,11 +2410,13 @@ async function generateSingleImage(pageIdx, segIdx, skipLock = false, btn = null
                 lighting: seg.lighting || '',
                 of_type: seg.of_type || '',
                 page_idx: pageIdx,
-                seg_idx: segIdx
+                seg_idx: segIdx,
+                task_id: task ? task.task_id : ''
             })
         });
 
         const result = await response.json();
+        if (task) task.finish();
         if (result.success) {
             let finalImageUrl = result.image_url;
             generatedImages[`${pageIdx}-${segIdx}`] = finalImageUrl;
@@ -1515,6 +2448,7 @@ async function generateSingleImage(pageIdx, segIdx, skipLock = false, btn = null
             showToast(result.error || '生成失败', 'error');
         }
     } catch (e) {
+        if (task) task.finish();
         showToast('请求失败: ' + e.message, 'error');
     } finally {
         if (!skipLock) isGenerating = false;
@@ -1567,6 +2501,13 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
             image_url: char.image_url
         }));
 
+    // WebSocket 实时进度 (单页生成, 仅在非批量模式下显示进度条)
+    let task = null;
+    if (!skipLock) {
+        task = registerTaskProgress(`fullpage-progress-${pageIdx}`);
+        task.startFallback(90000);
+    }
+
     try {
         const response = await fetchWithRetry('/api/generate-page', {
             method: 'POST',
@@ -1584,11 +2525,13 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
                 references: characterReferences,  // 兼容新字段名
                 reference_strength: (config.reference_strength ?? 0.6),
                 previous_page_image: previousPageImage,
-                page_idx: pageIdx
+                page_idx: pageIdx,
+                task_id: task ? task.task_id : ''
             })
         });
 
         const result = await response.json();
+        if (task) task.finish();
         if (result.success) {
             let finalImageUrl = result.image_url;
             fullPageImages[pageIdx] = finalImageUrl;
@@ -1621,6 +2564,7 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
             showToast(result.error || '生成失败', 'error');
         }
     } catch (e) {
+        if (task) task.finish();
         showToast('请求失败: ' + e.message, 'error');
     } finally {
         if (!skipLock) isGenerating = false;
@@ -1741,8 +2685,17 @@ async function generateAllFullPages() {
         }
     }
 
-    createProgressBar('batch-progress');
-    startFakeProgress('batch-progress-bar', 'batch-progress-text', 120000);
+    // WebSocket 实时进度 (不可用时降级到 fake progress)
+    const task = registerTaskProgress('batch-progress', {
+        onProgress: (progress, message, stage, extra) => {
+            // 批量生成时, 进度条可以显示当前页/总页数
+            if (extra && extra.current !== undefined && extra.total !== undefined) {
+                const text = document.getElementById('batch-progress-text');
+                if (text) text.textContent = `${progress}% - ${message} (${extra.current}/${extra.total})`;
+            }
+        }
+    });
+    task.startFallback(120000);
 
     // 显示暂停按钮
     const pauseBtn = document.getElementById('batch-pause-btn');
@@ -1754,7 +2707,8 @@ async function generateAllFullPages() {
 
     // 串行生成，每页参考上一页漫画和人设图
     let lastPageImage = null;
-    for (let i = 0; i < pagesToGenerate.length; i++) {
+    let i = 0;
+    for (i = 0; i < pagesToGenerate.length; i++) {
         // 暂停检查
         const shouldContinue = await _checkBatchPause();
         if (!shouldContinue) break;
@@ -1768,7 +2722,7 @@ async function generateAllFullPages() {
     // 隐藏暂停按钮
     if (pauseBtn) pauseBtn.classList.add('hidden');
     batchPaused = false;
-    finishProgress('batch-progress-bar', 'batch-progress-text');
+    task.finish();
 
     isGenerating = false;
     spinner.classList.add('hidden');
@@ -1806,6 +2760,17 @@ async function generateAllImages() {
         }
     }
 
+    // WebSocket 实时进度 (不可用时降级到 fake progress)
+    const task = registerTaskProgress('batch-progress', {
+        onProgress: (progress, message, stage, extra) => {
+            if (extra && extra.current !== undefined && extra.total !== undefined) {
+                const text = document.getElementById('batch-progress-text');
+                if (text) text.textContent = `${progress}% - ${message} (${extra.current}/${extra.total})`;
+            }
+        }
+    });
+    task.startFallback(120000);
+
     // 串行生成
     // 显示暂停按钮
     const pauseBtn = document.getElementById('batch-pause-btn');
@@ -1829,6 +2794,7 @@ async function generateAllImages() {
     // 隐藏暂停按钮
     if (pauseBtn) pauseBtn.classList.add('hidden');
     batchPaused = false;
+    task.finish();
 
     isGenerating = false;
     spinner.classList.add('hidden');
@@ -2126,6 +3092,10 @@ async function analyzeCharacters() {
     createProgressBar('analyze-progress');
     startFakeProgress('analyze-progress-bar', 'analyze-progress-text', 120000);
 
+    // WebSocket 实时进度 (不可用时降级到 fake progress)
+    const task = registerTaskProgress('analyze-progress');
+    task.startFallback(120000);
+
     try {
         const response = await fetchWithRetry('/api/generate-characters', {
             method: 'POST',
@@ -2135,12 +3105,13 @@ async function analyzeCharacters() {
                 text: text,
                 api_url: config.llm_api_url,
                 api_key: config.llm_api_key,
-                model: config.llm_model
+                model: config.llm_model,
+                task_id: task.task_id
             })
         });
 
         const result = await response.json();
-        finishProgress('analyze-progress-bar', 'analyze-progress-text');
+        task.finish();
         if (result.success) {
             const newChars = result.data.characters || [];
             // 合并而非替换: 用名字去重, 名字相同的优先保留新分析结果
@@ -2182,7 +3153,7 @@ async function analyzeCharacters() {
             showToast(result.error || '分析失败', 'error');
         }
     } catch (e) {
-        finishProgress('analyze-progress-bar', 'analyze-progress-text');
+        task.finish();
         showToast('请求失败: ' + e.message, 'error');
     } finally {
         spinner.classList.add('hidden');
@@ -2469,7 +3440,9 @@ function renderCombinedPages() {
 window.addEventListener('DOMContentLoaded', () => {
     renderStylePresets();
     renderCustomStyleTags();
+    updateStyleSummary();
     loadConfig();
     updateCharCount();
     recoverSession();  // 尝试恢复之前可能因内网穿透断开丢失的会话数据
+    initWebSocket();   // 初始化 WebSocket 实时进度连接
 });

@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>小说⇄漫画 双向转换器</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- socket.io 客户端 (用于 WebSocket 实时进度推送) -->
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Noto Sans SC', sans-serif; }
@@ -84,12 +86,42 @@
             <p class="text-gray-600 text-sm">两大功能：使用LLM将小说转为漫画分镜 | 上传漫画图片，使用视觉模型转为小说文本</p>
         </header>
 
+        <!-- 漫画风格设置 (主页常驻, 可折叠) -->
+        <div class="bg-white p-4 manga-border panel-shadow mb-4">
+            <div class="flex items-center justify-between cursor-pointer" onclick="toggleStylePanel()">
+                <h2 class="text-lg font-bold flex items-center gap-2">
+                    <span>🎨</span>
+                    <span>漫画风格设置</span>
+                    <span id="style-summary" class="text-sm font-normal text-gray-500 ml-2"></span>
+                </h2>
+                <button type="button" class="text-gray-500 hover:text-black text-xl" id="style-toggle-icon">▼</button>
+            </div>
+            <div id="style-panel-content" class="mt-4 hidden">
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-2">预设风格（点击切换，可多选）</label>
+                    <div id="style-tag-presets" class="flex flex-wrap gap-2 mb-3"></div>
+                </div>
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-2">自定义风格</label>
+                    <div class="flex gap-2">
+                        <input type="text" id="custom-style-input" placeholder="自定义风格，例如: cyberpunk, watercolor" class="flex-1 p-2 border-2 border-gray-300 focus:border-black outline-none transition-colors text-sm">
+                        <button type="button" onclick="addCustomStyleTag()" class="border-2 border-black px-3 py-2 text-sm font-medium hover:bg-gray-100 transition-colors whitespace-nowrap">+ 添加</button>
+                    </div>
+                    <div id="custom-style-tags" class="flex flex-wrap gap-2 mt-2"></div>
+                </div>
+                <div class="flex justify-end pt-2 border-t border-gray-200">
+                    <button type="button" onclick="clearAllStyles()" class="text-sm text-red-600 hover:text-red-800">清空所有风格</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Tabs -->
         <div class="flex gap-6 mb-6 border-b border-gray-300 items-center">
             <!-- 小说→漫画 功能组 -->
             <button onclick="switchTab('input')" id="tab-input" class="tab-active pb-2 px-1 text-lg transition-all">小说输入</button>
             <button onclick="switchTab('characters')" id="tab-characters" class="tab-inactive pb-2 px-1 text-lg transition-all">角色管理</button>
             <button onclick="switchTab('segments')" id="tab-segments" class="tab-inactive pb-2 px-1 text-lg transition-all">分镜管理</button>
+            <button onclick="switchTab('garble')" id="tab-garble" class="tab-inactive pb-2 px-1 text-lg transition-all">🧹 乱码清理</button>
             <button onclick="switchTab('gallery')" id="tab-gallery" class="tab-inactive pb-2 px-1 text-lg transition-all">漫画预览</button>
             <button onclick="switchTab('history')" id="tab-history" class="tab-inactive pb-2 px-1 text-lg transition-all">历史记录</button>
             <span class="text-gray-300 text-2xl font-light mx-1">|</span>
@@ -206,39 +238,35 @@
 
             <div class="bg-white p-6 manga-border panel-shadow mt-6">
                 <h2 class="text-xl font-bold mb-4">高级设置</h2>
-                <div class="grid md:grid-cols-2 gap-6">
+                <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium mb-2">漫画风格（点击切换，可多选）</label>
-                        <div id="style-tag-presets" class="flex flex-wrap gap-2 mb-3"></div>
-                        <div class="flex gap-2">
-                            <input type="text" id="custom-style-input" placeholder="自定义风格，例如: cyberpunk, watercolor" class="flex-1 p-2 border-2 border-gray-300 focus:border-black outline-none transition-colors text-sm">
-                            <button type="button" onclick="addCustomStyleTag()" class="border-2 border-black px-3 py-2 text-sm font-medium hover:bg-gray-100 transition-colors whitespace-nowrap">+ 添加</button>
-                        </div>
-                        <div id="custom-style-tags" class="flex flex-wrap gap-2 mt-2"></div>
+                        <label class="block text-sm font-medium mb-1">每页分镜数</label>
+                        <input type="number" id="segments-per-page" value="4" min="1" max="8" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
                     </div>
-                    <div class="space-y-4">
-                        <div>
-                            <label class="block text-sm font-medium mb-1">每页分镜数</label>
-                            <input type="number" id="segments-per-page" value="4" min="1" max="8" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                    <div>
+                        <label class="block text-sm font-medium mb-1">负面提示词</label>
+                        <input type="text" id="negative-prompt" value="color, colorful, chromatic, vibrant, saturated, blurry, low quality, distorted, watermark, signature, text, logo, deformed hands, extra fingers, bad anatomy, mutated" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">
+                            参考强度 reference_strength
+                            <span class="text-gray-500 font-normal">(<span id="reference-strength-value">0.60</span>)</span>
+                        </label>
+                        <input type="range" id="reference-strength" min="0" max="1" step="0.05" value="0.6"
+                            class="w-full"
+                            oninput="document.getElementById('reference-strength-value').textContent = parseFloat(this.value).toFixed(2)">
+                        <div class="flex justify-between text-xs text-gray-500 mt-1">
+                            <span>0.0 弱参考（更自由发挥）</span>
+                            <span>0.6 默认</span>
+                            <span>1.0 强参考（严格保真）</span>
                         </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">负面提示词</label>
-                            <input type="text" id="negative-prompt" value="color, colorful, chromatic, vibrant, saturated, blurry, low quality, distorted, watermark, signature, text, logo, deformed hands, extra fingers, bad anatomy, mutated" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">
-                                参考强度 reference_strength
-                                <span class="text-gray-500 font-normal">(<span id="reference-strength-value">0.60</span>)</span>
-                            </label>
-                            <input type="range" id="reference-strength" min="0" max="1" step="0.05" value="0.6"
-                                class="w-full"
-                                oninput="document.getElementById('reference-strength-value').textContent = parseFloat(this.value).toFixed(2)">
-                            <div class="flex justify-between text-xs text-gray-500 mt-1">
-                                <span>0.0 弱参考（更自由发挥）</span>
-                                <span>0.6 默认</span>
-                                <span>1.0 强参考（严格保真）</span>
-                            </div>
-                        </div>
+                    </div>
+                    <div class="pt-2 border-t border-gray-200">
+                        <p class="text-sm text-gray-600">
+                            🎨 漫画风格设置已移至主页顶部，请在
+                            <button type="button" onclick="closeConfigModal(); switchTab('input');" class="text-blue-600 hover:underline font-medium">小说输入</button>
+                            页面查看和选择风格
+                        </p>
                     </div>
                 </div>
                 <div class="mt-6 flex justify-end">
@@ -314,6 +342,41 @@
                 <div class="text-center py-20 text-gray-400">
                     <div class="text-6xl mb-4">📝</div>
                     <p>请先输入小说内容并点击"开始智能分镜"</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Garble Cleanup Tab -->
+        <div id="panel-garble" class="hidden fade-in">
+            <div class="bg-white p-6 manga-border panel-shadow">
+                <div class="flex justify-between items-center mb-4">
+                    <div>
+                        <h2 class="text-xl font-bold">🧹 文字乱码清理</h2>
+                        <p class="text-sm text-gray-500 mt-1">
+                            勾选需要修复的分镜 → 一键修复整页 → 预览对比 → 确认是否覆盖原图 (无需先检测)
+                        </p>
+                    </div>
+                    <div class="flex gap-2 flex-wrap">
+                        <button onclick="garbleSelectAll()" class="bg-white border-2 border-gray-300 hover:border-black px-3 py-2 text-sm font-medium transition-colors">全选</button>
+                        <button onclick="garbleSelectNone()" class="bg-white border-2 border-gray-300 hover:border-black px-3 py-2 text-sm font-medium transition-colors">清空选择</button>
+                        <button onclick="garbleSelectAllWithImage()" class="bg-white border-2 border-gray-300 hover:border-black px-3 py-2 text-sm font-medium transition-colors">仅选有图</button>
+                        <button id="garble-check-btn" onclick="garbleBatchCheck()" class="bg-blue-600 text-white px-4 py-2 text-sm font-medium hover:bg-blue-700 transition-colors flex items-center gap-2">
+                            <span id="garble-check-label">🔍 一键检测乱码</span>
+                            <span id="garble-check-spinner" class="loading-spinner hidden" style="width:14px;height:14px;border-width:2px;"></span>
+                        </button>
+                        <button id="garble-fix-btn" onclick="garbleBatchFix()" disabled class="bg-black text-white px-4 py-2 text-sm font-medium hover:bg-gray-800 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span id="garble-fix-label">🔧 按页修复整页图</span>
+                            <span id="garble-fix-spinner" class="loading-spinner hidden" style="width:14px;height:14px;border-width:2px;"></span>
+                        </button>
+                    </div>
+                </div>
+                <div id="garble-progress" class="mt-4 mb-4"></div>
+                <div id="garble-summary" class="hidden mb-4 p-3 border-2 border-black bg-yellow-50 text-sm"></div>
+                <div id="garble-container" class="space-y-4">
+                    <div class="text-center py-20 text-gray-400">
+                        <div class="text-6xl mb-4">🧹</div>
+                        <p>请先在"分镜管理"生成图片,然后回到此页面勾选需要清理乱码的分镜</p>
+                    </div>
                 </div>
             </div>
         </div>

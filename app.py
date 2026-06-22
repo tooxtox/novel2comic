@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit
 from functools import wraps
 import requests
 import json
@@ -114,6 +115,10 @@ ADMIN_PASSWORD = _ensure_env('MANGA_ADMIN_PASSWORD', lambda: secrets.token_urlsa
 app = Flask(__name__, static_folder='static', template_folder='templates')
 app.secret_key = SECRET_KEY
 CORS(app, supports_credentials=True)
+
+# WebSocket 实时进度推送
+# async_mode='threading' 兼容同步 Flask, 无需 eventlet/gevent
+socketio = SocketIO(app, cors_allowed_origins="*", manage_session=False, async_mode='threading')
 
 BASE_DIR = os.path.dirname(__file__)
 CONFIG_LOCAL_PATH = os.path.join(BASE_DIR, 'config.local.json')
@@ -509,6 +514,45 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+
+# ========== WebSocket 实时进度推送 ==========
+# 进度事件通过 task_id 区分不同任务, 前端订阅后按 task_id 过滤
+
+def emit_progress(task_id, progress, message, stage=None, extra=None):
+    """向所有客户端推送进度事件 (前端按 task_id 过滤)
+
+    Args:
+        task_id:  任务唯一ID (前端生成, 随请求传给后端)
+        progress: 0-100 整数
+        message:  进度描述文字
+        stage:    可选的阶段标识 (如 'calling_llm', 'parsing', 'saving', 'done', 'error')
+        extra:    可选的附加数据 dict
+    """
+    try:
+        socketio.emit('task_progress', {
+            'task_id': task_id,
+            'progress': min(100, max(0, int(progress))),
+            'message': str(message),
+            'stage': stage or '',
+            'extra': extra or {}
+        })
+    except Exception as e:
+        print(f"[WebSocket] emit_progress error: {e}")
+
+
+@socketio.on('connect')
+def on_connect():
+    """客户端连接时验证登录状态"""
+    if not session.get('logged_in'):
+        return False  # 拒绝未登录连接
+    print(f"[WebSocket] client connected, sid={request.sid}")
+
+
+@socketio.on('disconnect')
+def on_disconnect():
+    print(f"[WebSocket] client disconnected, sid={request.sid}")
+
+
 @app.route('/')
 def index():
     if not session.get('logged_in'):
@@ -547,9 +591,12 @@ def segment_novel():
     api_key = data.get('api_key', '')
     model = data.get('model', '')
     segments_per_page = data.get('segments_per_page', 4)
+    task_id = data.get('task_id', '')
 
     if not text or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
+
+    emit_progress(task_id, 5, '正在构建分镜提示词...', 'building_prompt')
 
     prompt = f"""将以下小说转换漫画分镜，每页{segments_per_page}个分镜。同时提取所有主要出场角色。只返回JSON，无解释。
 
@@ -608,13 +655,17 @@ def segment_novel():
         print(f"Calling LLM API: {api_url}")
         print(f"Headers: {dict(headers)}")
         print(f"Payload: {json.dumps(payload, ensure_ascii=False)}")
-        
+
+        emit_progress(task_id, 15, '正在调用 LLM 生成分镜 (可能需要 30-120 秒)...', 'calling_llm')
+
         response = requests.post(api_url, headers=headers, json=payload, timeout=300)
         print(f"Response status: {response.status_code}")
         print(f"Response headers: {dict(response.headers)}")
         print(f"Response text: {response.text}")
         response.raise_for_status()
         result = response.json()
+
+        emit_progress(task_id, 70, 'LLM 返回结果, 正在解析 JSON...', 'parsing')
 
         content = ''
         if 'choices' in result and len(result['choices']) > 0:
@@ -699,6 +750,7 @@ def segment_novel():
             chars = _post_process(parsed)
             parsed = _clean_placeholder_dialogue(parsed)
             save_session_data('segments', parsed)
+            emit_progress(task_id, 95, '分镜解析完成, 正在保存...', 'saving')
             return jsonify({'success': True, 'data': parsed, 'characters': chars})
         except json.JSONDecodeError as e1:
             print(f"First JSON parse error: {e1}")
@@ -708,6 +760,7 @@ def segment_novel():
                 chars = _post_process(parsed)
                 parsed = _clean_placeholder_dialogue(parsed)
                 save_session_data('segments', parsed)
+                emit_progress(task_id, 95, '分镜解析完成, 正在保存...', 'saving')
                 return jsonify({'success': True, 'data': parsed, 'characters': chars})
             except json.JSONDecodeError as e2:
                 print(f"Second JSON parse error: {e2}")
@@ -719,15 +772,18 @@ def segment_novel():
                         chars = _post_process(parsed)
                         parsed = _clean_placeholder_dialogue(parsed)
                         save_session_data('segments', parsed)
+                        emit_progress(task_id, 95, '分镜解析完成, 正在保存...', 'saving')
                         return jsonify({'success': True, 'data': parsed, 'characters': chars})
                     except json.JSONDecodeError as e3:
                         print(f"Third JSON parse error: {e3}")
+                emit_progress(task_id, 0, 'JSON 解析失败', 'error')
                 return jsonify({'error': f'JSON解析失败，请重试或检查小说内容', 'detail': str(e1)}), 500
 
     except Exception as e:
         import traceback
         print(f"Error: {str(e)}")
         print(traceback.format_exc())
+        emit_progress(task_id, 0, f'分镜生成失败: {e}', 'error')
         return jsonify({'error': str(e)}), 500
 
 
@@ -909,9 +965,12 @@ def generate_image():
     reference_strength = max(0.0, min(1.0, reference_strength))
     page_idx = data.get('page_idx')
     seg_idx = data.get('seg_idx')
+    task_id = data.get('task_id', '')
 
     if not prompt or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
+
+    emit_progress(task_id, 10, '正在构建提示词和准备参考图...', 'preparing')
 
     # 任务2: 结构化字段(camera_angle/composition/mood/shot_scale/lighting/of_type)升级 prompt
     structured_fields = {
@@ -978,8 +1037,13 @@ def generate_image():
             payload['reference_strength'] = reference_strength
             print(f"Included {len(ref_images)} reference image(s) in API payload (strength={reference_strength:.2f})")
 
+        emit_progress(task_id, 30, '正在调用图像生成 API (可能需要 10-60 秒)...', 'calling_image_api')
+
         image_url, result = call_image_api(api_url, api_key, payload)
         work_id, work_username = get_current_work_id()
+
+        emit_progress(task_id, 75, '图片生成完成, 正在下载保存...', 'downloading')
+
         local_url, error = save_image_result(image_url, "manga", work_id, work_username)
 
         if local_url:
@@ -992,14 +1056,17 @@ def generate_image():
                     'timestamp': datetime.now().isoformat()
                 })
                 save_session_data('images', images_data)
+            emit_progress(task_id, 100, '图片生成完成', 'done')
             return jsonify({'success': True, 'image_url': local_url})
         else:
+            emit_progress(task_id, 0, '图片生成失败', 'error')
             return jsonify({'error': error.get('error', '无法获取图片'), 'raw': result}), 500
 
     except Exception as e:
         import traceback
         print(f"Image generation error: {str(e)}")
         print(traceback.format_exc())
+        emit_progress(task_id, 0, f'图片生成失败: {e}', 'error')
         return jsonify({'error': str(e)}), 500
 
 
@@ -1012,11 +1079,13 @@ def check_text_garble():
     api_url = data.get('api_url', '')
     api_key = data.get('api_key', '')
     model = data.get('model', '')
+    task_id = data.get('task_id', '')
 
     if not image_url or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
 
     try:
+        emit_progress(task_id, 10, '正在读取图片...', 'reading_image')
         # 读取图片转base64
         if image_url.startswith('/static/'):
             # 本地文件
@@ -1071,10 +1140,12 @@ def check_text_garble():
         }
 
         print(f"[GarbleCheck] Calling LLM: {api_url}, model: {payload['model']}")
+        emit_progress(task_id, 40, '正在调用视觉模型检测...', 'calling_llm')
         response = requests.post(api_url, headers=headers, json=payload, timeout=60)
         response.raise_for_status()
         result = response.json()
 
+        emit_progress(task_id, 80, '正在解析检测结果...', 'parsing')
         # 解析返回
         content = ''
         if 'choices' in result and len(result['choices']) > 0:
@@ -1098,6 +1169,7 @@ def check_text_garble():
                 analysis = {'has_garble': False, 'garble_level': 'none', 'description': content}
 
         print(f"[GarbleCheck] Result: {analysis}")
+        emit_progress(task_id, 100, '检测完成', 'done')
         return jsonify({'success': True, 'analysis': analysis})
 
     except Exception as e:
@@ -1110,11 +1182,11 @@ def check_text_garble():
 @app.route('/api/fix-text-garble', methods=['POST'])
 @login_required
 def fix_text_garble():
-    """分析乱码并生成修复后的图片"""
+    """以原图为参考, 重新生成图片以修复文字乱码 (只修改文字部分, 保持构图)"""
     data = request.json
     image_url = data.get('image_url', '')
     original_prompt = data.get('original_prompt', '')
-    api_url = data.get('api_url', '')
+    api_url = data.get('api_url', '')  # 保留参数兼容前端, 但不再使用
     api_key = data.get('api_key', '')
     model = data.get('model', '')
     img_api_url = data.get('img_api_url', '')
@@ -1122,98 +1194,44 @@ def fix_text_garble():
     img_model = data.get('img_model', '')
     page_idx = data.get('page_idx')
     seg_idx = data.get('seg_idx')
+    task_id = data.get('task_id', '')
 
-    if not image_url or not api_url or not img_api_url:
-        return jsonify({'error': '缺少必要参数'}), 400
+    if not image_url or not img_api_url:
+        return jsonify({'error': '缺少必要参数 (image_url / img_api_url)'}), 400
+
+    if not original_prompt:
+        return jsonify({'error': '缺少 original_prompt (分镜原文)'}), 400
 
     try:
-        # 1. 读取图片转base64
-        if image_url.startswith('/static/'):
-            file_path = os.path.join(os.path.dirname(__file__), image_url[1:])
-            if os.path.exists(file_path):
-                with open(file_path, 'rb') as f:
-                    img_data = base64.b64encode(f.read()).decode('utf-8')
-                image_base64 = f"data:image/png;base64,{img_data}"
-            else:
-                return jsonify({'error': f'图片文件不存在'}), 404
-        elif image_url.startswith('http'):
-            resp = requests.get(image_url, timeout=30)
-            resp.raise_for_status()
-            img_data = base64.b64encode(resp.content).decode('utf-8')
-            image_base64 = f"data:image/png;base64,{img_data}"
-        else:
-            return jsonify({'error': '不支持的图片URL格式'}), 400
+        emit_progress(task_id, 10, '正在读取原图作为参考...', 'reading_image')
 
-        # 2. 调用LLM分析乱码原因并生成修复prompt
-        headers = {'Content-Type': 'application/json'}
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
+        # 1. 用现有 helper 把原图缓存到本地并转为 data URL 格式
+        # (火山引擎 API 的 image 字段需要 data:image/...;base64,... 格式, 不能是 raw base64)
+        cache_url = cache_reference_image(image_url, "garble_original")
+        if not cache_url:
+            return jsonify({'error': f'无法缓存原图: {image_url}'}), 500
 
-        analysis_prompt = f"""这张漫画图片中的文字出现了乱码。请分析乱码原因，并生成一个修复后的图片生成prompt。
+        ref_image_data_url = get_cached_image_base64(cache_url)
+        if not ref_image_data_url:
+            return jsonify({'error': '读取原图 base64 失败'}), 500
 
-原始prompt:
-{original_prompt}
+        # 2. 构建修复 prompt: 强调保持原图构图, 只修复文字
+        # 使用分镜原文作为内容描述, 并明确要求保持与参考图一致的构图和角色
+        fix_prompt = (
+            f"Keep the exact same composition, layout, character poses, and scene as the reference image. "
+            f"Only fix the text/speech bubbles. "
+            f"Scene: {original_prompt}"
+        )
 
-请返回JSON格式：
-{{
-  "garble_cause": "乱码原因分析（如：模型不支持中文、字体渲染错误等）",
-  "fix_strategy": "修复策略（如：移除文字描述、改用英文、简化文字等）",
-  "fixed_prompt": "修复后的完整prompt（英文，用于重新生成图片）"
-}}
+        manga_prompt = (
+            f"ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, "
+            f"pure monochrome, grayscale only. detailed ink drawing, high contrast, dramatic shadows, "
+            f"cross-hatching. {fix_prompt}"
+        )
 
-修复策略建议：
-1. 如果是中文乱码，尝试在prompt中明确指定"Chinese characters"或移除文字描述
-2. 如果是字体渲染问题，尝试简化文字描述或改用英文
-3. 在prompt末尾添加："NO TEXT, NO LETTERS, NO WORDS, NO WRITING" 来避免生成文字
-4. 或者明确指定："with clear Chinese dialogue text in speech bubbles"
-
-请只返回JSON，不要其他内容。"""
-
-        payload = {
-            'model': model or 'minimax-vl',
-            'messages': [
-                {
-                    'role': 'user',
-                    'content': [
-                        {'type': 'text', 'text': analysis_prompt},
-                        {'type': 'image_url', 'image_url': {'url': image_base64}}
-                    ]
-                }
-            ],
-            'max_tokens': 1000,
-            'temperature': 0.5
-        }
-
-        print(f"[FixGarble] Step 1: Analyzing garble cause...")
-        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
-        response.raise_for_status()
-        result = response.json()
-
-        content = ''
-        if 'choices' in result and len(result['choices']) > 0:
-            content = result['choices'][0].get('message', {}).get('content', '')
-
-        content = re.sub(r'```json\s*', '', content)
-        content = re.sub(r'```\s*', '', content)
-        content = content.strip()
-
-        try:
-            analysis = json.loads(content)
-        except:
-            match = re.search(r'\{[^}]+\}', content)
-            if match:
-                analysis = json.loads(match.group())
-            else:
-                return jsonify({'error': '无法解析LLM返回', 'raw': content}), 500
-
-        print(f"[FixGarble] Analysis: {analysis}")
-        fixed_prompt = analysis.get('fixed_prompt', original_prompt)
-
-        # 3. 用修复后的prompt重新生成图片
-        print(f"[FixGarble] Step 2: Regenerating image with fixed prompt...")
-
-        # 构建图片生成请求
-        manga_prompt = f"ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, pure monochrome, grayscale only. detailed ink drawing, high contrast, dramatic shadows, cross-hatching, {fixed_prompt}"
+        # 3. 调用图像 API, 传入原图作为参考 (高 reference_strength 保持构图)
+        print(f"[FixGarble] Regenerating with original image as reference (strength=0.85)...")
+        emit_progress(task_id, 30, '正在调用图像 API (以原图为参考)...', 'regenerating')
 
         img_payload = {
             'model': img_model or 'doubao-seedream-3-0-t2i-250415',
@@ -1221,6 +1239,8 @@ def fix_text_garble():
             'size': '2K',
             'response_format': 'url',
             'watermark': False,
+            'image': ref_image_data_url,        # data URL 格式的原图
+            'reference_strength': 0.85,         # 高强度保持构图, 只修改细节 (文字)
         }
 
         image_url_new, result_new = call_image_api(img_api_url, img_api_key, img_payload)
@@ -1228,7 +1248,8 @@ def fix_text_garble():
         local_url, error = save_image_result(image_url_new, "manga_fixed", work_id, work_username)
 
         if local_url:
-            # 保存图片映射
+            emit_progress(task_id, 95, '修复图片已保存, 等待用户确认...', 'saving')
+            # 保存图片映射: seg_idx 为 None 时表示整页修复, 存到 full_pages
             if page_idx is not None and seg_idx is not None:
                 images_data = load_session_data('images') or {'images': []}
                 images_data['images'].append({
@@ -1238,19 +1259,133 @@ def fix_text_garble():
                     'fixed': True
                 })
                 save_session_data('images', images_data)
+            elif page_idx is not None:
+                # 整页修复: 保存到 full_pages
+                full_pages_data = load_session_data('full_pages') or {'pages': []}
+                full_pages_data['pages'].append({
+                    'key': page_idx,
+                    'local_url': local_url,
+                    'timestamp': datetime.now().isoformat(),
+                    'fixed': True
+                })
+                save_session_data('full_pages', full_pages_data)
 
+            emit_progress(task_id, 100, '修复完成, 请在前端预览确认', 'done')
             return jsonify({
                 'success': True,
                 'image_url': local_url,
-                'analysis': analysis,
-                'fixed_prompt': fixed_prompt
+                'analysis': {
+                    'garble_cause': '以原图为参考重新生成, 保持构图只修复文字',
+                    'fix_strategy': 'reference_strength=0.85',
+                    'description': '以原图为参考, 只修改文字部分'
+                },
+                'fixed_prompt': fix_prompt
             })
         else:
+            emit_progress(task_id, 0, f'修复失败: {error.get("error", "")}', 'error')
             return jsonify({'error': error.get('error', '重新生成失败'), 'raw': result_new}), 500
 
     except Exception as e:
         import traceback
         print(f"[FixGarble] Error: {e}")
+        print(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/accept-garble-fix', methods=['POST'])
+@login_required
+def accept_garble_fix():
+    """用户确认采用修复后的图片: 用 fixed 文件覆盖原文件 (或更新映射), 并同步会话数据
+    支持 segment 级 (seg_idx 不为 None) 和 page 级 (seg_idx 为 None) 两种模式"""
+    data = request.json
+    page_idx = data.get('page_idx')
+    seg_idx = data.get('seg_idx')
+    fixed_image_url = data.get('fixed_image_url', '')
+    original_image_url = data.get('original_image_url', '')
+
+    if not fixed_image_url or page_idx is None:
+        return jsonify({'error': '缺少必要参数'}), 400
+
+    try:
+        base_dir = os.path.dirname(__file__)
+
+        def _abs_path(url):
+            if not url or not url.startswith('/static/'):
+                return None
+            return os.path.join(base_dir, url[1:])
+
+        fixed_abs = _abs_path(fixed_image_url)
+        if not fixed_abs or not os.path.exists(fixed_abs):
+            return jsonify({'error': f'修复图片文件不存在: {fixed_image_url}'}), 404
+
+        # 策略: 优先把 fixed 文件内容写到原文件位置 (保留原 URL, 这样前端映射不变)
+        # 如果原文件不存在或不是本地文件, 则改用 fixed 的 URL 作为新 URL
+        new_url = fixed_image_url
+        original_abs = _abs_path(original_image_url)
+        if original_abs and os.path.exists(original_abs):
+            try:
+                # 备份原文件 (可选, 加 .bak 后缀)
+                bak_path = original_abs + '.bak'
+                if not os.path.exists(bak_path):
+                    shutil.copy2(original_abs, bak_path)
+                # 覆盖原文件
+                shutil.copy2(fixed_abs, original_abs)
+                new_url = original_image_url  # 原 URL 现在指向新内容
+                print(f"[AcceptGarbleFix] Overwritten: {original_abs} (backup: {bak_path})")
+            except Exception as copy_err:
+                print(f"[AcceptGarbleFix] Overwrite failed, fallback to new URL: {copy_err}")
+                new_url = fixed_image_url
+        else:
+            # 原图不是本地文件, 直接用 fixed URL
+            new_url = fixed_image_url
+
+        # 根据模式更新会话数据
+        if seg_idx is not None:
+            # segment 级: 更新 images 映射
+            key = f'{page_idx}-{seg_idx}'
+            images_data = load_session_data('images') or {'images': []}
+            images_data['images'] = [item for item in images_data['images'] if item.get('key') != key]
+            images_data['images'].append({
+                'key': key,
+                'local_url': new_url,
+                'timestamp': datetime.now().isoformat(),
+                'fixed': True,
+                'accepted': True
+            })
+            save_session_data('images', images_data)
+        else:
+            # page 级: 更新 full_pages 映射
+            full_pages_data = load_session_data('full_pages') or {'pages': []}
+            full_pages_data['pages'] = [item for item in full_pages_data.get('pages', []) if item.get('key') != page_idx]
+            full_pages_data['pages'].append({
+                'key': page_idx,
+                'local_url': new_url,
+                'timestamp': datetime.now().isoformat(),
+                'fixed': True,
+                'accepted': True
+            })
+            save_session_data('full_pages', full_pages_data)
+
+        # 兜底: 如果 original_image_url 在 full_pages 里 (且不是当前 page_idx), 也更新
+        full_pages_data = load_session_data('full_pages') or {'pages': []}
+        updated_fp = False
+        for item in full_pages_data.get('pages', []):
+            if item.get('local_url') == original_image_url and item.get('key') != page_idx:
+                item['local_url'] = new_url
+                item['accepted'] = True
+                updated_fp = True
+        if updated_fp:
+            save_session_data('full_pages', full_pages_data)
+
+        return jsonify({
+            'success': True,
+            'new_url': new_url,
+            'message': '原图已被修复版本覆盖' if new_url == original_image_url else '已采用修复图作为新图'
+        })
+
+    except Exception as e:
+        import traceback
+        print(f"[AcceptGarbleFix] Error: {e}")
         print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
@@ -1364,9 +1499,12 @@ def generate_characters():
     api_url = data.get('api_url', '')
     api_key = data.get('api_key', '')
     model = data.get('model', '')
+    task_id = data.get('task_id', '')
 
     if not text or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
+
+    emit_progress(task_id, 10, '正在构建角色分析提示词...', 'preparing')
 
     try:
         headers = {'Content-Type': 'application/json'}
@@ -1390,9 +1528,12 @@ def generate_characters():
         }
 
         print(f"Generating character analysis...")
+        emit_progress(task_id, 20, '正在调用 LLM 分析角色 (可能需要 20-60 秒)...', 'calling_llm')
         response = requests.post(api_url, headers=headers, json=payload, timeout=300)
         response.raise_for_status()
         result = response.json()
+
+        emit_progress(task_id, 75, 'LLM 返回结果, 正在解析...', 'parsing')
 
         content = ''
         if 'choices' in result and len(result['choices']) > 0:
@@ -1407,12 +1548,14 @@ def generate_characters():
         print(f"Character content: {content}")
         parsed = json.loads(content)
         save_session_data('characters', parsed)
+        emit_progress(task_id, 100, f'角色分析完成, 提取到 {len(parsed.get("characters", []))} 个角色', 'done')
         return jsonify({'success': True, 'data': parsed})
 
     except Exception as e:
         import traceback
         print(f"Character generation error: {str(e)}")
         print(traceback.format_exc())
+        emit_progress(task_id, 0, f'角色分析失败: {e}', 'error')
         return jsonify({'error': str(e)}), 500
 
 
@@ -1907,6 +2050,7 @@ def generate_page():
     reference_strength = max(0.0, min(1.0, reference_strength))
     previous_page_image = data.get('previous_page_image')
     page_idx = data.get('page_idx')
+    task_id = data.get('task_id', '')
 
     if not page or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
@@ -1914,6 +2058,8 @@ def generate_page():
     segments = page.get('segments', [])
     if not segments or len(segments) == 0:
         return jsonify({'error': '该页没有分镜'}), 400
+
+    emit_progress(task_id, 10, f'正在构建第 {page_num} 页提示词...', 'preparing')
 
     try:
         segment_descriptions = []
@@ -1976,8 +2122,14 @@ Art style: {style_art}"""
             print(f"Included {len(ref_images)} reference image(s) in page generation payload")
 
         print(f"Generating full comic page {page_num}")
+
+        emit_progress(task_id, 30, f'正在调用图像 API 生成第 {page_num} 页 (可能需要 15-90 秒)...', 'calling_image_api')
+
         image_url, result = call_image_api(api_url, api_key, payload)
         work_id, work_username = get_current_work_id()
+
+        emit_progress(task_id, 80, '页面生成完成, 正在下载保存...', 'downloading')
+
         local_url, error = save_image_result(image_url, f"comic_page_{page_num}_full", work_id, work_username)
 
         if local_url:
@@ -1991,14 +2143,17 @@ Art style: {style_art}"""
                     'timestamp': datetime.now().isoformat()
                 })
                 save_session_data('full_pages', fp_data)
+            emit_progress(task_id, 100, f'第 {page_num} 页生成完成', 'done')
             return jsonify({'success': True, 'image_url': local_url})
         else:
+            emit_progress(task_id, 0, '页面生成失败', 'error')
             return jsonify({'error': error.get('error', '无法获取图片'), 'raw': result}), 500
 
     except Exception as e:
         import traceback
         print(f"Page generation error: {str(e)}")
         print(traceback.format_exc())
+        emit_progress(task_id, 0, f'页面生成失败: {e}', 'error')
         return jsonify({'error': str(e)}), 500
 
 
@@ -2480,12 +2635,15 @@ def comic_to_novel():
     api_url = data.get('api_url', '')
     api_key = data.get('api_key', '')
     model = data.get('model', 'gpt-4o')
+    task_id = data.get('task_id', '')
 
     if not images or len(images) == 0 or not api_url:
         return jsonify({'error': '缺少必要参数（图片和API地址）'}), 400
 
     if len(images) > 50:
         return jsonify({'error': '一次最多处理50张图片'}), 400
+
+    emit_progress(task_id, 5, f'准备处理 {len(images)} 张漫画图片...', 'preparing')
 
     system_prompt = "你是一个专业的漫画转小说作家。你需要仔细观察漫画图片中的每一个细节，包括画面布局、人物表情动作、对话气泡、场景环境等，将其转化为生动、流畅的小说文本。注意保持故事的连贯性和角色的性格特征。"
 
@@ -2508,6 +2666,10 @@ def comic_to_novel():
 
         for idx, img_data in enumerate(images):
             print(f"Processing comic page {idx + 1}/{total_images}...")
+
+            # 每页进度: 5% (准备) + 90% (处理) + 5% (合并)
+            page_progress = 5 + int((idx / total_images) * 90)
+            emit_progress(task_id, page_progress, f'正在识别第 {idx + 1}/{total_images} 页...', 'processing_page', extra={'page': idx + 1, 'total': total_images})
 
             page_prompt = f"这是漫画的第 {idx + 1} 页。\n\n{page_prompt_template}"
             if idx > 0:
@@ -2544,6 +2706,8 @@ def comic_to_novel():
             all_page_texts.append(page_text.strip())
             print(f"Page {idx + 1} result: {len(page_text)} chars")
 
+        emit_progress(task_id, 95, '所有页面识别完成, 正在合并文本...', 'merging')
+
         # 合并所有页面的文本
         full_novel = "\n\n".join([
             f"## 第 {i + 1} 页\n\n{text}" if total_images > 1 else text
@@ -2561,12 +2725,14 @@ def comic_to_novel():
         # 持久化
         save_session_data('comic2novel', result_data)
 
+        emit_progress(task_id, 100, '小说生成完成', 'done')
         return jsonify({'success': True, 'data': result_data})
 
     except Exception as e:
         import traceback
         print(f"Comic to novel error: {str(e)}")
         print(traceback.format_exc())
+        emit_progress(task_id, 0, f'转换失败: {e}', 'error')
         return jsonify({'error': str(e)}), 500
 
 
@@ -2635,4 +2801,4 @@ if __name__ == '__main__':
         print(f'[manga] admin pass : <从 .env 读取>')
     print(f'[manga] secret_key : 来自 .env / os.urandom  (持久化到 .env)')
     print('=' * 60)
-    app.run(host='0.0.0.0', port=2778, debug=True)
+    socketio.run(app, host='0.0.0.0', port=2778, debug=True, allow_unsafe_werkzeug=True)
