@@ -1073,13 +1073,14 @@ def generate_image():
 @app.route('/api/check-text-garble', methods=['POST'])
 @login_required
 def check_text_garble():
-    """检测图片中的文字是否乱码"""
+    """检测图片中的文字是否乱码, 并与原文对比, 不一致也判定需修复"""
     data = request.json
     image_url = data.get('image_url', '')
     api_url = data.get('api_url', '')
     api_key = data.get('api_key', '')
     model = data.get('model', '')
     task_id = data.get('task_id', '')
+    original_text = data.get('original_text', '')  # 分镜原文 (场景描述+对话)
 
     if not image_url or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
@@ -1105,12 +1106,45 @@ def check_text_garble():
         else:
             return jsonify({'error': '不支持的图片URL格式'}), 400
 
-        # 调用LLM视觉模型检测乱码
+        # 调用LLM视觉模型检测乱码 + 对比原文
         headers = {'Content-Type': 'application/json'}
         if api_key:
             headers['Authorization'] = f'Bearer {api_key}'
 
-        prompt = """请检查这张漫画图片中的文字（对话气泡、旁白框、音效文字等）是否存在以下问题：
+        # 构建检测 prompt: 同时检查乱码 和 与原文的一致性
+        if original_text:
+            prompt = f"""请检查这张漫画图片中的文字（对话气泡、旁白框、音效文字等），并与下面的原文进行对比：
+
+【原文参考】
+{original_text}
+
+请检查以下两方面：
+1. 文字乱码问题：
+   - 文字完全乱码（无法辨认的符号、乱码字符）
+   - 文字部分乱码（有些字是乱码，有些字正常）
+   - 文字正常（清晰可读的中文字符）
+
+2. 与原文一致性：
+   - 图片中的对话/旁白文字是否与原文一致
+   - 如果文字内容与原文不符（即使不是乱码），也需要修复
+   - 如果原文有对话但图中缺失或多余文字，也需要修复
+
+请只返回JSON格式：
+{{
+  "has_garble": true/false,
+  "garble_level": "none"/"partial"/"full",
+  "mismatch": true/false,
+  "mismatch_description": "如果与原文不一致, 简要说明差异; 否则为空字符串",
+  "description": "简要描述文字状况和对比结果"
+}}
+
+判断规则：
+- 如果文字乱码 → has_garble=true, 需修复
+- 如果文字与原文不一致 → mismatch=true, 需修复
+- 两者都正常 → 都返回 false, 无需修复
+- 如果图片中没有文字但原文有对话 → mismatch=true"""
+        else:
+            prompt = """请检查这张漫画图片中的文字（对话气泡、旁白框、音效文字等）是否存在以下问题：
 1. 文字完全乱码（无法辨认的符号、乱码字符）
 2. 文字部分乱码（有些字是乱码，有些字正常）
 3. 文字正常（清晰可读的中文字符）
@@ -1215,12 +1249,38 @@ def fix_text_garble():
         if not ref_image_data_url:
             return jsonify({'error': '读取原图 base64 失败'}), 500
 
-        # 2. 构建修复 prompt: 强调保持原图构图, 只修复文字
-        # 使用分镜原文作为内容描述, 并明确要求保持与参考图一致的构图和角色
+        # 2. 构建强化的修复 prompt: 极其严格地要求生成正确文字
+        # 把对话原文以"OCR 重写"任务的形式给出, 明确禁止乱码/错字/多余文字
         fix_prompt = (
-            f"Keep the exact same composition, layout, character poses, and scene as the reference image. "
-            f"Only fix the text/speech bubbles. "
-            f"Scene: {original_prompt}"
+            f"You are given a reference manga page. Reproduce it with the EXACT same composition, "
+            f"layout, character poses, panel arrangement, and art style.\n"
+            f"Your ONLY task is to REPLACE all speech bubble text, narration boxes, and SFX text "
+            f"with the exact Chinese text provided below. This is essentially a text-redrawing task.\n\n"
+            f"========================================\n"
+            f"TEXT TO RENDER (render in this exact order, panel by panel):\n"
+            f"========================================\n"
+            f"{original_prompt}\n"
+            f"========================================\n\n"
+            f"STRICT TEXT RENDERING RULES (MUST FOLLOW ALL):\n"
+            f"1. Copy each line of dialogue VERBATIM. Do NOT paraphrase, translate, abbreviate, or modify ANY character.\n"
+            f"2. Render every character as a clear, legible, standard Simplified Chinese character.\n"
+            f"3. ABSOLUTELY NO garbled characters, broken symbols, random ASCII, boxes (□), "
+            f"question marks (?), mojibake, or illegible glyphs.\n"
+            f"4. ABSOLUTELY NO invented, imagined, or extra text. If a bubble has no dialogue listed, leave it EMPTY.\n"
+            f"5. Do NOT mix languages. Do NOT use Japanese kana, English letters, or pinyin unless explicitly in the source.\n"
+            f"6. Place each dialogue string inside the corresponding panel's speech bubble, in reading order (top-right → bottom-left).\n"
+            f"7. Match the original text size, font weight, and bubble fit. Use bold, clean sans-serif Chinese font.\n"
+            f"8. Keep the dialogue punctuation (。！？，" ") exactly as given.\n\n"
+            f"ART RULES (DO NOT CHANGE):\n"
+            f"A. Keep the reference image's character designs, expressions, poses, clothing, and background.\n"
+            f"B. Keep the panel borders, gutters, and page layout identical.\n"
+            f"C. Keep the ink style, shading, and line weight identical.\n"
+            f"D. Do NOT redraw characters or scenes. Only redraw the text glyphs.\n\n"
+            f"FAILURE MODES TO AVOID:\n"
+            f"- Outputting garbled/unreadable text (CRITICAL FAILURE)\n"
+            f"- Changing the dialogue wording (CRITICAL FAILURE)\n"
+            f"- Adding text not in the list (CRITICAL FAILURE)\n"
+            f"- Altering the artwork (FAILURE)\n"
         )
 
         manga_prompt = (

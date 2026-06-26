@@ -301,11 +301,12 @@
         <div id="panel-characters" class="hidden fade-in">
             <div class="bg-white p-6 manga-border panel-shadow mb-6">
                 <h2 class="text-xl font-bold mb-4">角色分析</h2>
-                <div class="flex gap-2">
+                <div class="flex gap-2 flex-wrap">
                     <button id="analyze-characters-btn" onclick="analyzeCharacters()" class="btn-primary px-6 py-2 font-medium flex items-center gap-2">
                         <span id="analyze-characters-label">从小说分析角色</span>
                         <span id="analyze-spinner" class="loading-spinner hidden"></span>
                     </button>
+                    <button onclick="clearCharacters()" class="border-2 border-red-500 text-red-600 px-4 py-2 font-medium hover:bg-red-50 transition-colors">🗑️ 清空角色</button>
                 </div>
                 <div id="analyze-progress" class="mt-4"></div>
             </div>
@@ -351,7 +352,7 @@
             <div class="bg-white p-6 manga-border panel-shadow">
                 <div class="flex justify-between items-center mb-4">
                     <div>
-                        <h2 class="text-xl font-bold">🧹 文字乱码清理</h2>
+                        <h2 class="text-xl font-bold"> 文字乱码清理</h2>
                         <p class="text-sm text-gray-500 mt-1">
                             勾选需要修复的分镜 → 一键修复整页 → 预览对比 → 确认是否覆盖原图 (无需先检测)
                         </p>

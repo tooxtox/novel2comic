@@ -1576,7 +1576,7 @@ function toggleCharacter(pageIdx, segIdx, charIdx) {
 // 乱码检测和修复函数
 async function checkAndFixGarble(imageUrl, originalPrompt, pageIdx, segIdx, config) {
     try {
-        // 1. 检测乱码
+        // 1. 检测乱码 + 对比原文
         const checkResp = await fetchWithRetry('/api/check-text-garble', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1585,7 +1585,8 @@ async function checkAndFixGarble(imageUrl, originalPrompt, pageIdx, segIdx, conf
                 image_url: imageUrl,
                 api_url: config.llm_api_url,
                 api_key: config.llm_api_key,
-                model: config.llm_model || 'minimax-vl'
+                model: config.llm_model || 'minimax-vl',
+                original_text: originalPrompt  // 把原文传给 LLM 对比
             })
         });
         const checkResult = await checkResp.json();
@@ -1598,13 +1599,18 @@ async function checkAndFixGarble(imageUrl, originalPrompt, pageIdx, segIdx, conf
         const analysis = checkResult.analysis;
         console.log('[GarbleCheck] 分析结果:', analysis);
         
-        // 如果没有乱码，直接返回
-        if (!analysis.has_garble || analysis.garble_level === 'none') {
-            return { fixed: false, reason: '无乱码' };
+        // 判断是否需要修复: 乱码 或 与原文不一致
+        const hasGarble = analysis.has_garble && analysis.garble_level !== 'none';
+        const hasMismatch = analysis.mismatch === true;
+        if (!hasGarble && !hasMismatch) {
+            return { fixed: false, reason: '无乱码且与原文一致' };
         }
         
-        // 2. 检测到乱码，调用修复接口
-        showToast(`检测到文字乱码 (${analysis.garble_level})，正在自动修复...`, 'warning');
+        // 2. 检测到乱码或不一致, 调用修复接口
+        const reasonText = hasGarble 
+            ? `文字乱码 (${analysis.garble_level})` 
+            : '与原文不一致';
+        showToast(`检测到${reasonText}, 正在自动修复...`, 'warning');
         
         const fixResp = await fetchWithRetry('/api/fix-text-garble', {
             method: 'POST',
@@ -1613,9 +1619,6 @@ async function checkAndFixGarble(imageUrl, originalPrompt, pageIdx, segIdx, conf
             body: JSON.stringify({
                 image_url: imageUrl,
                 original_prompt: originalPrompt,
-                api_url: config.llm_api_url,
-                api_key: config.llm_api_key,
-                model: config.llm_model || 'minimax-vl',
                 img_api_url: config.img_api_url,
                 img_api_key: config.img_api_key,
                 img_model: config.img_model,
@@ -1959,7 +1962,8 @@ function updateGarbleSummary() {
 }
 
 /**
- * 一键批量检测勾选的分镜是否乱码
+ * 一键批量检测: 按页聚合, 把分镜原文发整页图给 LLM 检测乱码和一致性
+ * 先勾选要检测的分镜 → 每页整页图 + 该页所有勾选分镜的原文 → 一次 LLM 调用
  */
 async function garbleBatchCheck() {
     const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
@@ -1969,92 +1973,113 @@ async function garbleBatchCheck() {
         return;
     }
 
-    const itemsToCheck = Object.values(garbleState).filter(i => i.selected && i.imageUrl);
-    if (itemsToCheck.length === 0) {
-        showToast('请先勾选有图片的分镜', 'error');
+    // 按页聚合: 找出所有"有勾选分镜 + 有整页图"的页面
+    const pagesToCheck = Object.values(garblePageState).filter(p => {
+        if (!p.pageImageUrl) return false;
+        const hasSelectedSeg = Object.values(garbleState).some(i => i.pageIdx === p.pageIdx && i.selected);
+        return hasSelectedSeg;
+    });
+
+    if (pagesToCheck.length === 0) {
+        showToast('没有需要检测的页面 (请勾选分镜并确保该页有整页图)', 'error');
         return;
     }
 
+    const totalPages = pagesToCheck.length;
     const spinner = document.getElementById('garble-check-spinner');
     const label = document.getElementById('garble-check-label');
     const btn = document.getElementById('garble-check-btn');
     spinner.classList.remove('hidden');
-    label.textContent = `检测中 (0/${itemsToCheck.length})…`;
+    label.textContent = `检测中 (0/${totalPages} 页)…`;
     btn.disabled = true;
 
-    // WebSocket 进度
     const task = registerTaskProgress('garble-progress', {
         onProgress: (progress, message, stage, extra) => {
             if (extra && extra.current !== undefined && extra.total !== undefined) {
-                label.textContent = `检测中 (${extra.current}/${extra.total})…`;
+                label.textContent = `检测中 (${extra.current}/${extra.total} 页)…`;
             }
         }
     });
-    task.startFallback(60000);
+    task.startFallback(120000);
 
     let done = 0;
     let garbleFound = 0;
-
-    // 并发限制: 3 个一组
-    const concurrency = 3;
-    const queue = [...itemsToCheck];
+    // 页级并发限制 (图像检测相对慢, 并发 2)
+    const concurrency = 2;
+    const queue = [...pagesToCheck];
 
     async function worker() {
         while (queue.length > 0) {
-            const item = queue.shift();
-            if (!item) break;
-            item.status = 'checking';
-            item.error = null;
-            renderGarbleItemInline(item);
+            const pageState = queue.shift();
+            if (!pageState) break;
+
+            // 该页所有勾选的分镜置为 checking 状态
+            const segsInPage = Object.values(garbleState)
+                .filter(i => i.pageIdx === pageState.pageIdx && i.selected)
+                .sort((a, b) => a.segIdx - b.segIdx);
+            segsInPage.forEach(s => { s.status = 'checking'; s.error = null; });
+            renderGarblePageInline(pageState.pageIdx);
 
             try {
+                // 构建该页所有勾选分镜的原文, 合并传给 LLM 做整体对比
+                const originalText = segsInPage.map(s => {
+                    let txt = `【分镜${s.segNum}】${s.sceneDesc || ''}`;
+                    if (s.dialogue) txt += `\n对话: ${s.dialogue}`;
+                    return txt;
+                }).join('\n\n');
+
                 const resp = await fetchWithRetry('/api/check-text-garble', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'include',
                     body: JSON.stringify({
-                        image_url: item.imageUrl,
+                        image_url: pageState.pageImageUrl,  // 发送整页图
                         api_url: config.llm_api_url,
                         api_key: config.llm_api_key,
                         model: config.llm_model || 'minimax-vl',
+                        original_text: originalText,        // 该页所有勾选分镜的原文
                         task_id: task.task_id
                     })
                 });
                 const result = await resp.json();
                 if (result.success) {
-                    item.analysis = result.analysis;
-                    item.status = 'checked';
-                    if (result.analysis.has_garble && result.analysis.garble_level !== 'none') {
+                    // 把检测结果同步到该页所有勾选分镜
+                    const hasGarble = result.analysis.has_garble && result.analysis.garble_level !== 'none';
+                    const hasMismatch = result.analysis.mismatch === true;
+                    segsInPage.forEach(s => {
+                        s.analysis = result.analysis;
+                        s.status = 'checked';
+                    });
+                    if (hasGarble || hasMismatch) {
                         garbleFound++;
                     }
                 } else {
-                    item.status = 'error';
-                    item.error = result.error || '检测失败';
+                    segsInPage.forEach(s => {
+                        s.status = 'error';
+                        s.error = result.error || '检测失败';
+                    });
                 }
             } catch (e) {
-                item.status = 'error';
-                item.error = e.message;
+                segsInPage.forEach(s => {
+                    s.status = 'error';
+                    s.error = e.message;
+                });
             }
             done++;
-            // 推送进度
-            if (socketConnected) {
-                // 后端会推送, 这里只是兜底; 不直接 emit
-            }
-            const progress = Math.round((done / itemsToCheck.length) * 100);
-            // 手动更新进度条 (后端单次检测很快, 可能不会推送)
+            const progress = Math.round((done / totalPages) * 100);
             const bar = document.getElementById('garble-progress-bar');
             const text = document.getElementById('garble-progress-text');
             if (bar) bar.style.width = `${progress}%`;
-            if (text) text.textContent = `${progress}% - 已检测 ${done}/${itemsToCheck.length}`;
-            label.textContent = `检测中 (${done}/${itemsToCheck.length})…`;
-            renderGarbleItemInline(item);
+            if (text) text.textContent = `${progress}% - 已检测 ${done}/${totalPages} 页`;
+            label.textContent = `检测中 (${done}/${totalPages} 页)…`;
+            renderGarblePageInline(pageState.pageIdx);
         }
     }
 
     try {
         await Promise.all(Array.from({ length: concurrency }, () => worker()));
         task.finish();
-        showToast(`检测完成, ${garbleFound} 个分镜疑似乱码`, garbleFound > 0 ? 'warning' : 'success');
+        showToast(`检测完成, ${garbleFound} 页疑似有乱码或不一致`, garbleFound > 0 ? 'warning' : 'success');
     } catch (e) {
         task.finish();
         showToast('批量检测出错: ' + e.message, 'error');
@@ -2132,12 +2157,27 @@ async function garbleBatchFix() {
 
             try {
                 // 构建该页所有勾选分镜的描述, 作为修复参考
+                // 结构: 明确列出每个分镜的对话原文, 便于模型逐字渲染
                 const segs = Object.values(garbleState)
                     .filter(i => i.pageIdx === pageState.pageIdx && i.selected)
                     .sort((a, b) => a.segIdx - b.segIdx);
-                const segDescs = segs.map(s => `分镜${s.segNum}: ${s.sceneDesc}${s.dialogue ? ` (对话: ${s.dialogue})` : ''}`).join('\n');
+                const segDescs = segs.map(s => {
+                    const lines = [`[Panel ${s.segNum}]`];
+                    if (s.sceneDesc) lines.push(`  Scene: ${s.sceneDesc}`);
+                    if (s.dialogue) {
+                        // 对话可能有多行, 每行单独标记
+                        const dialogueLines = s.dialogue.split('\n').filter(l => l.trim());
+                        dialogueLines.forEach((line, i) => {
+                            lines.push(`  Bubble ${i + 1}: "${line.trim()}"`);
+                        });
+                    }
+                    return lines.join('\n');
+                }).join('\n\n');
                 const page = currentSegments.pages[pageState.pageIdx];
-                const originalPrompt = page?.page_prompt || page?.style_prompt || segDescs || 'manga page';
+                // 构建结构化 prompt: 页面提示 + 每个分镜的对话列表
+                const originalPrompt = page?.page_prompt
+                    ? `[PAGE CONTEXT]\n${page.page_prompt}\n\n[DIALOGUE TO RENDER]\n${segDescs}`
+                    : (segDescs || 'manga page (no dialogue)');
 
                 // 调用修复 API, 传入整页图 URL, seg_idx 为 None 表示整页修复
                 const resp = await fetchWithRetry('/api/fix-text-garble', {
@@ -2195,6 +2235,8 @@ async function garbleBatchFix() {
         label.textContent = '🔧 修复选中乱码';
         btn.disabled = false;
         updateGarbleSummary();
+        // 全量重渲染确保预览图立即显示 (worker 中的局部渲染可能因并发竞争遗漏)
+        renderGarblePanel();
     }
 }
 
@@ -2492,6 +2534,15 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
     const unlock = lockButton(targetBtn, labelEl, '⏳ 整页生成中…');
 
     const page = currentSegments.pages[pageIdx];
+
+    // 自动取上一页整页图作为参考 (若调用方未显式传入)
+    // 这样单页生成时也能保持人物和画风一致
+    if (!previousPageImage && pageIdx > 0) {
+        previousPageImage = fullPageImages[pageIdx - 1] || null;
+        if (previousPageImage) {
+            console.log(`[generateFullPage] Auto-using previous page ${pageIdx} image as reference: ${previousPageImage}`);
+        }
+    }
 
     const characterReferences = characters
         .filter(char => char.image_url)
@@ -3159,6 +3210,32 @@ async function analyzeCharacters() {
         spinner.classList.add('hidden');
         unlock();
     }
+}
+
+/**
+ * 清空所有角色 (用户切换小说/重新开始时使用)
+ * 同时清除分镜中对角色的引用, 避免悬空引用
+ */
+function clearCharacters() {
+    if (characters.length === 0) {
+        showToast('角色列表已为空', 'info');
+        return;
+    }
+    if (!confirm(`确认清空所有 ${characters.length} 个角色吗?\n\n此操作会同时清除分镜中对角色的引用, 无法撤销。`)) return;
+
+    characters = [];
+    // 清除分镜中对角色的引用 (selected_characters)
+    if (currentSegments && currentSegments.pages) {
+        currentSegments.pages.forEach(page => {
+            (page.segments || []).forEach(seg => {
+                seg.selected_characters = [];
+            });
+        });
+    }
+    renderCharacters();
+    if (typeof renderSegments === 'function') renderSegments();
+    syncResults();  // 同步到服务器
+    showToast('已清空所有角色', 'success');
 }
 
 function renderCharacters() {
