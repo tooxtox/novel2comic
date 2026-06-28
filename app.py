@@ -590,7 +590,7 @@ def segment_novel():
     api_url = data.get('api_url', '')
     api_key = data.get('api_key', '')
     model = data.get('model', '')
-    segments_per_page = data.get('segments_per_page', 4)
+    segments_per_page = data.get('segments_per_page', 0)  # 0 = LLM 自由控制
     task_id = data.get('task_id', '')
 
     if not text or not api_url:
@@ -598,7 +598,16 @@ def segment_novel():
 
     emit_progress(task_id, 5, '正在构建分镜提示词...', 'building_prompt')
 
-    prompt = f"""将以下小说转换漫画分镜，每页{segments_per_page}个分镜。同时提取所有主要出场角色。只返回JSON，无解释。
+    # 每页分镜数由 LLM 根据情节自由控制 (2-8 格之间)
+    # 不再强制固定数量, 让分镜师根据节奏自然划分
+    segments_hint = ''
+    if segments_per_page and segments_per_page > 0:
+        # 保留参数作为"建议"而非"强制", 向后兼容
+        segments_hint = f'(建议每页约 {segments_per_page} 格, 可根据情节在 2-8 格之间灵活调整)'
+    else:
+        segments_hint = '(根据情节节奏自由决定每页分镜数, 建议 2-8 格之间)'
+
+    prompt = f"""将以下小说转换漫画分镜，每页分镜数{segments_hint}。同时提取所有主要出场角色。只返回JSON，无解释。
 
 小说：
 {text[:4000]}

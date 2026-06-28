@@ -121,7 +121,7 @@
             <button onclick="switchTab('input')" id="tab-input" class="tab-active pb-2 px-1 text-lg transition-all">小说输入</button>
             <button onclick="switchTab('characters')" id="tab-characters" class="tab-inactive pb-2 px-1 text-lg transition-all">角色管理</button>
             <button onclick="switchTab('segments')" id="tab-segments" class="tab-inactive pb-2 px-1 text-lg transition-all">分镜管理</button>
-            <button onclick="switchTab('garble')" id="tab-garble" class="tab-inactive pb-2 px-1 text-lg transition-all">🧹 乱码清理</button>
+            <button onclick="switchTab('garble')" id="tab-garble" class="tab-inactive pb-2 px-1 text-lg transition-all">乱码清理</button>
             <button onclick="switchTab('gallery')" id="tab-gallery" class="tab-inactive pb-2 px-1 text-lg transition-all">漫画预览</button>
             <button onclick="switchTab('history')" id="tab-history" class="tab-inactive pb-2 px-1 text-lg transition-all">历史记录</button>
             <span class="text-gray-300 text-2xl font-light mx-1">|</span>
@@ -143,21 +143,13 @@
         <div id="panel-config" class="fade-in">
             <div class="bg-white p-6 manga-border panel-shadow mb-6">
                 <h2 class="text-xl font-bold mb-4">快速预设</h2>
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div onclick="applyPreset('volc')" class="cursor-pointer border-2 border-gray-300 hover:border-black p-4 hover:bg-gray-50 transition-all panel-shadow">
                         <div class="flex items-center gap-3">
                             <div class="w-10 h-10 bg-black text-white flex items-center justify-center font-bold">🌋</div>
                             <div>
                                 <div class="font-bold">火山引擎 v3</div>
-                                <div class="text-xs text-gray-500">标准 API 接口</div>
-                            </div>
-                        </div>
-                    </div>
-                    <div onclick="applyPreset('volc-coding')" class="cursor-pointer border-2 border-gray-300 hover:border-black p-4 hover:bg-gray-50 transition-all panel-shadow">
-                        <div class="flex items-center gap-3">
-                            <div class="w-10 h-10 bg-black text-white flex items-center justify-center font-bold">💻</div>
-                            <div>
-
+                                <div class="text-xs text-gray-500">MiniMax 文本 + 豆包图像</div>
                             </div>
                         </div>
                     </div>
@@ -190,6 +182,10 @@
                         <div>
                             <label class="block text-sm font-medium mb-1">API Key</label>
                             <input type="password" id="llm-api-key" placeholder="sk-..." class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                            <p class="text-xs text-gray-500 mt-1">
+                                💡 火山引擎用户: 登录 <a href="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey" target="_blank" class="text-blue-600 hover:underline">火山引擎方舟控制台</a>
+                                → 「API Key 管理」→ 创建 API Key, 复制以 <code class="bg-gray-100 px-1 rounded">ark-</code> 开头的字符串
+                            </p>
                         </div>
                         <div>
                             <label class="block text-sm font-medium mb-1">模型名称</label>
@@ -219,6 +215,9 @@
                         <div>
                             <label class="block text-sm font-medium mb-1">API Key / SK</label>
                             <input type="password" id="img-api-key" placeholder="your-api-key" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                            <p class="text-xs text-gray-500 mt-1">
+                                💡 火山引擎用户: 与上方 LLM API Key 使用同一个 <code class="bg-gray-100 px-1 rounded">ark-xxx</code> Key 即可 (方舟 API Key 通用)
+                            </p>
                         </div>
                         <div>
                             <label class="block text-sm font-medium mb-1">模型名称（可选）</label>
@@ -240,8 +239,14 @@
                 <h2 class="text-xl font-bold mb-4">高级设置</h2>
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium mb-1">每页分镜数</label>
-                        <input type="number" id="segments-per-page" value="4" min="1" max="8" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                        <label class="block text-sm font-medium mb-1">
+                            每页分镜数 <span class="text-xs text-gray-400 font-normal">(0 = LLM 自由控制)</span>
+                        </label>
+                        <input type="number" id="segments-per-page" value="0" min="0" max="8" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
+                        <p class="text-xs text-gray-500 mt-1">
+                            💡 设为 0 时由 LLM 根据情节节奏自由决定每页分镜数 (2-8 格);
+                            填 2-8 则作为建议值, LLM 仍可灵活调整
+                        </p>
                     </div>
                     <div>
                         <label class="block text-sm font-medium mb-1">负面提示词</label>

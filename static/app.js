@@ -611,13 +611,15 @@ async function runWithConcurrency(tasks, limit) {
 
 function applyPreset(preset) {
     if (preset === 'volc') {
+        // 火山引擎 v3 预设: MiniMax 文本 + 豆包图像 (用户当前默认配置)
+        // API Key 不填, 用户需在火山引擎控制台获取
         document.getElementById('llm-api-url').value = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
+        document.getElementById('llm-api-key').value = '';
+        document.getElementById('llm-model').value = 'minimax-m3-1-250227';
         document.getElementById('img-api-url').value = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
-        showToast('火山引擎 v3 预设已应用，请填写 API Key 和模型名称！', 'success');
-    } else if (preset === 'volc-coding') {
-        document.getElementById('llm-api-url').value = 'https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions';
-        document.getElementById('img-api-url').value = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
-        showToast('火山引擎 Coding 预设已应用，请填写 API Key 和模型名称！', 'success');
+        document.getElementById('img-api-key').value = '';
+        document.getElementById('img-model').value = 'doubao-seedream-3-0-t2i-250415';
+        showToast('火山引擎 v3 预设已应用，请填写 API Key！', 'success');
     } else if (preset === 'openai') {
         document.getElementById('llm-api-url').value = 'https://api.openai.com/v1/chat/completions';
         document.getElementById('img-api-url').value = 'https://api.openai.com/v1/images/generations';
@@ -1200,7 +1202,10 @@ async function saveConfig() {
         img_api_url: document.getElementById('img-api-url').value,
         img_api_key: document.getElementById('img-api-key').value,
         img_model: document.getElementById('img-model').value,
-        segments_per_page: parseInt(document.getElementById('segments-per-page').value) || 4,
+        segments_per_page: (() => {
+            const v = parseInt(document.getElementById('segments-per-page').value);
+            return isNaN(v) ? 0 : v;  // 0 = LLM 自由控制
+        })(),
         negative_prompt: document.getElementById('negative-prompt').value,
         reference_strength: (() => {
             const v = parseFloat(document.getElementById('reference-strength')?.value);
@@ -1251,7 +1256,9 @@ function applyConfigToForm(config) {
     document.getElementById('img-api-url').value = config.img_api_url || '';
     document.getElementById('img-api-key').value = config.img_api_key || '';
     document.getElementById('img-model').value = config.img_model || '';
-    document.getElementById('segments-per-page').value = config.segments_per_page || 4;
+    // 0 = LLM 自由控制; 旧配置没有该字段时默认 0
+    const spp = (config.segments_per_page !== undefined) ? config.segments_per_page : 0;
+    document.getElementById('segments-per-page').value = spp;
     document.getElementById('negative-prompt').value = config.negative_prompt || '';
     const rsEl = document.getElementById('reference-strength');
     if (rsEl) {
@@ -1315,7 +1322,7 @@ async function startSegment() {
                 api_url: config.llm_api_url,
                 api_key: config.llm_api_key,
                 model: config.llm_model,
-                segments_per_page: config.segments_per_page || 4,
+                segments_per_page: (config.segments_per_page !== undefined) ? config.segments_per_page : 0,
                 task_id: task.task_id
             })
         });
