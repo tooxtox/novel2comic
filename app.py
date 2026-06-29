@@ -8,6 +8,7 @@ import os
 import re
 import time
 import hashlib
+import hmac
 import uuid
 import secrets
 import shutil
@@ -138,6 +139,47 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 # 用户作品永久保存目录（账号维度）
 USER_DATA_DIR = os.path.join(os.path.dirname(__file__), 'static', 'users')
 os.makedirs(USER_DATA_DIR, exist_ok=True)
+
+# 注册用户凭据文件 ( username → {password_hash, salt, created_at} )
+# 与 admin 账号并存: admin 来自 .env, 普通用户来自此文件
+USERS_FILE = os.path.join(BASE_DIR, 'users.json')
+
+
+def _hash_password(password: str, salt: str = '') -> tuple:
+    """用 sha256 + salt 哈希密码。返回 (hash, salt)。salt 为空时自动生成。"""
+    if not salt:
+        salt = secrets.token_hex(16)
+    h = hashlib.sha256((salt + password).encode('utf-8')).hexdigest()
+    return h, salt
+
+
+def _verify_password(password: str, stored_hash: str, salt: str) -> bool:
+    h, _ = _hash_password(password, salt)
+    return hmac.compare_digest(h, stored_hash)
+
+
+def load_users() -> dict:
+    """读取已注册用户 {username: {password_hash, salt, created_at}}"""
+    if not os.path.exists(USERS_FILE):
+        return {}
+    try:
+        with open(USERS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[users] failed to load users.json: {e}")
+        return {}
+
+
+def save_users(users: dict) -> None:
+    """保存用户列表到 users.json (仅 0600 权限)"""
+    tmp = USERS_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, USERS_FILE)
+    try:
+        os.chmod(USERS_FILE, 0o600)
+    except Exception:
+        pass  # Windows 上 chmod 限制
 
 # 缓存有效期（7天）
 CACHE_EXPIRE_DAYS = 7
@@ -562,24 +604,89 @@ def index():
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
-    username = data.get('username', '')
+    username = data.get('username', '').strip()
     password = data.get('password', '')
-    
-    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+
+    if not username or not password:
+        return jsonify({'success': False, 'error': '请输入用户名和密码'}), 400
+
+    # 1. 先校验管理员 (来自 .env)
+    if username == ADMIN_USERNAME and hmac.compare_digest(password, ADMIN_PASSWORD):
         session['logged_in'] = True
         session['username'] = username
-        return jsonify({'success': True, 'message': '登录成功'})
+        session['is_admin'] = True
+        return jsonify({'success': True, 'message': '登录成功', 'username': username, 'is_admin': True})
+
+    # 2. 校验普通注册用户 (来自 users.json)
+    users = load_users()
+    user = users.get(username)
+    if user and _verify_password(password, user.get('password_hash', ''), user.get('salt', '')):
+        session['logged_in'] = True
+        session['username'] = username
+        session['is_admin'] = False
+        # 确保用户目录存在
+        get_user_dir(username)
+        return jsonify({'success': True, 'message': '登录成功', 'username': username, 'is_admin': False})
+
     return jsonify({'success': False, 'error': '用户名或密码错误'}), 401
+
+
+@app.route('/api/register', methods=['POST'])
+def register():
+    """注册新用户。校验用户名/密码, 写入 users.json。"""
+    data = request.json or {}
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+    confirm = data.get('confirm') or ''
+
+    # 校验用户名
+    if not re.match(r'^[A-Za-z0-9_\-\u4e00-\u9fa5]{2,32}$', username):
+        return jsonify({'success': False, 'error': '用户名 2-32 字符, 只能包含中英文/数字/下划线/连字符'}), 400
+
+    # 校验密码
+    if len(password) < 6 or len(password) > 64:
+        return jsonify({'success': False, 'error': '密码长度需 6-64 字符'}), 400
+    if password != confirm:
+        return jsonify({'success': False, 'error': '两次输入的密码不一致'}), 400
+
+    # 保留用户名: 禁止注册 admin / 与 admin 冲突
+    if username.lower() == ADMIN_USERNAME.lower():
+        return jsonify({'success': False, 'error': '该用户名已被保留'}), 400
+
+    users = load_users()
+    if username in users:
+        return jsonify({'success': False, 'error': '该用户名已被注册'}), 400
+
+    # 写入新用户
+    pwd_hash, salt = _hash_password(password)
+    users[username] = {
+        'password_hash': pwd_hash,
+        'salt': salt,
+        'created_at': datetime.now().isoformat(),
+    }
+    save_users(users)
+
+    # 预创建用户目录
+    get_user_dir(username)
+
+    print(f"[users] new user registered: {username}")
+    return jsonify({'success': True, 'message': '注册成功, 请登录'})
+
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
     session.clear()
     return jsonify({'success': True, 'message': '已退出登录'})
 
+
 @app.route('/api/check-auth', methods=['GET'])
 def check_auth():
     if session.get('logged_in'):
-        return jsonify({'logged_in': True, 'username': session.get('username')})
+        return jsonify({
+            'logged_in': True,
+            'username': session.get('username'),
+            'is_admin': session.get('is_admin', False)
+        })
     return jsonify({'logged_in': False})
 
 @app.route('/api/segment', methods=['POST'])
@@ -734,9 +841,12 @@ def segment_novel():
 
         def _post_process(parsed):
             """解析成功后: 补全分镜字段 + 同步角色到 session, 返回 (pages, characters)"""
-            # 补全分镜字段
-            for page in parsed.get('pages', []):
-                for seg in page.get('segments', []):
+            # 规范化 page_number / segment_number: 强制从 1 开始连续编号
+            # (LLM 有时会返回不从 1 开始的 page_number, 导致页码偏移)
+            for page_idx, page in enumerate(parsed.get('pages', [])):
+                page['page_number'] = page_idx + 1
+                for seg_idx, seg in enumerate(page.get('segments', [])):
+                    seg['segment_number'] = seg_idx + 1
                     if 'style_prompt' not in seg:
                         seg['style_prompt'] = 'ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga, pure monochrome, detailed ink drawing'
                     for k, dv in (('camera_angle', '平视'), ('composition', '三分法'), ('mood', ''),
@@ -1329,10 +1439,16 @@ def fix_text_garble():
                 })
                 save_session_data('images', images_data)
             elif page_idx is not None:
-                # 整页修复: 保存到 full_pages
+                # 整页修复: 保存到 full_pages (key 统一用 str, 与 generate-page 保持一致)
                 full_pages_data = load_session_data('full_pages') or {'pages': []}
+                # 先清除该 page_idx 的旧记录 (兼容 str/int 两种 key)
+                page_idx_str = str(page_idx)
+                full_pages_data['pages'] = [
+                    item for item in full_pages_data.get('pages', [])
+                    if str(item.get('key', '')) != page_idx_str
+                ]
                 full_pages_data['pages'].append({
-                    'key': page_idx,
+                    'key': page_idx_str,
                     'local_url': local_url,
                     'timestamp': datetime.now().isoformat(),
                     'fixed': True
@@ -1423,11 +1539,15 @@ def accept_garble_fix():
             })
             save_session_data('images', images_data)
         else:
-            # page 级: 更新 full_pages 映射
+            # page 级: 更新 full_pages 映射 (key 统一用 str 比较, 兼容旧数据)
+            page_idx_str = str(page_idx)
             full_pages_data = load_session_data('full_pages') or {'pages': []}
-            full_pages_data['pages'] = [item for item in full_pages_data.get('pages', []) if item.get('key') != page_idx]
+            full_pages_data['pages'] = [
+                item for item in full_pages_data.get('pages', [])
+                if str(item.get('key', '')) != page_idx_str
+            ]
             full_pages_data['pages'].append({
-                'key': page_idx,
+                'key': page_idx_str,
                 'local_url': new_url,
                 'timestamp': datetime.now().isoformat(),
                 'fixed': True,
