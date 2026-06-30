@@ -848,7 +848,8 @@ def segment_novel():
                 for seg_idx, seg in enumerate(page.get('segments', [])):
                     seg['segment_number'] = seg_idx + 1
                     if 'style_prompt' not in seg:
-                        seg['style_prompt'] = 'ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga, pure monochrome, detailed ink drawing'
+                        # 移除 'no text overlay' 避免模型不渲染对话文字
+                        seg['style_prompt'] = 'ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, pure monochrome, detailed ink drawing'
                     for k, dv in (('camera_angle', '平视'), ('composition', '三分法'), ('mood', ''),
                                   ('shot_scale', ''), ('lighting', ''), ('of_type', '静态')):
                         if k not in seg or seg.get(k) is None:
@@ -1068,10 +1069,13 @@ def prepare_ref_images(character_references, previous_page_image=None):
 def generate_image():
     data = request.json
     prompt = data.get('prompt', '')
+    # dialogue: 该分镜的对话原文 (可选, 用于强制模型渲染对话气泡)
+    dialogue = (data.get('dialogue') or '').strip()
     api_url = data.get('api_url', '')
     api_key = data.get('api_key', '')
     model = data.get('model', '')
-    negative_prompt = data.get('negative_prompt', 'color, colorful, vibrant, chromatic, saturated, blurry, low quality, distorted, watermark, signature, text overlay, logo')
+    # 默认 negative_prompt 不再包含 'text overlay' / 'text' (否则模型会不渲染对话文字)
+    negative_prompt = data.get('negative_prompt', 'color, colorful, vibrant, chromatic, saturated, blurry, low quality, distorted, watermark, signature, logo')
     style_tags = data.get('style_tags', '').strip()
     # 向后兼容: 优先 character_references, 回退 references (新字段名)
     character_references = data.get('character_references') or data.get('references') or []
@@ -1111,7 +1115,20 @@ def generate_image():
             print(f"[Task2] Upgraded prompt with structured tags: {[k for k,v in structured_fields.items() if k != 'style_prompt' and (v or '').strip()]}")
 
     style_suffix = f", {style_tags}" if style_tags else ""
-    manga_prompt = f"ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga, pure monochrome, grayscale only. detailed ink drawing, high contrast, dramatic shadows, cross-hatching{style_suffix}, {prompt}"
+    # 移除 'no text overlay' 避免模型不渲染对话文字
+    # 当有 dialogue 时, 显式要求模型渲染清晰可读的中文对话气泡
+    if dialogue:
+        # 把多行对话拆成单独的气泡指令
+        dialogue_lines = [l.strip() for l in dialogue.split('\n') if l.strip()]
+        if len(dialogue_lines) == 1:
+            dialogue_section = f"\n\n=== DIALOGUE TO RENDER (CRITICAL) ===\nRender this Chinese text VERBATIM inside a speech bubble: \"{dialogue_lines[0]}\"\nRequirements: Use clear, legible, standard Simplified Chinese characters. ABSOLUTELY NO garbled text, broken symbols, boxes (□), or random ASCII. The speech bubble MUST be clearly visible and contain exactly this text."
+        else:
+            dialogue_list = "\n".join(f"  Bubble {i+1}: \"{line}\"" for i, line in enumerate(dialogue_lines))
+            dialogue_section = f"\n\n=== DIALOGUE TO RENDER (CRITICAL) ===\nRender each of these Chinese texts VERBATIM inside separate speech bubbles, in this order:\n{dialogue_list}\nRequirements: Use clear, legible, standard Simplified Chinese characters. ABSOLUTELY NO garbled text, broken symbols, boxes (□), or random ASCII. Each bubble MUST be clearly visible and contain exactly the specified text."
+        manga_prompt = f"ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, pure monochrome, grayscale only. detailed ink drawing, high contrast, dramatic shadows, cross-hatching{style_suffix}, {prompt}.{dialogue_section}"
+    else:
+        # 无对白: 允许旁白/标题但不强制
+        manga_prompt = f"ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, pure monochrome, grayscale only. detailed ink drawing, high contrast, dramatic shadows, cross-hatching{style_suffix}, {prompt}"
 
     # 构建角色设定文本
     if character_references and len(character_references) > 0:
@@ -2226,7 +2243,7 @@ def generate_page():
     api_url = data.get('api_url', '')
     api_key = data.get('api_key', '')
     model = data.get('model', '')
-    negative_prompt = data.get('negative_prompt', 'color, colorful, chromatic, vibrant, saturated, blurry, low quality, distorted, watermark, signature, text, logo, deformed hands, extra fingers, bad anatomy, mutated, text overlay')
+    negative_prompt = data.get('negative_prompt', 'color, colorful, chromatic, vibrant, saturated, blurry, low quality, distorted, watermark, signature, logo, deformed hands, extra fingers, bad anatomy, mutated')
     style_tags = data.get('style_tags', '').strip()
     # 向后兼容: 优先 character_references, 回退 references
     character_references = data.get('character_references') or data.get('references') or []
@@ -2252,16 +2269,25 @@ def generate_page():
 
     try:
         segment_descriptions = []
+        # 收集所有有对话的分镜, 单独构建对话渲染指令 (强化)
+        dialogue_lines = []
         # 任务2: 逐 panel 用结构化字段升级 style_prompt, 拼入 prompt
         for idx, seg in enumerate(segments):
             # 调用 upgrade_segment_prompt 合并 style_prompt + 镜头语言 tags
             upgraded_style = upgrade_segment_prompt(seg)
             base_style = upgraded_style or seg.get('style_prompt', '') or 'black and white manga style'
+            # 移除 base_style 中可能残留的 'no text overlay' (老数据兼容)
+            base_style = base_style.replace('no text overlay', '').replace('no text', '').strip().rstrip(',')
             seg_style_tags = base_style
 
             desc = f"Panel {idx+1}: {seg.get('scene_description', '')}"
-            if seg.get('dialogue'):
-                desc += f" (Dialogue: {seg['dialogue']})"
+            seg_dialogue = (seg.get('dialogue') or '').strip()
+            if seg_dialogue:
+                # 把每个分镜的对话单独收集, 后面统一渲染指令
+                for line in seg_dialogue.split('\n'):
+                    line = line.strip()
+                    if line:
+                        dialogue_lines.append((idx + 1, line))
             # 把升级后的 style_prompt 注入到每个 panel 描述
             desc += f" [style: {seg_style_tags}]"
             segment_descriptions.append(desc)
@@ -2270,7 +2296,8 @@ def generate_page():
         if style_tags:
             style_art = f"{style_tags}, {style_art}"
 
-        page_prompt = f"""ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga comic page, pure monochrome, grayscale only. {len(segments)} panels arranged in a grid layout.
+        # 移除 'no text overlay', 否则模型会不渲染对话文字
+        page_prompt = f"""ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga comic page, pure monochrome, grayscale only. {len(segments)} panels arranged in a grid layout.
 
 Panels:
 {chr(10).join(segment_descriptions)}
@@ -2291,6 +2318,36 @@ Art style: {style_art}"""
 
         if previous_page_image:
             page_prompt += f"\n\n=== PREVIOUS PAGE REFERENCE ===\nA reference image of the previous page (Page {page_num-1}) is provided. This page MUST have exactly the same art style, line quality, shading technique, and visual tone as the reference. Characters should look identical to how they appear in the previous page."
+
+        # === 对话渲染指令 (CRITICAL) ===
+        # 把每个分镜的对话原文明确列出, 强制模型渲染清晰可读的中文对话气泡
+        # 避免 'no text overlay' 导致模型不渲染对话, 也避免随机乱码
+        if dialogue_lines:
+            dialogue_list_str = "\n".join(
+                f"  Panel {p}: \"{t}\"" for p, t in dialogue_lines
+            )
+            page_prompt += f"""
+
+=== DIALOGUE TO RENDER (CRITICAL - MUST FOLLOW) ===
+Render each of these Chinese dialogues VERBATIM inside the corresponding panel's speech bubble:
+{dialogue_list_str}
+
+STRICT TEXT RENDERING RULES:
+1. Copy each line of dialogue VERBATIM. Do NOT paraphrase, translate, abbreviate, or modify ANY character.
+2. Render every character as a clear, legible, standard Simplified Chinese character.
+3. ABSOLUTELY NO garbled characters, broken symbols, random ASCII, boxes (□), question marks (?), mojibake, or illegible glyphs.
+4. ABSOLUTELY NO invented, imagined, or extra text. If a panel has no dialogue listed, leave its bubble EMPTY or omit the bubble.
+5. Do NOT mix languages. Do NOT use Japanese kana, English letters, or pinyin unless explicitly in the source.
+6. Place each dialogue string inside the corresponding panel's speech bubble, in reading order.
+7. Use bold, clean sans-serif Chinese font. Match the original text size and bubble fit.
+8. Keep the dialogue punctuation (。！？，" ") exactly as given.
+
+CRITICAL FAILURE MODES:
+- Outputting garbled/unreadable text (CRITICAL FAILURE)
+- Changing the dialogue wording (CRITICAL FAILURE)
+- Adding text not in the list (CRITICAL FAILURE)
+- Omitting dialogue that IS in the list (CRITICAL FAILURE)
+- Altering the artwork (FAILURE)"""
 
         # 准备参考图片（缓存到本地后转base64）
         ref_images = prepare_ref_images(character_references, previous_page_image)
@@ -2716,6 +2773,102 @@ def history_rename(work_id):
         session['work_title'] = new_title
 
     return jsonify({'success': True, 'title': new_title})
+
+
+@app.route('/api/generate-title', methods=['POST'])
+@login_required
+def generate_title():
+    """用 LLM 分析小说原文, 生成简洁的漫画标题 (10-20 字)"""
+    data = request.json or {}
+    text = (data.get('text') or '').strip()
+    api_url = data.get('api_url', '')
+    api_key = data.get('api_key', '')
+    model = data.get('model', '')
+
+    if not text:
+        return jsonify({'error': '缺少小说原文'}), 400
+    if not api_url:
+        return jsonify({'error': '缺少 LLM API 地址'}), 400
+
+    # 只取前 2000 字分析, 足够判断主题
+    sample = text[:2000]
+    prompt = (
+        "请阅读以下小说片段, 为它生成一个简洁有吸引力的漫画标题。\n"
+        "要求:\n"
+        "1. 长度 10-20 个汉字\n"
+        "2. 反映故事核心主题或情节\n"
+        "3. 不要使用引号、书名号、标点符号\n"
+        "4. 直接返回标题文字, 不要任何解释或前缀\n\n"
+        f"小说片段:\n{sample}"
+    )
+
+    try:
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+        payload = {
+            'model': model or 'minimax-m3-1-250227',
+            'messages': [
+                {'role': 'system', 'content': '你是一个漫画标题生成器, 只返回标题文字, 不要任何解释。'},
+                {'role': 'user', 'content': prompt}
+            ],
+            'temperature': 0.7,
+            'max_tokens': 60,
+        }
+        resp = requests.post(api_url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        result = resp.json()
+        title = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+        # 清理可能出现的引号/书名号/前缀
+        title = title.strip('"\'""「」《》').strip()
+        # 截取第一行, 避免模型返回多行解释
+        title = title.split('\n')[0].strip()
+        if not title:
+            title = f"漫画作品 {datetime.now().strftime('%Y-%m-%d')}"
+        return jsonify({'success': True, 'title': title})
+    except Exception as e:
+        print(f"[generate-title] Error: {e}")
+        # 失败时返回默认标题, 不阻断流程
+        return jsonify({'success': False, 'title': f"漫画作品 {datetime.now().strftime('%Y-%m-%d')}", 'error': str(e)})
+
+
+@app.route('/api/work/rename-current', methods=['POST'])
+@login_required
+def rename_current_work():
+    """重命名当前绑定的作品 (用于自动保存时自动命名)"""
+    work_id, username = get_current_work_id()
+    if not work_id:
+        return jsonify({'error': '当前没有绑定的作品'}), 400
+
+    data = request.json or {}
+    new_title = (data.get('title') or '').strip()
+    if not new_title:
+        return jsonify({'error': '标题不能为空'}), 400
+
+    work_dir = os.path.join(get_user_dir(username), 'works', work_id)
+    if not os.path.isdir(work_dir):
+        return jsonify({'error': '作品不存在'}), 404
+
+    meta_path = os.path.join(work_dir, 'meta.json')
+    meta = {}
+    if os.path.exists(meta_path):
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            meta = json.load(f)
+    meta['title'] = new_title
+    meta['updated_at'] = datetime.now().isoformat()
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    history = list_user_works(username)
+    for w in history:
+        if w['work_id'] == work_id:
+            w['title'] = new_title
+            w['updated_at'] = meta['updated_at']
+            break
+    save_user_history(username, history)
+    session['work_title'] = new_title
+
+    return jsonify({'success': True, 'title': new_title, 'work_id': work_id})
 
 
 @app.route('/api/clear-cache', methods=['POST'])

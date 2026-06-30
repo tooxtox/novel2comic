@@ -3,6 +3,7 @@ let generatedImages = {};
 let isGenerating = false;
 let characters = [];
 let batchPaused = false;  // 批量生成暂停控制
+let batchStopRequested = false;  // 批量生成停止控制 (用户主动停止)
 let combinedPages = [];
 let fullPageImages = {};  // 整页生成的图片
 let combinedPageImages = {};  // 任务3: 拼版预览生成的图片 (key: pageIdx)
@@ -2443,6 +2444,7 @@ async function generateSingleImage(pageIdx, segIdx, skipLock = false, btn = null
             body: JSON.stringify({
                 prompt: prompt,
                 style_prompt: seg.style_prompt || '',
+                dialogue: seg.dialogue || '',  // 传对话原文给后端, 用于强制渲染对话气泡
                 api_url: config.img_api_url,
                 api_key: config.img_api_key,
                 model: config.img_model,
@@ -2712,13 +2714,56 @@ function toggleBatchPause() {
 
 /**
  * 在批量循环中检查暂停状态。如果被暂停就原地等待, 直到继续或取消。
- * 返回 false 表示被外部中止 (isGenerating=false)
+ * 返回 false 表示被外部中止 (isGenerating=false 或 batchStopRequested=true)
  */
 async function _checkBatchPause() {
-    while (batchPaused && isGenerating) {
+    while (batchPaused && isGenerating && !batchStopRequested) {
         await new Promise(r => setTimeout(r, 200));
     }
-    return isGenerating;
+    return isGenerating && !batchStopRequested;
+}
+
+/**
+ * 用户主动停止批量生成
+ */
+function stopBatchGenerate() {
+    if (!isGenerating) {
+        showToast('当前没有正在进行的生成任务', 'info');
+        return;
+    }
+    if (!confirm('确定要停止当前批量生成吗? 已生成的页面会保留。')) return;
+    batchStopRequested = true;
+    batchPaused = false;  // 同时取消暂停, 让循环能跳出
+    showToast('正在停止生成, 请稍候...', 'info');
+    const stopBtn = document.getElementById('batch-stop-btn');
+    if (stopBtn) stopBtn.classList.add('hidden');
+}
+
+/**
+ * 重新生成所有整页 (清空已有图片, 从头生成)
+ */
+async function regenerateAllFullPages() {
+    if (isGenerating) {
+        showToast('请等待当前生成完成', 'error');
+        return;
+    }
+    if (currentSegments.pages.length === 0) {
+        showToast('请先生成分镜', 'error');
+        return;
+    }
+    if (Object.keys(fullPageImages).length > 0) {
+        if (!confirm(`将清空已生成的 ${Object.keys(fullPageImages).length} 张整页图片并从头生成, 确定吗?\n\n此操作不可撤销。`)) return;
+    }
+
+    // 清空已有整页图
+    fullPageImages = {};
+    generatedImages = {};
+    renderSegments();
+    renderGallery();
+    syncResults();
+
+    // 调用批量整页生成
+    await generateAllFullPages();
 }
 
 async function generateAllFullPages() {
@@ -2730,6 +2775,7 @@ async function generateAllFullPages() {
     const spinner = document.getElementById('batch-full-spinner');
     spinner.classList.remove('hidden');
     isGenerating = true;
+    batchStopRequested = false;  // 重置停止标志
     const unlock = lockButton(
         document.getElementById('batch-full-btn'),
         document.getElementById('batch-full-label'),
@@ -2755,21 +2801,27 @@ async function generateAllFullPages() {
     });
     task.startFallback(120000);
 
-    // 显示暂停按钮
+    // 显示暂停/停止按钮
     const pauseBtn = document.getElementById('batch-pause-btn');
+    const stopBtn = document.getElementById('batch-stop-btn');
     if (pauseBtn) {
         batchPaused = false;
         document.getElementById('batch-pause-label').textContent = '⏸️ 暂停';
         pauseBtn.classList.remove('hidden');
     }
+    if (stopBtn) stopBtn.classList.remove('hidden');
 
     // 串行生成，每页参考上一页漫画和人设图
     let lastPageImage = null;
     let i = 0;
+    let stoppedByUser = false;
     for (i = 0; i < pagesToGenerate.length; i++) {
-        // 暂停检查
+        // 暂停 + 停止检查
         const shouldContinue = await _checkBatchPause();
-        if (!shouldContinue) break;
+        if (!shouldContinue) {
+            stoppedByUser = batchStopRequested;
+            break;
+        }
 
         const p = pagesToGenerate[i];
         await generateFullPage(p, true, lastPageImage);
@@ -2777,20 +2829,99 @@ async function generateAllFullPages() {
         lastPageImage = fullPageImages[p] || null;
     }
 
-    // 隐藏暂停按钮
+    // 隐藏暂停/停止按钮
     if (pauseBtn) pauseBtn.classList.add('hidden');
+    if (stopBtn) stopBtn.classList.add('hidden');
     batchPaused = false;
+    batchStopRequested = false;
     task.finish();
 
     isGenerating = false;
     spinner.classList.add('hidden');
     unlock();
-    if (i < pagesToGenerate.length) {
+
+    const allDone = (i >= pagesToGenerate.length) && !stoppedByUser;
+    if (stoppedByUser) {
+        showToast('批量整页生成已停止', 'info');
+    } else if (i < pagesToGenerate.length) {
         showToast('批量整页生成已暂停', 'info');
     } else {
         showToast('批量整页生成完成', 'success');
     }
+
+    // 所有页面生成完毕后自动保存 (含 LLM 生成标题)
+    // 即使被用户停止, 只要生成了至少 1 页也自动保存
+    if (Object.keys(fullPageImages).length > 0) {
+        await autoSaveWorkWithLLMTitle(allDone);
+    }
+
     switchTab('gallery');
+}
+
+/**
+ * 自动保存作品, 标题用 LLM 分析小说原文生成
+ * @param {boolean} allDone - 是否全部生成完毕 (而非被停止)
+ */
+async function autoSaveWorkWithLLMTitle(allDone) {
+    try {
+        const novelText = document.getElementById('novel-text')?.value || '';
+        const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
+
+        // 1. 调用 LLM 生成标题
+        let title = '';
+        if (config.llm_api_url && novelText) {
+            try {
+                const resp = await fetchWithRetry('/api/generate-title', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        text: novelText,
+                        api_url: config.llm_api_url,
+                        api_key: config.llm_api_key || '',
+                        model: config.llm_model || ''
+                    })
+                });
+                const result = await resp.json();
+                if (result.success || result.title) {
+                    title = result.title;
+                }
+            } catch (e) {
+                console.warn('LLM 生成标题失败, 使用默认标题:', e);
+            }
+        }
+        if (!title) {
+            title = `漫画作品 ${new Date().toLocaleString()}`;
+        }
+
+        // 2. 确保有 work_id (没有就创建)
+        // saveCurrentState 后端会自动创建, 这里直接调用即可
+        // 但 rename-current 需要已有 work_id, 所以先 saveCurrentState
+        await saveCurrentState();
+
+        // 3. 用 LLM 生成的标题重命名当前作品
+        try {
+            const renameResp = await fetchWithRetry('/api/work/rename-current', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ title: title })
+            });
+            const renameResult = await renameResp.json();
+            if (renameResult.success) {
+                showToast(allDone ? `漫画生成完毕, 已自动保存为「${title}」` : `已停止, 已保存为「${title}」`, 'success');
+                // 刷新历史列表
+                loadHistoryList();
+            } else {
+                showToast('已保存作品, 但重命名失败: ' + (renameResult.error || ''), 'info');
+            }
+        } catch (e) {
+            console.error('rename-current failed:', e);
+            showToast('已保存作品, 但自动命名失败', 'info');
+        }
+    } catch (e) {
+        console.error('autoSaveWorkWithLLMTitle failed:', e);
+    }
 }
 
 async function generateAllImages() {

@@ -333,12 +333,19 @@
                         <span id="batch-full-label">批量整页生成</span>
                         <span id="batch-full-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
                     </button>
+                    <button id="batch-regen-btn" onclick="regenerateAllFullPages()" class="bg-red-700 text-white px-4 py-2 font-medium flex items-center gap-2 hover:bg-red-800 transition-colors">
+                        <span id="batch-regen-label">重新生成所有</span>
+                        <span id="batch-regen-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
+                    </button>
                     <button id="batch-single-btn" onclick="generateAllImages()" class="bg-gray-700 text-white px-4 py-2 font-medium flex items-center gap-2 hover:bg-gray-800 transition-colors">
                         <span id="batch-single-label">批量逐个生成（不推荐）</span>
                         <span id="batch-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
                     </button>
                     <button id="batch-pause-btn" onclick="toggleBatchPause()" class="hidden border-2 border-yellow-500 bg-yellow-50 text-yellow-700 px-4 py-2 font-medium hover:bg-yellow-100 transition-colors">
                         <span id="batch-pause-label">⏸️ 暂停</span>
+                    </button>
+                    <button id="batch-stop-btn" onclick="stopBatchGenerate()" class="hidden border-2 border-red-500 bg-red-50 text-red-700 px-4 py-2 font-medium hover:bg-red-100 transition-colors">
+                        ⛔ 停止
                     </button>
                     <button onclick="exportScript()" class="bg-white border-2 border-black px-4 py-2 font-medium hover:bg-gray-50 transition-colors">导出脚本</button>
                 </div>
