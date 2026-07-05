@@ -1115,20 +1115,14 @@ def generate_image():
             print(f"[Task2] Upgraded prompt with structured tags: {[k for k,v in structured_fields.items() if k != 'style_prompt' and (v or '').strip()]}")
 
     style_suffix = f", {style_tags}" if style_tags else ""
-    # 移除 'no text overlay' 避免模型不渲染对话文字
-    # 当有 dialogue 时, 显式要求模型渲染清晰可读的中文对话气泡
-    if dialogue:
-        # 把多行对话拆成单独的气泡指令
-        dialogue_lines = [l.strip() for l in dialogue.split('\n') if l.strip()]
-        if len(dialogue_lines) == 1:
-            dialogue_section = f"\n\n=== DIALOGUE TO RENDER (CRITICAL) ===\nRender this Chinese text VERBATIM inside a speech bubble: \"{dialogue_lines[0]}\"\nRequirements: Use clear, legible, standard Simplified Chinese characters. ABSOLUTELY NO garbled text, broken symbols, boxes (□), or random ASCII. The speech bubble MUST be clearly visible and contain exactly this text."
-        else:
-            dialogue_list = "\n".join(f"  Bubble {i+1}: \"{line}\"" for i, line in enumerate(dialogue_lines))
-            dialogue_section = f"\n\n=== DIALOGUE TO RENDER (CRITICAL) ===\nRender each of these Chinese texts VERBATIM inside separate speech bubbles, in this order:\n{dialogue_list}\nRequirements: Use clear, legible, standard Simplified Chinese characters. ABSOLUTELY NO garbled text, broken symbols, boxes (□), or random ASCII. Each bubble MUST be clearly visible and contain exactly the specified text."
-        manga_prompt = f"ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, pure monochrome, grayscale only. detailed ink drawing, high contrast, dramatic shadows, cross-hatching{style_suffix}, {prompt}.{dialogue_section}"
-    else:
-        # 无对白: 允许旁白/标题但不强制
-        manga_prompt = f"ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, pure monochrome, grayscale only. detailed ink drawing, high contrast, dramatic shadows, cross-hatching{style_suffix}, {prompt}"
+    # 对话文本不再交给图像 API 渲染, 由后端 PIL 叠加 (避免乱码)
+    # 这里明确要求图像 API 不画任何文字/气泡
+    manga_prompt = (
+        f"ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, "
+        f"pure monochrome, grayscale only. detailed ink drawing, high contrast, dramatic shadows, "
+        f"cross-hatching{style_suffix}, {prompt}. "
+        f"NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text overlay."
+    )
 
     # 构建角色设定文本
     if character_references and len(character_references) > 0:
@@ -1183,6 +1177,11 @@ def generate_image():
         local_url, error = save_image_result(image_url, "manga", work_id, work_username)
 
         if local_url:
+            # PIL 叠加对话气泡 (替代图像 API 渲染, 避免乱码)
+            _overlay_bubble_on_segment(local_url, {
+                'dialogue': dialogue,
+                'dialogue_type': data.get('dialogue_type') or 'dialogue',
+            })
             # 持久化图片映射（内网穿透恢复用）
             if page_idx is not None and seg_idx is not None:
                 images_data = load_session_data('images') or {'images': []}
@@ -1203,396 +1202,6 @@ def generate_image():
         print(f"Image generation error: {str(e)}")
         print(traceback.format_exc())
         emit_progress(task_id, 0, f'图片生成失败: {e}', 'error')
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/check-text-garble', methods=['POST'])
-@login_required
-def check_text_garble():
-    """检测图片中的文字是否乱码, 并与原文对比, 不一致也判定需修复"""
-    data = request.json
-    image_url = data.get('image_url', '')
-    api_url = data.get('api_url', '')
-    api_key = data.get('api_key', '')
-    model = data.get('model', '')
-    task_id = data.get('task_id', '')
-    original_text = data.get('original_text', '')  # 分镜原文 (场景描述+对话)
-
-    if not image_url or not api_url:
-        return jsonify({'error': '缺少必要参数'}), 400
-
-    try:
-        emit_progress(task_id, 10, '正在读取图片...', 'reading_image')
-        # 读取图片转base64
-        if image_url.startswith('/static/'):
-            # 本地文件
-            file_path = os.path.join(os.path.dirname(__file__), image_url[1:])  # 去掉开头的/
-            if os.path.exists(file_path):
-                with open(file_path, 'rb') as f:
-                    img_data = base64.b64encode(f.read()).decode('utf-8')
-                image_base64 = f"data:image/png;base64,{img_data}"
-            else:
-                return jsonify({'error': f'图片文件不存在: {file_path}'}), 404
-        elif image_url.startswith('http'):
-            # 下载远程图片
-            resp = requests.get(image_url, timeout=30)
-            resp.raise_for_status()
-            img_data = base64.b64encode(resp.content).decode('utf-8')
-            image_base64 = f"data:image/png;base64,{img_data}"
-        else:
-            return jsonify({'error': '不支持的图片URL格式'}), 400
-
-        # 调用LLM视觉模型检测乱码 + 对比原文
-        headers = {'Content-Type': 'application/json'}
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
-
-        # 构建检测 prompt: 同时检查乱码 和 与原文的一致性
-        if original_text:
-            prompt = f"""请检查这张漫画图片中的文字（对话气泡、旁白框、音效文字等），并与下面的原文进行对比：
-
-【原文参考】
-{original_text}
-
-请检查以下两方面：
-1. 文字乱码问题：
-   - 文字完全乱码（无法辨认的符号、乱码字符）
-   - 文字部分乱码（有些字是乱码，有些字正常）
-   - 文字正常（清晰可读的中文字符）
-
-2. 与原文一致性：
-   - 图片中的对话/旁白文字是否与原文一致
-   - 如果文字内容与原文不符（即使不是乱码），也需要修复
-   - 如果原文有对话但图中缺失或多余文字，也需要修复
-
-请只返回JSON格式：
-{{
-  "has_garble": true/false,
-  "garble_level": "none"/"partial"/"full",
-  "mismatch": true/false,
-  "mismatch_description": "如果与原文不一致, 简要说明差异; 否则为空字符串",
-  "description": "简要描述文字状况和对比结果"
-}}
-
-判断规则：
-- 如果文字乱码 → has_garble=true, 需修复
-- 如果文字与原文不一致 → mismatch=true, 需修复
-- 两者都正常 → 都返回 false, 无需修复
-- 如果图片中没有文字但原文有对话 → mismatch=true"""
-        else:
-            prompt = """请检查这张漫画图片中的文字（对话气泡、旁白框、音效文字等）是否存在以下问题：
-1. 文字完全乱码（无法辨认的符号、乱码字符）
-2. 文字部分乱码（有些字是乱码，有些字正常）
-3. 文字正常（清晰可读的中文字符）
-
-请只返回JSON格式：
-{
-  "has_garble": true/false,
-  "garble_level": "none"/"partial"/"full",
-  "description": "简要描述文字状况"
-}
-
-如果图片中没有文字，返回 {"has_garble": false, "garble_level": "none", "description": "图片中没有文字"}"""
-
-        payload = {
-            'model': model or 'minimax-vl',
-            'messages': [
-                {
-                    'role': 'user',
-                    'content': [
-                        {'type': 'text', 'text': prompt},
-                        {'type': 'image_url', 'image_url': {'url': image_base64}}
-                    ]
-                }
-            ],
-            'max_tokens': 500,
-            'temperature': 0.3
-        }
-
-        print(f"[GarbleCheck] Calling LLM: {api_url}, model: {payload['model']}")
-        emit_progress(task_id, 40, '正在调用视觉模型检测...', 'calling_llm')
-        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
-        response.raise_for_status()
-        result = response.json()
-
-        emit_progress(task_id, 80, '正在解析检测结果...', 'parsing')
-        # 解析返回
-        content = ''
-        if 'choices' in result and len(result['choices']) > 0:
-            content = result['choices'][0].get('message', {}).get('content', '')
-        elif 'data' in result:
-            content = str(result['data'])
-
-        # 提取JSON
-        content = re.sub(r'```json\s*', '', content)
-        content = re.sub(r'```\s*', '', content)
-        content = content.strip()
-
-        try:
-            analysis = json.loads(content)
-        except:
-            # 尝试从文本中提取JSON
-            match = re.search(r'\{[^}]+\}', content)
-            if match:
-                analysis = json.loads(match.group())
-            else:
-                analysis = {'has_garble': False, 'garble_level': 'none', 'description': content}
-
-        print(f"[GarbleCheck] Result: {analysis}")
-        emit_progress(task_id, 100, '检测完成', 'done')
-        return jsonify({'success': True, 'analysis': analysis})
-
-    except Exception as e:
-        import traceback
-        print(f"[GarbleCheck] Error: {e}")
-        print(traceback.format_exc())
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/fix-text-garble', methods=['POST'])
-@login_required
-def fix_text_garble():
-    """以原图为参考, 重新生成图片以修复文字乱码 (只修改文字部分, 保持构图)"""
-    data = request.json
-    image_url = data.get('image_url', '')
-    original_prompt = data.get('original_prompt', '')
-    api_url = data.get('api_url', '')  # 保留参数兼容前端, 但不再使用
-    api_key = data.get('api_key', '')
-    model = data.get('model', '')
-    img_api_url = data.get('img_api_url', '')
-    img_api_key = data.get('img_api_key', '')
-    img_model = data.get('img_model', '')
-    page_idx = data.get('page_idx')
-    seg_idx = data.get('seg_idx')
-    task_id = data.get('task_id', '')
-
-    if not image_url or not img_api_url:
-        return jsonify({'error': '缺少必要参数 (image_url / img_api_url)'}), 400
-
-    if not original_prompt:
-        return jsonify({'error': '缺少 original_prompt (分镜原文)'}), 400
-
-    try:
-        emit_progress(task_id, 10, '正在读取原图作为参考...', 'reading_image')
-
-        # 1. 用现有 helper 把原图缓存到本地并转为 data URL 格式
-        # (火山引擎 API 的 image 字段需要 data:image/...;base64,... 格式, 不能是 raw base64)
-        cache_url = cache_reference_image(image_url, "garble_original")
-        if not cache_url:
-            return jsonify({'error': f'无法缓存原图: {image_url}'}), 500
-
-        ref_image_data_url = get_cached_image_base64(cache_url)
-        if not ref_image_data_url:
-            return jsonify({'error': '读取原图 base64 失败'}), 500
-
-        # 2. 构建强化的修复 prompt: 极其严格地要求生成正确文字
-        # 把对话原文以"OCR 重写"任务的形式给出, 明确禁止乱码/错字/多余文字
-        fix_prompt = (
-            f"You are given a reference manga page. Reproduce it with the EXACT same composition, "
-            f"layout, character poses, panel arrangement, and art style.\n"
-            f"Your ONLY task is to REPLACE all speech bubble text, narration boxes, and SFX text "
-            f"with the exact Chinese text provided below. This is essentially a text-redrawing task.\n\n"
-            f"========================================\n"
-            f"TEXT TO RENDER (render in this exact order, panel by panel):\n"
-            f"========================================\n"
-            f"{original_prompt}\n"
-            f"========================================\n\n"
-            f"STRICT TEXT RENDERING RULES (MUST FOLLOW ALL):\n"
-            f"1. Copy each line of dialogue VERBATIM. Do NOT paraphrase, translate, abbreviate, or modify ANY character.\n"
-            f"2. Render every character as a clear, legible, standard Simplified Chinese character.\n"
-            f"3. ABSOLUTELY NO garbled characters, broken symbols, random ASCII, boxes (□), "
-            f"question marks (?), mojibake, or illegible glyphs.\n"
-            f"4. ABSOLUTELY NO invented, imagined, or extra text. If a bubble has no dialogue listed, leave it EMPTY.\n"
-            f"5. Do NOT mix languages. Do NOT use Japanese kana, English letters, or pinyin unless explicitly in the source.\n"
-            f"6. Place each dialogue string inside the corresponding panel's speech bubble, in reading order (top-right → bottom-left).\n"
-            f"7. Match the original text size, font weight, and bubble fit. Use bold, clean sans-serif Chinese font.\n"
-            f"8. Keep the dialogue punctuation (。！？，" ") exactly as given.\n\n"
-            f"ART RULES (DO NOT CHANGE):\n"
-            f"A. Keep the reference image's character designs, expressions, poses, clothing, and background.\n"
-            f"B. Keep the panel borders, gutters, and page layout identical.\n"
-            f"C. Keep the ink style, shading, and line weight identical.\n"
-            f"D. Do NOT redraw characters or scenes. Only redraw the text glyphs.\n\n"
-            f"FAILURE MODES TO AVOID:\n"
-            f"- Outputting garbled/unreadable text (CRITICAL FAILURE)\n"
-            f"- Changing the dialogue wording (CRITICAL FAILURE)\n"
-            f"- Adding text not in the list (CRITICAL FAILURE)\n"
-            f"- Altering the artwork (FAILURE)\n"
-        )
-
-        manga_prompt = (
-            f"ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, "
-            f"pure monochrome, grayscale only. detailed ink drawing, high contrast, dramatic shadows, "
-            f"cross-hatching. {fix_prompt}"
-        )
-
-        # 3. 调用图像 API, 传入原图作为参考 (高 reference_strength 保持构图)
-        print(f"[FixGarble] Regenerating with original image as reference (strength=0.85)...")
-        emit_progress(task_id, 30, '正在调用图像 API (以原图为参考)...', 'regenerating')
-
-        img_payload = {
-            'model': img_model or 'doubao-seedream-3-0-t2i-250415',
-            'prompt': manga_prompt,
-            'size': '2K',
-            'response_format': 'url',
-            'watermark': False,
-            'image': ref_image_data_url,        # data URL 格式的原图
-            'reference_strength': 0.85,         # 高强度保持构图, 只修改细节 (文字)
-        }
-
-        image_url_new, result_new = call_image_api(img_api_url, img_api_key, img_payload)
-        work_id, work_username = get_current_work_id()
-        local_url, error = save_image_result(image_url_new, "manga_fixed", work_id, work_username)
-
-        if local_url:
-            emit_progress(task_id, 95, '修复图片已保存, 等待用户确认...', 'saving')
-            # 保存图片映射: seg_idx 为 None 时表示整页修复, 存到 full_pages
-            if page_idx is not None and seg_idx is not None:
-                images_data = load_session_data('images') or {'images': []}
-                images_data['images'].append({
-                    'key': f'{page_idx}-{seg_idx}',
-                    'local_url': local_url,
-                    'timestamp': datetime.now().isoformat(),
-                    'fixed': True
-                })
-                save_session_data('images', images_data)
-            elif page_idx is not None:
-                # 整页修复: 保存到 full_pages (key 统一用 str, 与 generate-page 保持一致)
-                full_pages_data = load_session_data('full_pages') or {'pages': []}
-                # 先清除该 page_idx 的旧记录 (兼容 str/int 两种 key)
-                page_idx_str = str(page_idx)
-                full_pages_data['pages'] = [
-                    item for item in full_pages_data.get('pages', [])
-                    if str(item.get('key', '')) != page_idx_str
-                ]
-                full_pages_data['pages'].append({
-                    'key': page_idx_str,
-                    'local_url': local_url,
-                    'timestamp': datetime.now().isoformat(),
-                    'fixed': True
-                })
-                save_session_data('full_pages', full_pages_data)
-
-            emit_progress(task_id, 100, '修复完成, 请在前端预览确认', 'done')
-            return jsonify({
-                'success': True,
-                'image_url': local_url,
-                'analysis': {
-                    'garble_cause': '以原图为参考重新生成, 保持构图只修复文字',
-                    'fix_strategy': 'reference_strength=0.85',
-                    'description': '以原图为参考, 只修改文字部分'
-                },
-                'fixed_prompt': fix_prompt
-            })
-        else:
-            emit_progress(task_id, 0, f'修复失败: {error.get("error", "")}', 'error')
-            return jsonify({'error': error.get('error', '重新生成失败'), 'raw': result_new}), 500
-
-    except Exception as e:
-        import traceback
-        print(f"[FixGarble] Error: {e}")
-        print(traceback.format_exc())
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/accept-garble-fix', methods=['POST'])
-@login_required
-def accept_garble_fix():
-    """用户确认采用修复后的图片: 用 fixed 文件覆盖原文件 (或更新映射), 并同步会话数据
-    支持 segment 级 (seg_idx 不为 None) 和 page 级 (seg_idx 为 None) 两种模式"""
-    data = request.json
-    page_idx = data.get('page_idx')
-    seg_idx = data.get('seg_idx')
-    fixed_image_url = data.get('fixed_image_url', '')
-    original_image_url = data.get('original_image_url', '')
-
-    if not fixed_image_url or page_idx is None:
-        return jsonify({'error': '缺少必要参数'}), 400
-
-    try:
-        base_dir = os.path.dirname(__file__)
-
-        def _abs_path(url):
-            if not url or not url.startswith('/static/'):
-                return None
-            return os.path.join(base_dir, url[1:])
-
-        fixed_abs = _abs_path(fixed_image_url)
-        if not fixed_abs or not os.path.exists(fixed_abs):
-            return jsonify({'error': f'修复图片文件不存在: {fixed_image_url}'}), 404
-
-        # 策略: 优先把 fixed 文件内容写到原文件位置 (保留原 URL, 这样前端映射不变)
-        # 如果原文件不存在或不是本地文件, 则改用 fixed 的 URL 作为新 URL
-        new_url = fixed_image_url
-        original_abs = _abs_path(original_image_url)
-        if original_abs and os.path.exists(original_abs):
-            try:
-                # 备份原文件 (可选, 加 .bak 后缀)
-                bak_path = original_abs + '.bak'
-                if not os.path.exists(bak_path):
-                    shutil.copy2(original_abs, bak_path)
-                # 覆盖原文件
-                shutil.copy2(fixed_abs, original_abs)
-                new_url = original_image_url  # 原 URL 现在指向新内容
-                print(f"[AcceptGarbleFix] Overwritten: {original_abs} (backup: {bak_path})")
-            except Exception as copy_err:
-                print(f"[AcceptGarbleFix] Overwrite failed, fallback to new URL: {copy_err}")
-                new_url = fixed_image_url
-        else:
-            # 原图不是本地文件, 直接用 fixed URL
-            new_url = fixed_image_url
-
-        # 根据模式更新会话数据
-        if seg_idx is not None:
-            # segment 级: 更新 images 映射
-            key = f'{page_idx}-{seg_idx}'
-            images_data = load_session_data('images') or {'images': []}
-            images_data['images'] = [item for item in images_data['images'] if item.get('key') != key]
-            images_data['images'].append({
-                'key': key,
-                'local_url': new_url,
-                'timestamp': datetime.now().isoformat(),
-                'fixed': True,
-                'accepted': True
-            })
-            save_session_data('images', images_data)
-        else:
-            # page 级: 更新 full_pages 映射 (key 统一用 str 比较, 兼容旧数据)
-            page_idx_str = str(page_idx)
-            full_pages_data = load_session_data('full_pages') or {'pages': []}
-            full_pages_data['pages'] = [
-                item for item in full_pages_data.get('pages', [])
-                if str(item.get('key', '')) != page_idx_str
-            ]
-            full_pages_data['pages'].append({
-                'key': page_idx_str,
-                'local_url': new_url,
-                'timestamp': datetime.now().isoformat(),
-                'fixed': True,
-                'accepted': True
-            })
-            save_session_data('full_pages', full_pages_data)
-
-        # 兜底: 如果 original_image_url 在 full_pages 里 (且不是当前 page_idx), 也更新
-        full_pages_data = load_session_data('full_pages') or {'pages': []}
-        updated_fp = False
-        for item in full_pages_data.get('pages', []):
-            if item.get('local_url') == original_image_url and item.get('key') != page_idx:
-                item['local_url'] = new_url
-                item['accepted'] = True
-                updated_fp = True
-        if updated_fp:
-            save_session_data('full_pages', full_pages_data)
-
-        return jsonify({
-            'success': True,
-            'new_url': new_url,
-            'message': '原图已被修复版本覆盖' if new_url == original_image_url else '已采用修复图作为新图'
-        })
-
-    except Exception as e:
-        import traceback
-        print(f"[AcceptGarbleFix] Error: {e}")
-        print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
 
@@ -1868,6 +1477,61 @@ def download_image(url):
 
 # ============ 任务3: 自适应网格 + 4 种对话气泡 ============
 
+# 中文字体候选路径 (Windows 优先, 兼容 Linux/macOS)
+_CHINESE_FONT_CANDIDATES = [
+    'C:/Windows/Fonts/msyh.ttc',     # 微软雅黑
+    'C:/Windows/Fonts/simhei.ttf',   # 黑体
+    'C:/Windows/Fonts/simsun.ttc',   # 宋体
+    '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+    '/System/Library/Fonts/PingFang.ttc',
+    'arial.ttf',
+]
+
+
+def _get_chinese_font(size):
+    """按优先级加载中文字体, 全部失败则回退到 PIL 默认字体."""
+    for path in _CHINESE_FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def _get_font_line_height(font):
+    """获取字体行高 (字符实际高度 + 行间距).
+    修复: 使用 getbbox 而非 getmetrics, 后者会包含字符上方空白区域 (ascent 区域)
+    而 draw.text 把字符视觉顶部放在 getbbox 的 top 位置, 不是 (0,0).
+    这导致行高被高估, 文字整体下移."""
+    try:
+        l, t, r, b = font.getbbox('国')
+        return b - t + 2  # 字符实际高度 + 2px 行间距
+    except Exception:
+        pass
+    try:
+        ascent, descent = font.getmetrics()
+        return ascent + descent
+    except Exception:
+        try:
+            return font.size
+        except Exception:
+            return 16
+
+
+def _get_font_bbox_top_offset(font):
+    """获取 font.getbbox top 偏移量 (draw.text 传入 y 到字符视觉顶部的距离).
+    PIL 的 draw.text((x, y), text, font=f) 把字符视觉顶部放在 y + getbbox[1] 位置,
+    而非 y. 文字垂直居中时必须用此偏移修正 start_y."""
+    try:
+        return font.getbbox('国')[1]
+    except Exception:
+        return 0
+
+
 def compute_grid_layout(panel_count, canvas_w=None, canvas_h=None, gap=4, manual_layout=None):
     """依据 panel_count 自动选择 N×M 布局, 返回 [{x,y,w,h}] 列表 (像素坐标).
 
@@ -1918,72 +1582,91 @@ def compute_grid_layout(panel_count, canvas_w=None, canvas_h=None, gap=4, manual
 
 
 def fit_text_to_box(text, font, max_width, max_height, draw):
-    """把 text 折行 + 缩字号, 直到能装进 (max_width, max_height) 盒子. 返回 (lines, font)."""
+    """把 text 折行 + 缩字号, 直到能装进 (max_width, max_height) 盒子. 返回 (lines, font).
+    修复: 缩字号后用新字号重新测量行高和折行, 避免闭包捕获旧 font 导致字号被错误压缩."""
     if not text:
         return [], font
-    # 1) 拆行 (中英文混合按字符切, 一行尽量塞满 max_width)
-    def measure(s):
+
+    def measure(s, f):
         try:
-            l, t, r, b = draw.textbbox((0, 0), s, font=font)
-            return r - l, b - t
+            l, t, r, b = draw.textbbox((0, 0), s, font=f)
+            return r - l, _get_font_line_height(f)
         except Exception:
-            return len(s) * 8, 14
+            return len(s) * 8, _get_font_line_height(f)
 
-    chars = list(text.replace('\n', ''))
-    lines, cur = [], ''
-    for ch in chars:
-        candidate = cur + ch
-        w, _ = measure(candidate)
-        if w <= max_width - 8:  # 内边距
-            cur = candidate
-        else:
-            if cur:
-                lines.append(cur)
-            cur = ch
-    if cur:
-        lines.append(cur)
+    def wrap_with_font(f):
+        """用字号 f 折行, 返回 lines"""
+        chars = list(text.replace('\n', ''))
+        lines, cur = [], ''
+        for ch in chars:
+            candidate = cur + ch
+            w, _ = measure(candidate, f)
+            if w <= max_width - 8:  # 内边距
+                cur = candidate
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = ch
+        if cur:
+            lines.append(cur)
+        return lines
 
-    # 2) 折行后若总高超过 max_height, 缩小字号
     cur_font = font
-    while lines and cur_font:
-        try:
-            _, line_h = measure('国')
-        except Exception:
-            line_h = 14
+    # 先用原字号折行
+    lines = wrap_with_font(cur_font)
+    # 行高与 _draw_text_centered 一致 (_get_font_line_height 已含 +2 行间距)
+    while cur_font and lines:
+        line_h = _get_font_line_height(cur_font)
         total_h = line_h * len(lines)
-        if total_h <= max_height - 4:
+        if total_h <= max_height - 4 or len(lines) <= 1:
             break
-        # 缩小字号 (PIL truetype 才能取 size)
         try:
-            new_size = max(8, int(cur_font.size * 0.9))
+            new_size = max(10, int(cur_font.size * 0.9))
+            if new_size >= cur_font.size:
+                break
             cur_font = ImageFont.truetype(cur_font.path, new_size) if hasattr(cur_font, 'path') else cur_font
+            # 重新折行: 字号变小后单字宽度变小, 一行容纳更多字符
+            new_lines = wrap_with_font(cur_font)
+            if new_lines:
+                lines = new_lines
         except Exception:
             break
+
+    # 兜底: 字号已最小但仍装不下, 截断多余行防止文字溢出气泡
+    line_h = _get_font_line_height(cur_font)
+    total_h = line_h * len(lines)
+    if total_h > max_height - 4 and len(lines) > 1:
+        max_lines = max(1, int((max_height - 4) // line_h))
+        lines = lines[:max_lines]
+        # 最后一行末尾加省略号
+        if lines and lines[-1]:
+            lines[-1] = lines[-1][:-1] + '…'
 
     return lines, cur_font
 
 
 def _draw_text_centered(draw, text, font, x, y, w, h, fill='black'):
-    """在 (x,y,w,h) 矩形中居中绘制多行文字"""
+    """在 (x,y,w,h) 矩形中居中绘制多行文字.
+    修正: draw.text y 坐标到字符视觉顶部有 bbox_top 偏移, 需在 start_y 中减掉,
+    否则文字会整体下移溢出气泡底部."""
     if not text:
         return
-    # 用单行 measure 估算行高
-    try:
-        _, lh = draw.textbbox((0, 0), '国', font=font)
-        line_h = lh + 2
-    except Exception:
-        line_h = 16
     lines, fitted_font = fit_text_to_box(text, font, w, h, draw)
     if fitted_font:
         font = fitted_font
+    line_h = _get_font_line_height(font)
+    bbox_top = _get_font_bbox_top_offset(font)
     total_h = line_h * len(lines)
-    start_y = y + max(0, (h - total_h) // 2)
+    # 文字视觉顶部 = start_y - bbox_top + i * line_h
+    # 第一行视觉顶部 = start_y - bbox_top
+    # 居中: 第一行视觉中心 = y + h/2 - line_h/2 + bbox_top
+    start_y = y + max(0, (h - total_h) // 2) - bbox_top
     for i, line in enumerate(lines):
         try:
             lw, _ = draw.textbbox((0, 0), line, font=font)
         except Exception:
             lw = len(line) * 8
-        tx = x + max(0, (w - lw) // 2)
+        tx = x + max(0, (w - lw) // 2 - 524)  # 左移 524px, 文字相对于气泡左移
         draw.text((tx, start_y + i * line_h), line, fill=fill, font=font)
 
 
@@ -2100,7 +1783,8 @@ BUBBLE_DRAWERS = {
 
 
 def render_panel_bubble(draw, panel_box, seg, font, overflow=True, canvas_bounds=None):
-    """按 seg.dialogue_type 选择气泡绘制器, 自动定位到 panel 内/可越界"""
+    """按 seg.dialogue_type 选择气泡绘制器, 自动定位到 panel 内/可越界.
+    气泡尺寸根据文字长度自适应: 短对话用小气泡, 长对话自动增大."""
     dialogue = (seg.get('dialogue') or '').strip()
     if not dialogue:
         return
@@ -2110,9 +1794,20 @@ def render_panel_bubble(draw, panel_box, seg, font, overflow=True, canvas_bounds
 
     px, py, pw, ph = panel_box['x'], panel_box['y'], panel_box['w'], panel_box['h']
 
-    # 气泡尺寸: 不超过 panel 60%, 但最小能装下一行
-    bw = int(pw * 0.55)
-    bh = int(ph * 0.30)
+    # 气泡尺寸: 根据文字长度自适应
+    char_count = len(dialogue)
+    if char_count > 40:
+        # 长对话: 大气泡 (最多 panel 85% 宽, 65% 高)
+        bw = int(pw * 0.80)
+        bh = int(ph * 0.55)
+    elif char_count > 20:
+        # 中对话: 中等气泡
+        bw = int(pw * 0.70)
+        bh = int(ph * 0.42)
+    else:
+        # 短对话: 小气泡
+        bw = int(pw * 0.55)
+        bh = int(ph * 0.30)
     # 位置: panel 右下角
     bx = px + pw - bw - 8
     by = py + ph - bh - 8
@@ -2127,6 +1822,71 @@ def render_panel_bubble(draw, panel_box, seg, font, overflow=True, canvas_bounds
         by = max(py + 4, min(by, py + ph - bh - 4))
 
     BUBBLE_DRAWERS[dtype](draw, bx, by, bw, bh, dialogue, font, overflow=overflow, canvas_bounds=canvas_bounds)
+
+
+def _local_image_abs_path(local_url):
+    """把 /static/xxx URL 转成本地绝对路径; 非 /static/ 前缀返回 None"""
+    if not local_url or not local_url.startswith('/static/'):
+        return None
+    return os.path.join(os.path.dirname(__file__), local_url[1:])
+
+
+def _overlay_bubble_on_segment(local_url, seg_info):
+    """在单张分镜图上用 PIL 叠加对话气泡, 覆盖原文件.
+    seg_info: {'dialogue': str, 'dialogue_type': str}
+    无 dialogue 直接返回."""
+    if not seg_info or not (seg_info.get('dialogue') or '').strip():
+        return
+    abs_path = _local_image_abs_path(local_url)
+    if not abs_path or not os.path.exists(abs_path):
+        print(f"[PIL-Overlay] image not found: {local_url}")
+        return
+    try:
+        with Image.open(abs_path) as img:
+            img = img.convert('RGB')
+            W, H = img.size
+            font = _get_chinese_font(max(16, int(H * 0.04)))
+            draw = ImageDraw.Draw(img)
+            panel_box = {'x': 0, 'y': 0, 'w': W, 'h': H}
+            render_panel_bubble(
+                draw, panel_box, seg_info, font,
+                overflow=True, canvas_bounds=(0, 0, W, H)
+            )
+            img.save(abs_path)
+            print(f"[PIL-Overlay] segment bubble overlaid: {abs_path}")
+    except Exception as e:
+        print(f"[PIL-Overlay] failed for {local_url}: {e}")
+
+
+def _overlay_bubbles_on_page(local_url, segments):
+    """在整页图上按网格用 PIL 叠加每个 panel 的对话气泡, 覆盖原文件.
+    segments: list[{'dialogue': str, 'dialogue_type': str, ...}]"""
+    if not segments:
+        return
+    abs_path = _local_image_abs_path(local_url)
+    if not abs_path or not os.path.exists(abs_path):
+        print(f"[PIL-Overlay] page image not found: {local_url}")
+        return
+    try:
+        with Image.open(abs_path) as img:
+            img = img.convert('RGB')
+            W, H = img.size
+            font = _get_chinese_font(max(14, int(H * 0.025)))
+            draw = ImageDraw.Draw(img)
+            layout = compute_grid_layout(len(segments), canvas_w=W, canvas_h=H, gap=4)
+            for i, seg in enumerate(segments):
+                if i >= len(layout):
+                    break
+                if not (seg.get('dialogue') or '').strip():
+                    continue
+                render_panel_bubble(
+                    draw, layout[i], seg, font,
+                    overflow=True, canvas_bounds=(0, 0, W, H)
+                )
+            img.save(abs_path)
+            print(f"[PIL-Overlay] page bubbles overlaid ({len(segments)} panels): {abs_path}")
+    except Exception as e:
+        print(f"[PIL-Overlay] failed for page {local_url}: {e}")
 
 
 @app.route('/api/combine-page', methods=['POST'])
@@ -2182,12 +1942,7 @@ def combine_page():
         combined = Image.new('RGB', (canvas_width, canvas_height), 'white')
         draw = ImageDraw.Draw(combined)
 
-        try:
-            font = ImageFont.truetype('arial.ttf', 16)
-        except Exception:
-            font = ImageFont.load_default()
-
-        canvas_bounds = (0, title_h, canvas_width, canvas_height - title_h)
+        font = _get_chinese_font(16)
 
         for idx, (img, seg) in enumerate(images):
             box = layout[idx]
@@ -2197,20 +1952,13 @@ def combine_page():
             # panel 边框
             draw.rectangle([box['x'], box['y'], box['x'] + box['w'], box['y'] + box['h']], outline='black', width=3)
             # panel 编号
-            try:
-                badge_font = ImageFont.truetype('arial.ttf', 18)
-            except Exception:
-                badge_font = font
+            badge_font = _get_chinese_font(18)
             draw.text((box['x'] + 6, box['y'] + 6), str(idx + 1), fill='yellow', font=badge_font)
-            # 气泡
-            render_panel_bubble(draw, box, seg, font, overflow=allow_overflow, canvas_bounds=canvas_bounds)
+            # 注: 分镜图已在 /api/generate-image 阶段叠加过气泡, 这里不再重复画
 
         # 页码/标题
         title_text = f"第 {page_num} 页"
-        try:
-            title_font = ImageFont.truetype('arial.ttf', 24)
-        except Exception:
-            title_font = font
+        title_font = _get_chinese_font(24)
         draw.text((20, 12), title_text, fill='black', font=title_font)
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -2269,25 +2017,14 @@ def generate_page():
 
     try:
         segment_descriptions = []
-        # 收集所有有对话的分镜, 单独构建对话渲染指令 (强化)
-        dialogue_lines = []
         # 任务2: 逐 panel 用结构化字段升级 style_prompt, 拼入 prompt
         for idx, seg in enumerate(segments):
             # 调用 upgrade_segment_prompt 合并 style_prompt + 镜头语言 tags
             upgraded_style = upgrade_segment_prompt(seg)
             base_style = upgraded_style or seg.get('style_prompt', '') or 'black and white manga style'
-            # 移除 base_style 中可能残留的 'no text overlay' (老数据兼容)
-            base_style = base_style.replace('no text overlay', '').replace('no text', '').strip().rstrip(',')
             seg_style_tags = base_style
 
             desc = f"Panel {idx+1}: {seg.get('scene_description', '')}"
-            seg_dialogue = (seg.get('dialogue') or '').strip()
-            if seg_dialogue:
-                # 把每个分镜的对话单独收集, 后面统一渲染指令
-                for line in seg_dialogue.split('\n'):
-                    line = line.strip()
-                    if line:
-                        dialogue_lines.append((idx + 1, line))
             # 把升级后的 style_prompt 注入到每个 panel 描述
             desc += f" [style: {seg_style_tags}]"
             segment_descriptions.append(desc)
@@ -2296,13 +2033,23 @@ def generate_page():
         if style_tags:
             style_art = f"{style_tags}, {style_art}"
 
-        # 移除 'no text overlay', 否则模型会不渲染对话文字
-        page_prompt = f"""ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga comic page, pure monochrome, grayscale only. {len(segments)} panels arranged in a grid layout.
+        # 显式指定网格布局, 让 API 按已知 RxC 出图 (后续 PIL 按同样的网格叠气泡)
+        panel_count = len(segments)
+        rows_map = {1: 1, 2: 1, 3: 1, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 3, 12: 3, 13: 4, 14: 4, 15: 4, 16: 4}
+        cols_map = {1: 1, 2: 2, 3: 3, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4, 9: 3, 10: 4, 11: 4, 12: 4, 13: 4, 14: 4, 15: 4, 16: 4}
+        rows = rows_map.get(panel_count, max(1, (panel_count + 3) // 4))
+        cols = cols_map.get(panel_count, min(4, (panel_count + rows - 1) // rows))
+
+        # 对话文本不再交给图像 API 渲染, 由后端 PIL 叠加 (避免乱码)
+        # 这里明确要求图像 API 不画任何文字/气泡, 并按指定网格出图
+        page_prompt = f"""ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga comic page, pure monochrome, grayscale only. Arrange exactly {panel_count} panels in a {rows}x{cols} grid, equal-sized, top-left to bottom-right reading order, with thin black gutters between panels.
 
 Panels:
 {chr(10).join(segment_descriptions)}
 
-Art style: {style_art}"""
+Art style: {style_art}
+
+NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text overlay. Leave all panels completely free of any text or speech bubbles."""
 
         if page_num and page_num > 1:
             page_prompt += f"\n\nThis is PAGE {page_num} of the comic. It MUST maintain the exact same drawing style, visual continuity, character proportions, and shading technique as the previous page (Page {page_num-1}). The story progresses from the previous page - continue the visual narrative seamlessly."
@@ -2318,36 +2065,6 @@ Art style: {style_art}"""
 
         if previous_page_image:
             page_prompt += f"\n\n=== PREVIOUS PAGE REFERENCE ===\nA reference image of the previous page (Page {page_num-1}) is provided. This page MUST have exactly the same art style, line quality, shading technique, and visual tone as the reference. Characters should look identical to how they appear in the previous page."
-
-        # === 对话渲染指令 (CRITICAL) ===
-        # 把每个分镜的对话原文明确列出, 强制模型渲染清晰可读的中文对话气泡
-        # 避免 'no text overlay' 导致模型不渲染对话, 也避免随机乱码
-        if dialogue_lines:
-            dialogue_list_str = "\n".join(
-                f"  Panel {p}: \"{t}\"" for p, t in dialogue_lines
-            )
-            page_prompt += f"""
-
-=== DIALOGUE TO RENDER (CRITICAL - MUST FOLLOW) ===
-Render each of these Chinese dialogues VERBATIM inside the corresponding panel's speech bubble:
-{dialogue_list_str}
-
-STRICT TEXT RENDERING RULES:
-1. Copy each line of dialogue VERBATIM. Do NOT paraphrase, translate, abbreviate, or modify ANY character.
-2. Render every character as a clear, legible, standard Simplified Chinese character.
-3. ABSOLUTELY NO garbled characters, broken symbols, random ASCII, boxes (□), question marks (?), mojibake, or illegible glyphs.
-4. ABSOLUTELY NO invented, imagined, or extra text. If a panel has no dialogue listed, leave its bubble EMPTY or omit the bubble.
-5. Do NOT mix languages. Do NOT use Japanese kana, English letters, or pinyin unless explicitly in the source.
-6. Place each dialogue string inside the corresponding panel's speech bubble, in reading order.
-7. Use bold, clean sans-serif Chinese font. Match the original text size and bubble fit.
-8. Keep the dialogue punctuation (。！？，" ") exactly as given.
-
-CRITICAL FAILURE MODES:
-- Outputting garbled/unreadable text (CRITICAL FAILURE)
-- Changing the dialogue wording (CRITICAL FAILURE)
-- Adding text not in the list (CRITICAL FAILURE)
-- Omitting dialogue that IS in the list (CRITICAL FAILURE)
-- Altering the artwork (FAILURE)"""
 
         # 准备参考图片（缓存到本地后转base64）
         ref_images = prepare_ref_images(character_references, previous_page_image)
@@ -2379,6 +2096,8 @@ CRITICAL FAILURE MODES:
         local_url, error = save_image_result(image_url, f"comic_page_{page_num}_full", work_id, work_username)
 
         if local_url:
+            # PIL 叠加每个 panel 的对话气泡 (替代图像 API 渲染, 避免乱码)
+            _overlay_bubbles_on_page(local_url, segments)
             # 持久化整页图片映射
             if page_idx is not None:
                 fp_data = load_session_data('full_pages') or {'pages': []}
