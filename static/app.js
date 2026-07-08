@@ -1500,11 +1500,15 @@ function renderSegments() {
                                 rows="1">${seg.dialogue || ''}</textarea>
                             <select onchange="updateSegment(${pageIdx}, ${segIdx}, 'dialogue_type', this.value)"
                                 class="mt-1 text-xs border border-gray-300 focus:border-black outline-none p-1 bg-white"
-                                title="任务3: 选择对话气泡形状">
-                                <option value="dialogue" ${(!seg.dialogue_type || seg.dialogue_type==='dialogue')?'selected':''}>💬 对话气泡 (圆角矩形+尾巴)</option>
+                                title="气泡形状(LLM 分镜规划时会主动选, 可手动覆盖)">
+                                <option value="dialogue" ${(!seg.dialogue_type || seg.dialogue_type==='dialogue')?'selected':''}>💬 对话气泡 (圆角矩形)</option>
                                 <option value="thought" ${seg.dialogue_type==='thought'?'selected':''}>💭 心理活动 (云形)</option>
                                 <option value="shout" ${seg.dialogue_type==='shout'?'selected':''}>💥 大喊 (锯齿/爆炸)</option>
+                                <option value="whisper" ${seg.dialogue_type==='whisper'?'selected':''}>🤫 耳语 (虚线圆角)</option>
+                                <option value="burst" ${seg.dialogue_type==='burst'?'selected':''}>⚡ 爆发 (辐射射线)</option>
                                 <option value="narration" ${seg.dialogue_type==='narration'?'selected':''}>📜 旁白叙述 (矩形)</option>
+                                <option value="box" ${seg.dialogue_type==='box'?'selected':''}>▢ 方框 (无尾矩形)</option>
+                                <option value="caption" ${seg.dialogue_type==='caption'?'selected':''}>🔊 拟声词 (黑底白字)</option>
                             </select>
                         </div>
                         <details class="mb-2" ${seg.camera_angle || seg.composition || seg.mood || seg.shot_scale || seg.lighting || seg.of_type ? 'open' : ''}>

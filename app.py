@@ -719,9 +719,18 @@ def segment_novel():
 小说：
 {text[:4000]}
 
-每个分镜必须输出以下字段，camera_angle/composition/mood/shot_scale/lighting/of_type 必须从给定枚举中选一个（最贴近情节的）：
+每个分镜必须输出以下字段，camera_angle/composition/mood/shot_scale/lighting/of_type 必须从给定枚举中选一个（最贴近情节的）；dialogue_type 也必须从给定枚举中选一个（决定对话气泡形状，是漫画分镜师的"语气设计"）：
 - scene_description: 简短场景描述（中文，20字内）
 - dialogue: 角色对白或旁白。**漫画的灵魂是对白, 至少 60% 的分镜都要有实际对白, 写一句就行, 不要空着**
+- dialogue_type: 气泡形状(语气) — dialogue / thought / shout / whisper / burst / narration / box / caption
+  - dialogue: 普通角色对白 (默认, 80% 以上)
+  - thought: 心理活动/内心独白 (引出"他想…""心里…""她暗忖…"这种)
+  - shout: 大喊/尖叫/强烈情绪爆发 (出现"啊——!""不!!""住手!"等激烈词句)
+  - whisper: 耳语/低语/秘密 (出现"…别出声""小声点""悄悄地"这种)
+  - burst: 外部声效/拟声词 (整段是音效, 如"砰!""咔嚓!""BOOM!", 几乎不含主语动词)
+  - narration: 第三人称叙述/旁白 (无人物说话, 是叙述者在描述场景/时间/心理状态)
+  - box: 普通矩形气泡 (无尖尾, 想区别于 dialogue 的圆角矩形时)
+  - caption: 拟声词/音效 (黑底白字, 与 burst 视觉差异, 二选一)
 - shot_type: 景别 (远景/全景/中景/近景/特写)
 - camera_angle: 视角 — 俯视 / 仰视 / 平视 / 斜视 / 主观视角
 - composition: 构图 — 三分法 / 对称 / 中心对称 / 框架式 / 引导线
@@ -738,7 +747,7 @@ def segment_novel():
 
 严格JSON格式（不要加注释、不要解释）：
 {{
-  "pages":[{{"page_number":1,"segments":[{{"segment_number":1,"scene_description":"<此处填实际场景描述>","dialogue":"<此处填实际对白, 若该格无对白则填空字符串>","shot_type":"特写","camera_angle":"平视","composition":"三分法","mood":"紧张","shot_scale":"特写","lighting":"硬光","of_type":"静态"}}]}}],
+  "pages":[{{"page_number":1,"segments":[{{"segment_number":1,"scene_description":"<此处填实际场景描述>","dialogue":"<此处填实际对白, 若该格无对白则填空字符串>","dialogue_type":"<从枚举中选一个>","shot_type":"特写","camera_angle":"平视","composition":"三分法","mood":"紧张","shot_scale":"特写","lighting":"硬光","of_type":"静态"}}]}}],
   "characters":[
     {{"name":"角色A","description":"黑发少年，黑色风衣","personality":"冷静沉着"}},
     {{"name":"角色B","description":"银发少女，白色连衣裙","personality":"活泼开朗"}}
@@ -748,8 +757,9 @@ def segment_novel():
 ⚠️ 重要提醒：
 1. dialogue 字段必须填入小说中**实际的对白文字**(中文), 千万不要照抄示例里的"..."或"<...>"; 无对白的分镜才填 ""
 2. scene_description 同理, 必须是该分镜自己的中文描述(20字内)
-3. 每个分镜都要独立思考: 这个镜头里人物在说话吗? 在说什么?
+3. 每个分镜都要独立思考: 这个镜头里人物在说话吗? 在说什么? 语气如何? 该用什么形状的气泡?
 4. 漫画分镜的对话是灵魂, 占比 ≥ 60% 的分镜都应带有 dialogue
+5. dialogue_type 选择要点: 默认 dialogue; 内心独白/思考用 thought; 大喊大叫用 shout; 耳语低调用 whisper; 整段是拟声词/音效用 burst 或 caption; 第三人称叙述用 narration; 其余情况选 box。**请根据小说原文的语气和上下文, 给每个分镜一个最贴合的 dialogue_type, 体现"语气设计"**
 """
 
     try:
@@ -854,6 +864,12 @@ def segment_novel():
                                   ('shot_scale', ''), ('lighting', ''), ('of_type', '静态')):
                         if k not in seg or seg.get(k) is None:
                             seg[k] = dv
+                    # 规范化 dialogue_type: LLM 漏填/填错/旧数据 → 启发式推断 (LLM 主动规划 + 启发式兜底)
+                    seg['dialogue_type'] = _normalize_dialogue_type(
+                        seg.get('dialogue_type'),
+                        seg.get('dialogue', ''),
+                        seg.get('scene_description', ''),
+                    )
             # 提取并保存角色
             chars = parsed.get('characters') or []
             if isinstance(chars, list):
@@ -1693,16 +1709,13 @@ def _bubble_speech_tail(draw, x, y, w, h, direction='bl', size=20):
 
 
 def draw_dialogue_bubble(draw, x, y, w, h, text, font, overflow=True, canvas_bounds=None):
-    """普通对话气泡: 圆角矩形 + 尾巴"""
-    # 越界裁剪: 暂时不裁剪 (overflow=True), 但留出尖角位置
+    """普通对话气泡: 圆角矩形 (无尾巴)"""
     if not overflow and canvas_bounds:
         cb_x, cb_y, cb_w, cb_h = canvas_bounds
         x = max(cb_x, min(x, cb_x + cb_w - w))
         y = max(cb_y, min(y, cb_y + cb_h - h))
-    # 白底黑边圆角矩形
+    # 白底黑边圆角矩形 (无尾巴, 更简洁)
     _draw_rounded_rect(draw, [x, y, x + w, y + h], radius=10, outline='black', fill='white', width=2)
-    # 尾巴 (指向下方)
-    _bubble_speech_tail(draw, x, y, w, h, direction='bl', size=int(h * 0.3))
     # 文字居中
     _draw_text_centered(draw, text, font, x + 4, y + 2, w - 8, h - 4)
 
@@ -1773,13 +1786,246 @@ def draw_narration_bubble(draw, x, y, w, h, text, font, overflow=True, canvas_bo
     _draw_text_centered(draw, text, font, x + 4, y + 2, w - 8, h - 4, fill='#222222')
 
 
-# 气泡分发表
+def draw_whisper_bubble(draw, x, y, w, h, text, font, overflow=True, canvas_bounds=None):
+    """耳语/低语气泡: 虚线边圆角矩形 + 小尾巴 (给人安静、秘密的感觉)"""
+    if not overflow and canvas_bounds:
+        cb_x, cb_y, cb_w, cb_h = canvas_bounds
+        x = max(cb_x, min(x, cb_x + cb_w - w))
+        y = max(cb_y, min(y, cb_y + cb_h - h))
+    # 白底 + 虚线黑边 (1px 短虚线)
+    _draw_rounded_rect(draw, [x, y, x + w, y + h], radius=10, outline='black', fill='white', width=1)
+    # 在原矩形上覆盖虚线效果 (PIL 旧版 rounded_rectangle 无 dash 支持, 用横线扫描模拟)
+    try:
+        dash_gap = 6
+        for ty in range(y, y + h, dash_gap):
+            draw.line([(x + 2, ty), (x + w - 2, ty)], fill='white', width=1)
+            draw.line([(x + 2, ty + 3), (x + w - 2, ty + 3)], fill='white', width=1)
+    except Exception:
+        pass
+    # 小尾巴 (比 dialogue 小, 暗示安静)
+    _bubble_speech_tail(draw, x, y, w, h, direction='bl', size=int(h * 0.2))
+    _draw_text_centered(draw, text, font, x + 4, y + 2, w - 8, h - 4)
+
+
+def draw_box_bubble(draw, x, y, w, h, text, font, overflow=True, canvas_bounds=None):
+    """白底黑实线矩形气泡 (无尾巴, 像漫画对话框的方形版本, 区别于 narration 的米黄底)"""
+    if not overflow and canvas_bounds:
+        cb_x, cb_y, cb_w, cb_h = canvas_bounds
+        x = max(cb_x, min(x, cb_x + cb_w - w))
+        y = max(cb_y, min(y, cb_y + cb_h - h))
+    draw.rectangle([x, y, x + w, y + h], fill='white', outline='black', width=2)
+    _draw_text_centered(draw, text, font, x + 4, y + 2, w - 8, h - 4)
+
+
+def draw_burst_bubble(draw, x, y, w, h, text, font, overflow=True, canvas_bounds=None):
+    """爆发/音爆气泡: 辐射线条 (短促有力的射线, 用于拟声词/强烈冲击).
+    与 shout (锯齿) 区别: 锯齿=人物喊叫, 爆发=外部声效/撞击."""
+    # 主体: 椭圆 (尖刺辐射的载体)
+    draw.ellipse([x, y, x + w, y + h], fill='white', outline='black', width=2)
+    # 辐射短线: 从椭圆边缘向外发散, 长短交替 (8 长 + 8 短)
+    import math
+    cx, cy = x + w / 2.0, y + h / 2.0
+    rx, ry = w / 2.0, h / 2.0
+    for i in range(16):
+        theta = 2 * math.pi * i / 16
+        is_long = (i % 2 == 0)
+        extend = 0.45 if is_long else 0.22
+        # 内端贴椭圆边缘, 外端向外延伸
+        ix = cx + rx * math.cos(theta)
+        iy = cy + ry * math.sin(theta)
+        ex = cx + (rx + rx * extend) * math.cos(theta)
+        ey = cy + (ry + ry * extend) * math.sin(theta)
+        draw.line([(ix, iy), (ex, ey)], fill='black', width=2)
+    _draw_text_centered(draw, text, font, x + 6, y + 4, w - 12, h - 8)
+
+
+def draw_caption_bubble(draw, x, y, w, h, text, font, overflow=True, canvas_bounds=None):
+    """拟声词/音效气泡: 黑底白字 (像漫画里 "BOOM!" "咔嚓!" 这种, 矩形无尾巴)"""
+    if not overflow and canvas_bounds:
+        cb_x, cb_y, cb_w, cb_h = canvas_bounds
+        x = max(cb_x, min(x, cb_x + cb_w - w))
+        y = max(cb_y, min(y, cb_y + cb_h - h))
+    draw.rectangle([x, y, x + w, y + h], fill='black', outline='black', width=1)
+    _draw_text_centered(draw, text, font, x + 4, y + 2, w - 8, h - 4, fill='white')
+
+
+# 气泡分发表 (分镜规划阶段可由 LLM 主动选, 也可由用户手动改, 还可由启发式推断)
 BUBBLE_DRAWERS = {
-    'dialogue': draw_dialogue_bubble,
-    'thought': draw_thought_bubble,
-    'shout': draw_shout_bubble,
-    'narration': draw_narration_bubble,
+    'dialogue': draw_dialogue_bubble,    # 普通对话: 圆角矩形 (无尾)
+    'thought': draw_thought_bubble,      # 心理活动: 云形+小圆尾
+    'shout': draw_shout_bubble,          # 大喊/喊叫: 锯齿/爆炸
+    'whisper': draw_whisper_bubble,      # 耳语/低语: 虚线圆角+小尾
+    'burst': draw_burst_bubble,          # 爆发/音爆/拟声: 辐射射线
+    'narration': draw_narration_bubble,  # 旁白叙述: 米黄底灰框矩形
+    'box': draw_box_bubble,              # 普通实线矩形气泡 (无尾)
+    'caption': draw_caption_bubble,      # 拟声词音效: 黑底白字矩形
 }
+
+
+# 气泡类型说明 (供 LLM 规划时参考 + 前端下拉框展示)
+DIALOGUE_TYPE_CATALOG = {
+    'dialogue':  {'label': '💬 对话',     'desc': '普通对话气泡 (圆角矩形, 无尾巴)'},
+    'thought':   {'label': '💭 心理',     'desc': '心理活动/内心独白 (云形)'},
+    'shout':     {'label': '💥 喊叫',     'desc': '大喊/尖叫/强烈情绪 (锯齿爆炸)'},
+    'whisper':   {'label': '🤫 耳语',     'desc': '低语/悄悄话/秘密 (虚线圆角)'},
+    'burst':     {'label': '⚡ 爆发',     'desc': '音爆/撞击/外部声效 (辐射射线)'},
+    'narration': {'label': '📜 旁白',     'desc': '第三人称叙述 (米黄底矩形)'},
+    'box':       {'label': '▢ 方框',     'desc': '普通实线矩形气泡 (无尾)'},
+    'caption':   {'label': '🔊 拟声词',   'desc': '音效/状声词 (黑底白字)'},
+}
+
+
+# 启发式推断 dialogue_type 的正则触发词
+# 优先级: caption (短纯拟声 ≤ 6 字) > burst (纯拟声/音爆) > shout (强情绪) > thought (心理) > whisper (低语) > narration (叙述)
+
+# 纯拟声字符集 (漫画里典型的 "BOOM/咔嚓/嗖" 等, 不含人类感叹词)
+_ONOMA_CHARS = set('嘭砰咚咔嚓嘶嗖乒乓啪嗡哐呜嘎吱咣轰噼啪')
+
+_DT_TRIGGERS = {
+    'burst': [
+        # 长拟声/音爆 (多字音爆或重复)
+        r'^[!?！？\s…·\-\.]*(?:[嘭砰咚咔嚓嘶嗖乒乓啪嗡哐呜嘎吱咣轰噼啪]+[!！？\s]*){2,}$',
+        r'^(?:[A-Z]{2,}[!?!\s]*){2,}$',
+    ],
+    'shout': [
+        r'[!！]{2,}',
+        r'[?？]{2,}',
+        r'(?:不|别|住手|救命|杀|死|滚|混蛋|该死|去死|滚开)[!！]*$',
+        # 短促感叹词收尾 (啊! 哎! 哇! 这种人类感叹)
+        r'^[啊哎哦呵哈嘿哼哇哟嚯呐嗯]+[!?！？?]+$',
+        # 重复人类感叹词 (啊啊啊 / 哇哇哇 / 啊啊啊啊 这种持续喊叫)
+        r'^[啊哎哦呵哈嘿哼哇哟嚯呐嗯]{2,}$',
+    ],
+    'whisper': [
+        r'…+',
+        r'(?:悄悄地|轻声|低声|小声|别出声|别让|偷偷|暗[自中悄]|悄[悄声]|嘘|耳语)',
+    ],
+    'thought': [
+        r'(?:他想|她想|心里想|心里|暗想|暗忖|寻思|思忖|思量|琢磨|心中|脑海里|脑中|自语|独白)',
+        r'(?:[他她它][的心脑中]?[想忖思念叨合计琢磨])',
+    ],
+    'narration': [
+        r'^(?:当时|那天|此刻|后来|不久|次日|黎明|黄昏|夜里|清晨)',
+        r'(?:他|她)[一-龥]{0,3}(?:走|站|坐|看|望|抬|低|转|回)[着了过]',
+    ],
+}
+
+
+def _is_pure_onomatopoeia(text):
+    """判断是否纯拟声: 字符集限定在拟声字 + 标点 + 英文大写."""
+    if not text:
+        return False
+    punct = set('!！?？…·-.。,， \t\n')
+    for ch in text:
+        if ch in _ONOMA_CHARS or ch in punct:
+            continue
+        if ch.isascii() and ch.isalpha() and ch.isupper():
+            continue
+        return False
+    return True
+
+
+def _has_repeated_phoneme(text):
+    """检查是否有拟声字符连续重复 2+ 次 (砰砰砰 / 咔嚓咔嚓 / BOOMBOOM 这种, 暗示强冲击)."""
+    if not text:
+        return False
+    # 拟声单字重复: 砰砰砰, 嘭嘭
+    for ch in _ONOMA_CHARS:
+        if ch * 2 in text:
+            return True
+    # 拟声 2-3 字单元重复: 咔嚓咔嚓, 乒乓乒乓, 噼啪噼啪
+    for unit_len in (2, 3):
+        for i in range(len(text) - unit_len * 2 + 1):
+            unit = text[i:i + unit_len]
+            if all(c in _ONOMA_CHARS for c in unit) and unit * 2 in text:
+                return True
+    # 大写英文 6+ 连续视为重复 (BOOMBOOM = 8 字母; 单词 BOOM = 4 不算)
+    upper_run = ''
+    for ch in text:
+        if ch.isascii() and ch.isalpha() and ch.isupper():
+            upper_run += ch
+        else:
+            if len(upper_run) >= 6:
+                return True
+            upper_run = ''
+    if len(upper_run) >= 6:
+        return True
+    return False
+
+
+def _infer_dialogue_type(dialogue, scene_description=''):
+    """对一段对话做启发式推断, 返回 dialogue_type 字符串 (BUBBLE_DRAWERS 中的 key).
+    兜底返回 'dialogue'.  用于 LLM 漏填/旧数据/用户清空的情况."""
+    import re
+    text = (dialogue or '').strip()
+    if not text:
+        return 'dialogue'  # 空对话不画气泡, 但仍返回默认值兜底
+
+    # 0. 先判拟声 (字符集是纯拟声/标点/大写英文)
+    if _is_pure_onomatopoeia(text):
+        # 拟声内部细分: 重复音 (砰砰砰 / BOOMBOOM) → burst; 否则短=caption / 长=burst
+        if _has_repeated_phoneme(text) or len(text) > 6:
+            return 'burst'
+        return 'caption'
+
+    # 1. burst: 长拟声/重复音爆
+    for pat in _DT_TRIGGERS['burst']:
+        if re.search(pat, text):
+            return 'burst'
+
+    # 2. shout: 多感叹号 / 强烈情绪 / 短促感叹词收尾
+    for pat in _DT_TRIGGERS['shout']:
+        if re.search(pat, text):
+            return 'shout'
+
+    # 3. thought: 含心理活动词
+    for pat in _DT_TRIGGERS['thought']:
+        if re.search(pat, text):
+            return 'thought'
+
+    # 4. whisper: 省略号 / 低声词
+    for pat in _DT_TRIGGERS['whisper']:
+        if re.search(pat, text):
+            return 'whisper'
+
+    # 5. narration: 配合 scene_description 暗示叙述场景, 且对话无强烈语气标点
+    desc = (scene_description or '').strip()
+    if desc and not re.search(r'[!！?？]', text):
+        for pat in _DT_TRIGGERS['narration']:
+            if re.search(pat, desc):
+                return 'narration'
+
+    return 'dialogue'
+
+
+def _normalize_dialogue_type(raw, dialogue='', scene_description=''):
+    """规范化 LLM 给出的 dialogue_type: 未知值 → 启发式推断 → 兜底 dialogue."""
+    if not raw:
+        return _infer_dialogue_type(dialogue, scene_description)
+    val = str(raw).strip().lower()
+    if val in BUBBLE_DRAWERS:
+        return val
+    # 模糊匹配: speech/talk/说话 → dialogue; inner/mind/心理 → thought; 等等
+    aliases = {
+        'speech': 'dialogue', 'talk': 'dialogue', 'say': 'dialogue', 'line': 'dialogue',
+        '说话': 'dialogue', '对话': 'dialogue', '普通': 'dialogue',
+        'inner': 'thought', 'mind': 'thought', 'think': 'thought',
+        '心理': 'thought', '思考': 'thought', '独白': 'thought', '内心': 'thought',
+        'yell': 'shout', 'scream': 'shout',
+        '喊': 'shout', '叫': 'shout', '喊叫': 'shout', '吼': 'shout', '尖叫': 'shout',
+        'quiet': 'whisper', 'murmur': 'whisper',
+        '耳语': 'whisper', '低语': 'whisper', '悄悄': 'whisper', '小声': 'whisper',
+        'sfx': 'burst', 'sound': 'burst', 'impact': 'burst', 'sound_effect': 'burst',
+        '音爆': 'burst', '撞击': 'burst', '冲击': 'burst', '拟声': 'burst',
+        'narrate': 'narration', 'narrator': 'narration',
+        '旁白': 'narration', '叙述': 'narration',
+        'rect': 'box', 'square': 'box', '方框': 'box',
+        'onomatopoeia': 'caption', 'onomatopoeic': 'caption',
+        '音效': 'caption',
+    }
+    if val in aliases:
+        return aliases[val]
+    return _infer_dialogue_type(dialogue, scene_description)
 
 
 def render_panel_bubble(draw, panel_box, seg, font, overflow=True, canvas_bounds=None):

@@ -55,14 +55,23 @@
 - **越界气泡** — 对话气泡可超出分镜框,布局更灵活
 - **每页分镜数 LLM 自由控制** — 设为 0 时由 LLM 根据情节节奏自由决定每页分镜数 (2-8 格)
 
-### 🖼️ 4 种对话气泡类型
+### 🖼️ 8 种对话气泡类型 (LLM 分镜规划自动选型)
 
-| 类型 | 样式 | 用途 |
-|------|------|------|
-| `dialogue` | 圆角矩形 + 尖角尾巴 | 普通对话 |
-| `thought` | 云形气泡 + 小圆尾巴 | 心理活动、思考 |
-| `shout` | 爆炸/锯齿形 | 大喊、喊叫 |
-| `narration` | 朴素矩形(米黄底灰框) | 旁白、叙述 |
+| 类型 | 样式 | 用途 | 触发场景 |
+|------|------|------|----------|
+| `dialogue` | 圆角矩形 (无尾) | 普通对话 | 默认 (80% 以上) |
+| `thought` | 云形气泡 + 小圆尾巴 | 心理活动、思考 | "他想…""心里…" |
+| `shout` | 爆炸/锯齿形 | 大喊、喊叫 | "啊——!""住手!" |
+| `whisper` | 虚线圆角矩形 + 小尾 | 耳语、低语、秘密 | "…别出声""小声点" |
+| `burst` | 椭圆 + 辐射射线 | 音爆、撞击、强烈声效 | "BOOM!""砰砰砰!" |
+| `narration` | 朴素矩形(米黄底灰框) | 旁白、第三人称叙述 | "当时…""他走出…" |
+| `box` | 白底黑实线矩形(无尾) | 普通矩形气泡 | 想区别于圆角 dialogue 时 |
+| `caption` | 黑底白字矩形 | 拟声词/音效文字 | "嘶""砰"这种极短音 |
+
+**自动选型机制**:
+- **LLM 主动规划** — 智能分镜阶段 prompt 现在要求 LLM 为每个分镜选一个最贴合的 `dialogue_type` (如大喊 → shout, 心理活动 → thought)
+- **启发式兜底** — LLM 漏填/填错/旧作品数据时, 后端会按正则规则自动推断(纯拟声 → caption/burst, 省略号 → whisper, 心理活动词 → thought, 多感叹号 → shout)
+- **手动覆盖** — 分镜管理 Tab 中可下拉切换 8 种气泡形状, 实时生效
 
 ---
 
@@ -249,6 +258,7 @@ LLM 输出的结构化镜头语言字段会自动转换为英文 tag 注入图�
 | `shot_scale` | 大远景/远景/全景/中景/近景/特写/大特写 | 景别控制 |
 | `lighting` | 硬光/背光/顶光/荧光灯/光斑/柔光/侧光/剪影 | 光照控制 |
 | `of_type` | 静态/动态/回忆/梦境 | 场景类型 |
+| `dialogue_type` | dialogue/thought/shout/whisper/burst/narration/box/caption | **气泡形状自动规划** (8 种) |
 
 **示例输出**:
 ```json
@@ -258,13 +268,18 @@ LLM 输出的结构化镜头语言字段会自动转换为英文 tag 注入图�
   "mood": "紧张",
   "shot_scale": "特写",
   "lighting": "硬光",
-  "of_type": "动态"
+  "of_type": "动态",
+  "dialogue_type": "shout"
 }
 ```
 ↓
 ```
 extreme close-up shot, low angle view, symmetric composition, tense atmosphere, hard lighting, dynamic scene
 ```
+
+### 💬 对话气泡形状规划 (dialogue_type)
+
+`dialogue_type` 是分镜规划阶段的"语气设计"字段 — LLM 会根据小说原文的语气自动为每个分镜选择最贴合的气泡形状, 体现"喊叫/耳语/心理/拟声"等不同语气氛围。详见 [8 种对话气泡类型](#-8-种对话气泡类型-llm-分镜规划自动选型) 章节。
 
 ---
 
@@ -296,7 +311,7 @@ extreme close-up shot, low angle view, symmetric composition, tense atmosphere, 
 | **API 不渲染文字** | 图像生成 prompt 末尾强制追加 "NO text, NO speech bubble, NO caption, NO dialogue" |
 | **后端自动叠加** | PIL 叠加在 `/api/generate-image` 和 `/api/generate-page` 内部完成,前端无感知 |
 | **中文字体回退** | msyh.ttc(微软雅黑) → simhei.ttf(黑体) → simsun.ttc(宋体) → Noto CJK → PingFang → arial → default |
-| **气泡类型派发** | BUBBLE_DRAWERS 字典支持 dialogue/thought/shout/narration 四种(详见上方"4 种对话气泡类型") |
+| **气泡类型派发** | BUBBLE_DRAWERS 字典支持 dialogue/thought/shout/whisper/burst/narration/box/caption 八种 (LLM 分镜规划阶段自动选, 也可手动改; 详见"8 种对话气泡类型") |
 | **文字自适应** | fit_text_to_box 自动折行+缩字号,长对话也能塞进气泡 |
 | **整页网格对齐** | PIL 叠加时使用与 prompt 相同的 rows×cols 网格布局计算 panel 位置 |
 | **拼版不重复叠加** | `/api/combine-page` 只做网格拼版+页码,不重复画气泡(分镜图已有气泡) |
