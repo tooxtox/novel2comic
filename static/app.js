@@ -1337,6 +1337,8 @@ async function startSegment() {
             generatedImages = {};
             fullPageImages = {};
             combinedPageImages = {};
+            // 清空角色人设图（新小说的人物形象可能不同）
+            characters.forEach(c => { c.image_url = ''; c.char_prompt = ''; });
             renderGallery();
 
             currentSegments = result.data;
