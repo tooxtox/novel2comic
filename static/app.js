@@ -7,6 +7,8 @@ let batchStopRequested = false;  // 批量生成停止控制 (用户主动停止
 let combinedPages = [];
 let fullPageImages = {};  // 整页生成的图片
 let combinedPageImages = {};  // 任务3: 拼版预览生成的图片 (key: pageIdx)
+let fullPageCleanImages = {};  // 整页生成图的无气泡干净副本 (key: pageIdx → clean_url)
+let fullPageBubbles = {};  // 整页生成图的气泡坐标 (key: pageIdx → [{x,y,w,h,dialogue,dialogue_type}])
 let progressInterval = null;
 
 // WebSocket 实时进度
@@ -243,6 +245,8 @@ async function recoverSession() {
             for (const item of fpResult.data.pages) {
                 if (item.key !== undefined) {
                     fullPageImages[item.key] = item.local_url;
+                    if (item.clean_url) fullPageCleanImages[item.key] = item.clean_url;
+                    if (item.bubbles) fullPageBubbles[item.key] = item.bubbles;
                 }
             }
             console.log(`Recovered ${fpResult.data.pages.length} full pages from server`);
@@ -301,6 +305,8 @@ async function syncResults() {
                 generatedImages: generatedImages,
                 fullPageImages: fullPageImages,
                 combinedPageImages: combinedPageImages,
+                fullPageCleanImages: fullPageCleanImages,
+                fullPageBubbles: fullPageBubbles,
                 comic2novel: comicNovelResult
             })
         }, 1);
@@ -855,7 +861,9 @@ async function saveCurrentState() {
                 characters: characters,
                 generated_images: generatedImages,
                 full_page_images: fullPageImages,
-                combined_page_images: combinedPageImages
+                combined_page_images: combinedPageImages,
+                full_page_clean_images: fullPageCleanImages,
+                full_page_bubbles: fullPageBubbles
             })
         });
         const result = await response.json();
@@ -914,6 +922,12 @@ async function loadHistoryWork(workId) {
         combinedPageImages = {};
         const cps = state.combined_page_images || {};
         for (const k in cps) combinedPageImages[k] = cps[k];
+        fullPageCleanImages = {};
+        const fpcs = state.full_page_clean_images || {};
+        for (const k in fpcs) fullPageCleanImages[k] = fpcs[k];
+        fullPageBubbles = {};
+        const fpb = state.full_page_bubbles || {};
+        for (const k in fpb) fullPageBubbles[k] = fpb[k];
 
         // 校验完整性, 仅写入控制台不再弹红色 toast
         // (旧 _meta 字段可能与实际数据有偏差, 这个检查仅作为调试用)
@@ -1337,6 +1351,8 @@ async function startSegment() {
             generatedImages = {};
             fullPageImages = {};
             combinedPageImages = {};
+            fullPageCleanImages = {};
+            fullPageBubbles = {};
             // 清空角色人设图（新小说的人物形象可能不同）
             characters.forEach(c => { c.image_url = ''; c.char_prompt = ''; });
             renderGallery();
@@ -1766,6 +1782,8 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
         if (result.success) {
             let finalImageUrl = result.image_url;
             fullPageImages[pageIdx] = finalImageUrl;
+            if (result.clean_image_url) fullPageCleanImages[pageIdx] = result.clean_image_url;
+            if (result.bubbles) fullPageBubbles[pageIdx] = result.bubbles;
             renderSegments();
             renderGallery();
             syncResults();  // 主动同步整页图片映射到服务器
@@ -1907,6 +1925,8 @@ async function regenerateAllFullPages() {
 
     // 清空已有整页图
     fullPageImages = {};
+    fullPageCleanImages = {};
+    fullPageBubbles = {};
     generatedImages = {};
     renderSegments();
     renderGallery();
@@ -2197,12 +2217,18 @@ function renderGallery() {
                 ${currentSegments.pages.map((page, pageIdx) => {
                     const img = fullPageImages[pageIdx];
                     if (!img) return '';
+                    const canEdit = fullPageCleanImages[pageIdx] && fullPageBubbles[pageIdx] && fullPageBubbles[pageIdx].length > 0;
                     return `
                     <div class="comic-page p-4">
                         <h3 class="text-lg font-bold mb-3 text-center border-b-2 border-black pb-2">第 ${page.page_number} 页</h3>
                         <div class="border-2 border-black">
                             <img src="${img}" class="w-full cursor-pointer" onclick="openModal('${img}')">
                         </div>
+                        ${canEdit ? `
+                        <div class="mt-3 flex justify-end">
+                            <button onclick="openBubbleEditor(${pageIdx})" class="border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">✏️ 编辑气泡位置</button>
+                        </div>
+                        ` : ''}
                     </div>
                     `;
                 }).join('')}
@@ -2263,6 +2289,193 @@ function openModal(src) {
 
 function closeModal() {
     document.getElementById('image-modal').classList.add('hidden');
+}
+
+// ===== 对话气泡位置拖拽编辑 =====
+let _bubbleEditorReposition = null;
+
+window.addEventListener('resize', function() {
+    if (_bubbleEditorReposition && document.getElementById('bubble-editor-modal')) {
+        _bubbleEditorReposition();
+    }
+});
+
+function openBubbleEditor(pageIdx) {
+    const cleanUrl = fullPageCleanImages[pageIdx];
+    const stored = fullPageBubbles[pageIdx];
+    if (!cleanUrl || !stored || stored.length === 0) {
+        showToast('该页面没有可编辑的气泡（可能是旧数据未保留干净图）', 'error');
+        return;
+    }
+
+    // 深拷贝, 编辑中途取消不影响原数据
+    const editBubbles = stored.map(b => ({ ...b }));
+
+    const old = document.getElementById('bubble-editor-modal');
+    if (old) old.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'bubble-editor-modal';
+    modal.className = 'fixed inset-0 z-50 flex flex-col';
+    modal.innerHTML = `
+        <div class="absolute inset-0 bg-black bg-opacity-70"></div>
+        <div class="relative flex flex-col h-full max-w-6xl mx-auto w-full bg-white">
+            <div class="flex items-center justify-between p-4 border-b-2 border-black">
+                <h2 class="text-lg font-bold">✏️ 拖动气泡调整位置</h2>
+                <div class="flex gap-2">
+                    <button id="bubble-editor-cancel" class="border-2 border-gray-400 px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">取消</button>
+                    <button id="bubble-editor-save" class="btn-primary px-4 py-2 text-sm font-medium">保存</button>
+                </div>
+            </div>
+            <div class="flex-1 overflow-auto bg-gray-200 p-4 flex justify-center">
+                <div id="bubble-editor-img-wrap" class="relative inline-block">
+                    <img id="bubble-editor-img" src="${cleanUrl}" class="block" style="max-width: 100%; max-height: calc(100vh - 140px); object-fit: contain;">
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const imgEl = document.getElementById('bubble-editor-img');
+    const wrapEl = document.getElementById('bubble-editor-img-wrap');
+
+    function getScale() {
+        return {
+            x: imgEl.clientWidth / imgEl.naturalWidth,
+            y: imgEl.clientHeight / imgEl.naturalHeight,
+        };
+    }
+
+    function positionBubbles() {
+        wrapEl.querySelectorAll('.bubble-edit-item').forEach(el => el.remove());
+        const scale = getScale();
+        if (!scale.x || !scale.y) return;
+        editBubbles.forEach((bub, i) => {
+            const div = document.createElement('div');
+            div.className = 'bubble-edit-item absolute cursor-move select-none';
+            div.style.left = (bub.x * scale.x) + 'px';
+            div.style.top = (bub.y * scale.y) + 'px';
+            div.style.width = (bub.w * scale.x) + 'px';
+            div.style.height = (bub.h * scale.y) + 'px';
+            div.style.background = 'rgba(255,255,255,0.85)';
+            div.style.border = '2px solid #1a1a1a';
+            div.style.borderRadius = '8px';
+            div.style.display = 'flex';
+            div.style.alignItems = 'center';
+            div.style.justifyContent = 'center';
+            div.style.padding = '4px';
+            div.style.textAlign = 'center';
+            div.style.fontSize = '12px';
+            div.style.overflow = 'hidden';
+            div.style.lineHeight = '1.2';
+            div.style.fontWeight = '500';
+            div.textContent = bub.dialogue;
+            div.dataset.idx = i;
+            wrapEl.appendChild(div);
+            makeDraggable(div, imgEl, bub);
+        });
+    }
+
+    function makeDraggable(el, imgEl, bub) {
+        function getPoint(e) {
+            if (e.touches && e.touches[0]) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+            return { x: e.clientX, y: e.clientY };
+        }
+
+        let startX, startY, origLeft, origTop;
+
+        function onDown(e) {
+            const pt = getPoint(e);
+            startX = pt.x; startY = pt.y;
+            origLeft = parseFloat(el.style.left);
+            origTop = parseFloat(el.style.top);
+            el.style.zIndex = '10';
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+            document.addEventListener('touchmove', onMove, { passive: false });
+            document.addEventListener('touchend', onUp);
+            e.preventDefault();
+        }
+
+        function onMove(e) {
+            const pt = getPoint(e);
+            let newLeft = origLeft + (pt.x - startX);
+            let newTop = origTop + (pt.y - startY);
+            newLeft = Math.max(0, Math.min(newLeft, imgEl.clientWidth - el.offsetWidth));
+            newTop = Math.max(0, Math.min(newTop, imgEl.clientHeight - el.offsetHeight));
+            el.style.left = newLeft + 'px';
+            el.style.top = newTop + 'px';
+            e.preventDefault();
+        }
+
+        function onUp() {
+            const sc = getScale();
+            bub.x = Math.round(parseFloat(el.style.left) / sc.x);
+            bub.y = Math.round(parseFloat(el.style.top) / sc.y);
+            el.style.zIndex = '';
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.removeEventListener('touchmove', onMove);
+            document.removeEventListener('touchend', onUp);
+        }
+
+        el.addEventListener('mousedown', onDown);
+        el.addEventListener('touchstart', onDown, { passive: false });
+    }
+
+    function closeModalEditor() {
+        _bubbleEditorReposition = null;
+        modal.remove();
+    }
+
+    // 图片加载后定位气泡 (处理缓存命中 onload 不触发的情况)
+    if (imgEl.complete && imgEl.naturalWidth) {
+        _bubbleEditorReposition = positionBubbles;
+        positionBubbles();
+    } else {
+        imgEl.onload = function() {
+            _bubbleEditorReposition = positionBubbles;
+            positionBubbles();
+        };
+    }
+
+    document.getElementById('bubble-editor-cancel').onclick = closeModalEditor;
+
+    document.getElementById('bubble-editor-save').onclick = async function() {
+        const btn = this;
+        btn.disabled = true;
+        btn.textContent = '保存中...';
+        try {
+            await saveBubblePositions(pageIdx, editBubbles);
+            closeModalEditor();
+        } catch (e) {
+            btn.disabled = false;
+            btn.textContent = '保存';
+            showToast('保存失败: ' + (e.message || e), 'error');
+        }
+    };
+}
+
+async function saveBubblePositions(pageIdx, bubbles) {
+    const resp = await fetch('/api/reposition-bubbles', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            clean_image_url: fullPageCleanImages[pageIdx],
+            output_image_url: fullPageImages[pageIdx].split('?')[0],
+            bubbles: bubbles,
+        })
+    });
+    const result = await resp.json();
+    if (!result.success) throw new Error(result.error || '保存失败');
+    fullPageBubbles[pageIdx] = bubbles;
+    // 刷新显示图 (cache-bust)
+    const baseUrl = fullPageImages[pageIdx].split('?')[0];
+    fullPageImages[pageIdx] = baseUrl + '?t=' + Date.now();
+    renderGallery();
+    syncResults();
+    showToast('气泡位置已保存', 'success');
 }
 
 // ===== 人设图缺失拦截模态框 =====

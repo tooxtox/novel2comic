@@ -1722,18 +1722,34 @@ def draw_dialogue_bubble(draw, x, y, w, h, text, font, overflow=True, canvas_bou
 
 def draw_thought_bubble(draw, x, y, w, h, text, font, overflow=True, canvas_bounds=None):
     """心理/思考气泡: 云形 (用多个小圆模拟) + 小圆尾巴"""
-    # 用交错的小圆组成云边
-    n_h = max(2, h // 20)
-    n_w = max(2, w // 20)
+    n_h = max(2, h // 30)
+    n_w = max(2, w // 30)
     cloud_color = 'white'
     edge_color = 'black'
-    # 主体: 多个小圆覆盖矩形范围
-    r = min(h, w) // 8
+    r = min(h, w) // 6
+
+    def circle_center(i, j):
+        cx = x + r + j * (w - 2 * r) // max(1, n_w - 1) if n_w > 1 else x + w // 2
+        cy = y + r + i * (h - 2 * r) // max(1, n_h - 1) if n_h > 1 else y + h // 2
+        return cx, cy
+
+    # Pass 1: 所有圆填白色, 无描边 (形成实心云体)
     for i in range(n_h):
         for j in range(n_w):
-            cx = x + r + j * (w - 2 * r) // max(1, n_w - 1) if n_w > 1 else x + w // 2
-            cy = y + r + i * (h - 2 * r) // max(1, n_h - 1) if n_h > 1 else y + h // 2
-            draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=cloud_color, outline=edge_color, width=2)
+            cx, cy = circle_center(i, j)
+            draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=cloud_color)
+    # Pass 2: 仅最外圈圆描边 (形成云边轮廓)
+    for i in range(n_h):
+        for j in range(n_w):
+            if i == 0 or i == n_h - 1 or j == 0 or j == n_w - 1:
+                cx, cy = circle_center(i, j)
+                draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=edge_color, width=2)
+    # Pass 3: 内部圆再填一次白色, 覆盖边缘圆朝内的描边弧线
+    for i in range(n_h):
+        for j in range(n_w):
+            if 0 < i < n_h - 1 and 0 < j < n_w - 1:
+                cx, cy = circle_center(i, j)
+                draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=cloud_color)
     # 尾巴小圆 (3个由大到小, 指向右下)
     for i, rr in enumerate([12, 8, 5]):
         cxx = x + w * 0.3 + i * 15
@@ -2028,46 +2044,52 @@ def _normalize_dialogue_type(raw, dialogue='', scene_description=''):
     return _infer_dialogue_type(dialogue, scene_description)
 
 
-def render_panel_bubble(draw, panel_box, seg, font, overflow=True, canvas_bounds=None):
-    """按 seg.dialogue_type 选择气泡绘制器, 自动定位到 panel 内/可越界.
-    气泡尺寸根据文字长度自适应: 短对话用小气泡, 长对话自动增大."""
-    dialogue = (seg.get('dialogue') or '').strip()
+def _compute_bubble_box(panel_box, dialogue, overflow=True, canvas_bounds=None):
+    """根据 panel 尺寸和对话文字长度计算气泡的位置和大小.
+    返回 (bx, by, bw, bh) 像素坐标; dialogue 为空返回 None."""
     if not dialogue:
-        return
-    dtype = (seg.get('dialogue_type') or 'dialogue').lower()
-    if dtype not in BUBBLE_DRAWERS:
-        dtype = 'dialogue'
-
+        return None
     px, py, pw, ph = panel_box['x'], panel_box['y'], panel_box['w'], panel_box['h']
 
-    # 气泡尺寸: 根据文字长度自适应
     char_count = len(dialogue)
     if char_count > 40:
-        # 长对话: 大气泡 (最多 panel 85% 宽, 65% 高)
         bw = int(pw * 0.80)
         bh = int(ph * 0.55)
     elif char_count > 20:
-        # 中对话: 中等气泡
         bw = int(pw * 0.70)
         bh = int(ph * 0.42)
     else:
-        # 短对话: 小气泡
         bw = int(pw * 0.55)
         bh = int(ph * 0.30)
-    # 位置: panel 右下角
     bx = px + pw - bw - 8
     by = py + ph - bh - 8
     if overflow and canvas_bounds:
-        # 越界: 允许超出 panel, 但不能超过画布
         cb_x, cb_y, cb_w, cb_h = canvas_bounds
         bx = min(bx, cb_x + cb_w - bw - 4)
         by = min(by, cb_y + cb_h - bh - 4)
     elif canvas_bounds:
-        # 不越界: 严格限制在 panel 内
         bx = max(px + 4, min(bx, px + pw - bw - 4))
         by = max(py + 4, min(by, py + ph - bh - 4))
+    return (bx, by, bw, bh)
 
+
+def render_panel_bubble(draw, panel_box, seg, font, overflow=True, canvas_bounds=None):
+    """按 seg.dialogue_type 选择气泡绘制器, 自动定位到 panel 内/可越界.
+    气泡尺寸根据文字长度自适应: 短对话用小气泡, 长对话自动增大.
+    返回 (bx, by, bw, bh) 气泡像素坐标; 无对话返回 None."""
+    dialogue = (seg.get('dialogue') or '').strip()
+    if not dialogue:
+        return None
+    dtype = (seg.get('dialogue_type') or 'dialogue').lower()
+    if dtype not in BUBBLE_DRAWERS:
+        dtype = 'dialogue'
+
+    box = _compute_bubble_box(panel_box, dialogue, overflow=overflow, canvas_bounds=canvas_bounds)
+    if not box:
+        return None
+    bx, by, bw, bh = box
     BUBBLE_DRAWERS[dtype](draw, bx, by, bw, bh, dialogue, font, overflow=overflow, canvas_bounds=canvas_bounds)
+    return (bx, by, bw, bh)
 
 
 def _local_image_abs_path(local_url):
@@ -2075,6 +2097,24 @@ def _local_image_abs_path(local_url):
     if not local_url or not local_url.startswith('/static/'):
         return None
     return os.path.join(os.path.dirname(__file__), local_url[1:])
+
+
+def _save_clean_copy(local_url):
+    """把 local_url 对应的图片文件复制为同目录下的 *_clean.png, 返回其 /static/ URL.
+    用于在 PIL 叠加气泡前保留无气泡的干净画面, 供后续拖拽编辑时重新渲染."""
+    abs_path = _local_image_abs_path(local_url)
+    if not abs_path or not os.path.exists(abs_path):
+        return None
+    base, ext = os.path.splitext(abs_path)
+    clean_abs_path = base + '_clean' + (ext or '.png')
+    try:
+        shutil.copy2(abs_path, clean_abs_path)
+        rel_path = os.path.relpath(clean_abs_path, os.path.join(os.path.dirname(__file__), 'static'))
+        clean_url = '/static/' + rel_path.replace(os.sep, '/')
+        return clean_url
+    except Exception as e:
+        print(f"[CleanCopy] failed for {local_url}: {e}")
+        return None
 
 
 def _overlay_bubble_on_segment(local_url, seg_info):
@@ -2106,13 +2146,17 @@ def _overlay_bubble_on_segment(local_url, seg_info):
 
 def _overlay_bubbles_on_page(local_url, segments):
     """在整页图上按网格用 PIL 叠加每个 panel 的对话气泡, 覆盖原文件.
-    segments: list[{'dialogue': str, 'dialogue_type': str, ...}]"""
+    segments: list[{'dialogue': str, 'dialogue_type': str, ...}]
+    返回 (clean_url, bubbles): clean_url 为无气泡干净图 URL, bubbles 为气泡坐标列表."""
     if not segments:
-        return
+        return None, []
     abs_path = _local_image_abs_path(local_url)
     if not abs_path or not os.path.exists(abs_path):
         print(f"[PIL-Overlay] page image not found: {local_url}")
-        return
+        return None, []
+    # 叠加前保留干净副本
+    clean_url = _save_clean_copy(local_url)
+    bubbles = []
     try:
         with Image.open(abs_path) as img:
             img = img.convert('RGB')
@@ -2123,16 +2167,25 @@ def _overlay_bubbles_on_page(local_url, segments):
             for i, seg in enumerate(segments):
                 if i >= len(layout):
                     break
-                if not (seg.get('dialogue') or '').strip():
+                dialogue = (seg.get('dialogue') or '').strip()
+                if not dialogue:
                     continue
-                render_panel_bubble(
+                box = render_panel_bubble(
                     draw, layout[i], seg, font,
                     overflow=True, canvas_bounds=(0, 0, W, H)
                 )
+                if box:
+                    bx, by, bw, bh = box
+                    bubbles.append({
+                        'x': bx, 'y': by, 'w': bw, 'h': bh,
+                        'dialogue': dialogue,
+                        'dialogue_type': (seg.get('dialogue_type') or 'dialogue').lower(),
+                    })
             img.save(abs_path)
             print(f"[PIL-Overlay] page bubbles overlaid ({len(segments)} panels): {abs_path}")
     except Exception as e:
         print(f"[PIL-Overlay] failed for page {local_url}: {e}")
+    return clean_url, bubbles
 
 
 @app.route('/api/combine-page', methods=['POST'])
@@ -2343,19 +2396,26 @@ NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text ov
 
         if local_url:
             # PIL 叠加每个 panel 的对话气泡 (替代图像 API 渲染, 避免乱码)
-            _overlay_bubbles_on_page(local_url, segments)
+            clean_url, bubbles = _overlay_bubbles_on_page(local_url, segments)
             # 持久化整页图片映射
             if page_idx is not None:
                 fp_data = load_session_data('full_pages') or {'pages': []}
                 fp_data['pages'].append({
                     'key': str(page_idx),
                     'local_url': local_url,
+                    'clean_url': clean_url,
+                    'bubbles': bubbles,
                     'page_num': page_num,
                     'timestamp': datetime.now().isoformat()
                 })
                 save_session_data('full_pages', fp_data)
             emit_progress(task_id, 100, f'第 {page_num} 页生成完成', 'done')
-            return jsonify({'success': True, 'image_url': local_url})
+            return jsonify({
+                'success': True,
+                'image_url': local_url,
+                'clean_image_url': clean_url,
+                'bubbles': bubbles,
+            })
         else:
             emit_progress(task_id, 0, '页面生成失败', 'error')
             return jsonify({'error': error.get('error', '无法获取图片'), 'raw': result}), 500
@@ -2365,6 +2425,55 @@ NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text ov
         print(f"Page generation error: {str(e)}")
         print(traceback.format_exc())
         emit_progress(task_id, 0, f'页面生成失败: {e}', 'error')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/reposition-bubbles', methods=['POST'])
+@login_required
+def reposition_bubbles():
+    """从干净图(无气泡)按用户指定坐标重新烘对话气泡, 覆盖显示图.
+    入参: {clean_image_url, output_image_url, bubbles: [{x,y,w,h,dialogue,dialogue_type}]}"""
+    data = request.json or {}
+    clean_url = data.get('clean_image_url')
+    output_url = data.get('output_image_url')
+    bubbles = data.get('bubbles', [])
+
+    if not clean_url or not output_url or not bubbles:
+        return jsonify({'error': '缺少 clean_image_url / output_image_url / bubbles'}), 400
+
+    clean_abs = _local_image_abs_path(clean_url)
+    output_abs = _local_image_abs_path(output_url)
+    if not clean_abs or not os.path.exists(clean_abs):
+        return jsonify({'error': '干净图不存在, 可能是旧数据未保留干净副本'}), 400
+    if not output_abs:
+        return jsonify({'error': '输出图路径无效'}), 400
+
+    try:
+        with Image.open(clean_abs) as img:
+            img = img.convert('RGB')
+            W, H = img.size
+            font = _get_chinese_font(max(14, int(H * 0.025)))
+            draw = ImageDraw.Draw(img)
+            for bub in bubbles:
+                dialogue = (bub.get('dialogue') or '').strip()
+                if not dialogue:
+                    continue
+                dtype = (bub.get('dialogue_type') or 'dialogue').lower()
+                if dtype not in BUBBLE_DRAWERS:
+                    dtype = 'dialogue'
+                bx = int(bub.get('x', 0))
+                by = int(bub.get('y', 0))
+                bw = int(bub.get('w', 100))
+                bh = int(bub.get('h', 60))
+                BUBBLE_DRAWERS[dtype](draw, bx, by, bw, bh, dialogue, font,
+                                      overflow=False, canvas_bounds=(0, 0, W, H))
+            img.save(output_abs)
+            print(f"[Reposition] bubbles re-rendered to {output_abs}")
+        return jsonify({'success': True})
+    except Exception as e:
+        import traceback
+        print(f"[Reposition] error: {e}")
+        print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
 
@@ -2491,12 +2600,15 @@ def work_save_state():
     gen_imgs = data.get('generated_images', {})
     fp_imgs = data.get('full_page_images', {})
     cp_imgs = data.get('combined_page_images', {})
+    fp_clean_imgs = data.get('full_page_clean_images', {})
+    fp_bubbles = data.get('full_page_bubbles', {})
 
     # 重定位所有图片 URL
     _relocate_images_in_obj(chars)
     _relocate_images_in_obj(gen_imgs)
     _relocate_images_in_obj(fp_imgs)
     _relocate_images_in_obj(cp_imgs)
+    _relocate_images_in_obj(fp_clean_imgs)
 
     state = {
         'novel_text': data.get('novel_text', ''),
@@ -2505,6 +2617,8 @@ def work_save_state():
         'generated_images': gen_imgs,
         'full_page_images': fp_imgs,
         'combined_page_images': cp_imgs,
+        'full_page_clean_images': fp_clean_imgs,
+        'full_page_bubbles': fp_bubbles,
         'updated_at': datetime.now().isoformat(),
     }
     # 写入后统计关键计数, 加载时可校验完整性
@@ -3076,12 +3190,19 @@ def sync_results():
             })
         save_session_data('images', images_data)
     if 'fullPageImages' in data:
+        fp_clean = data.get('fullPageCleanImages') or {}
+        fp_bubbles = data.get('fullPageBubbles') or {}
         fp_data = {'pages': []}
         for key, url in data['fullPageImages'].items():
-            fp_data['pages'].append({
+            entry = {
                 'key': key,
-                'local_url': url
-            })
+                'local_url': url,
+            }
+            if key in fp_clean:
+                entry['clean_url'] = fp_clean[key]
+            if key in fp_bubbles:
+                entry['bubbles'] = fp_bubbles[key]
+            fp_data['pages'].append(entry)
         save_session_data('full_pages', fp_data)
     if 'combinedPageImages' in data:
         cp_data = {'pages': []}
