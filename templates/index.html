@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>小说⇄漫画 双向转换器</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- socket.io 客户端 (用于 WebSocket 实时进度推送) -->
@@ -63,18 +63,50 @@
         ::-webkit-scrollbar-track { background: #f1f1f1; }
         ::-webkit-scrollbar-thumb { background: #888; border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: #555; }
+
+        /* ===== 移动端适配 ===== */
+        body { min-height: 100vh; min-height: 100dvh; }
+        /* 防止 iOS 聚焦输入框时自动放大页面 */
+        @media (max-width: 767px) {
+            input, textarea, select { font-size: 16px; }
+        }
+        .modal-panel { max-height: calc(100dvh - 1rem); overflow-y: auto; }
+        @media (min-width: 768px) { .modal-panel { max-height: calc(100vh - 5rem); } }
+        .modal-panel-compare { max-height: calc(100dvh - 1rem); }
+        @media (min-width: 768px) { .modal-panel-compare { max-height: calc(100vh - 6rem); } }
+        /* 移动端底部导航 */
+        .mtab-btn, .mtab-active, .mtab-inactive {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 2px;
+            padding: 6px 2px;
+        }
+        .mtab-active { color: #111827; }
+        .mtab-inactive { color: #9ca3af; }
+        /* 触屏设备：点击按钮时不选中文字、不呼出长按菜单 */
+        body.touch-device button { user-select: none; -webkit-touch-callout: none; }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
-    <div class="max-w-7xl mx-auto p-4">
+    <div class="max-w-7xl mx-auto px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-28 md:pb-4">
+        <!-- 微信/QQ 内打开时提示用浏览器打开 (由 app.js 的 maybeShowInAppBanner 控制显示) -->
+        <div id="inapp-browser-banner" class="hidden bg-amber-100 border-2 border-amber-500 mb-4 px-3 md:px-4 py-2.5 flex items-center justify-between gap-3">
+            <div class="flex items-center gap-2 text-sm text-amber-900 min-w-0">
+                <span class="text-lg shrink-0">📱</span>
+                <span id="inapp-browser-text" class="truncate"></span>
+            </div>
+            <button id="inapp-browser-close" class="shrink-0 text-amber-800 hover:text-amber-950 text-xl leading-none px-1" aria-label="关闭提示">×</button>
+        </div>
         <!-- Header -->
         <header class="mb-6">
             <div class="flex items-center justify-between mb-2">
-                <div class="flex items-center gap-3">
-                    <div class="w-10 h-10 bg-black text-white flex items-center justify-center text-xl font-bold manga-border">⇄</div>
-                    <h1 class="text-3xl font-bold tracking-tight">小说⇄漫画 双向转换器</h1>
+                <div class="flex items-center gap-2 md:gap-3 min-w-0">
+                    <div class="w-8 h-8 md:w-10 md:h-10 shrink-0 bg-black text-white flex items-center justify-center text-xl font-bold manga-border">⇄</div>
+                    <h1 class="text-lg md:text-3xl font-bold tracking-tight truncate">小说⇄漫画 双向转换器</h1>
                 </div>
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-2 shrink-0">
                     <button onclick="openConfigModal()" title="API 配置" class="w-10 h-10 flex items-center justify-center text-lg text-gray-700 hover:text-black border border-gray-300 hover:border-black transition-colors">
                         ⚙
                     </button>
@@ -83,7 +115,7 @@
                     </button>
                 </div>
             </div>
-            <p class="text-gray-600 text-sm">两大功能：使用LLM将小说转为漫画分镜 | 上传漫画图片，使用视觉模型转为小说文本</p>
+            <p class="text-gray-600 text-xs md:text-sm">两大功能：使用LLM将小说转为漫画分镜 | 上传漫画图片，使用视觉模型转为小说文本</p>
         </header>
 
         <!-- 漫画风格设置 (主页常驻, 可折叠) -->
@@ -115,10 +147,11 @@
             </div>
         </div>
 
-        <!-- Tabs -->
-        <div class="flex gap-6 mb-6 border-b border-gray-300 items-center">
+        <!-- Tabs (移动端隐藏, 改用底部导航) -->
+        <div class="hidden md:flex gap-6 mb-6 border-b border-gray-300 items-center">
             <!-- 小说→漫画 功能组 -->
             <button onclick="switchTab('input')" id="tab-input" class="tab-active pb-2 px-1 text-lg transition-all">小说输入</button>
+            <button onclick="switchTab('aiwrite')" id="tab-aiwrite" class="tab-inactive pb-2 px-1 text-lg transition-all">AI 写作</button>
             <button onclick="switchTab('characters')" id="tab-characters" class="tab-inactive pb-2 px-1 text-lg transition-all">角色管理</button>
             <button onclick="switchTab('segments')" id="tab-segments" class="tab-inactive pb-2 px-1 text-lg transition-all">分镜管理</button>
             <button onclick="switchTab('gallery')" id="tab-gallery" class="tab-inactive pb-2 px-1 text-lg transition-all">漫画预览</button>
@@ -128,17 +161,51 @@
             <button onclick="switchTab('comic2novel')" id="tab-comic2novel" class="tab-inactive pb-2 px-1 text-lg transition-all">漫画转小说</button>
         </div>
 
+        <!-- 移动端底部导航栏 (md 以下显示) -->
+        <nav id="mobile-bottom-nav" class="fixed bottom-0 left-0 right-0 z-40 md:hidden bg-white border-t-2 border-gray-800" style="padding-bottom: env(safe-area-inset-bottom);">
+            <div class="grid grid-cols-7 max-w-7xl mx-auto">
+                <button onclick="switchTab('input')" id="mtab-input" class="mtab-active">
+                    <span class="text-lg leading-none">📖</span>
+                    <span class="text-[10px] leading-tight">小说输入</span>
+                </button>
+                <button onclick="switchTab('aiwrite')" id="mtab-aiwrite" class="mtab-inactive">
+                    <span class="text-lg leading-none">✍️</span>
+                    <span class="text-[10px] leading-tight">AI 写作</span>
+                </button>
+                <button onclick="switchTab('characters')" id="mtab-characters" class="mtab-inactive">
+                    <span class="text-lg leading-none">🎭</span>
+                    <span class="text-[10px] leading-tight">角色管理</span>
+                </button>
+                <button onclick="switchTab('segments')" id="mtab-segments" class="mtab-inactive">
+                    <span class="text-lg leading-none">🎞️</span>
+                    <span class="text-[10px] leading-tight">分镜管理</span>
+                </button>
+                <button onclick="switchTab('gallery')" id="mtab-gallery" class="mtab-inactive">
+                    <span class="text-lg leading-none">🎨</span>
+                    <span class="text-[10px] leading-tight">漫画预览</span>
+                </button>
+                <button onclick="switchTab('history')" id="mtab-history" class="mtab-inactive">
+                    <span class="text-lg leading-none">📚</span>
+                    <span class="text-[10px] leading-tight">历史记录</span>
+                </button>
+                <button onclick="switchTab('comic2novel')" id="mtab-comic2novel" class="mtab-inactive">
+                    <span class="text-lg leading-none">🔄</span>
+                    <span class="text-[10px] leading-tight">漫画转小说</span>
+                </button>
+            </div>
+        </nav>
+
         <!-- Config Modal (右上角 ⚙ 按钮触发) -->
         <div id="config-modal" class="fixed inset-0 z-50 hidden">
             <!-- 背景遮罩 -->
             <div class="absolute inset-0 bg-black bg-opacity-50" onclick="closeConfigModal()"></div>
             <!-- 弹窗内容 -->
-            <div class="relative max-w-5xl mx-auto mt-10 mb-10 bg-gray-100 rounded manga-border panel-shadow" style="max-height: calc(100vh - 5rem); overflow-y: auto;">
-                <div class="sticky top-0 bg-white border-b-2 border-gray-200 px-6 py-4 flex items-center justify-between manga-border z-10">
-                    <h2 class="text-2xl font-bold">⚙ API 配置</h2>
+            <div class="relative modal-panel max-w-5xl mx-auto mt-2 mb-2 md:mt-10 md:mb-10 bg-gray-100 rounded manga-border panel-shadow">
+                <div class="sticky top-0 bg-white border-b-2 border-gray-200 px-4 py-3 md:px-6 md:py-4 flex items-center justify-between manga-border z-10">
+                    <h2 class="text-lg md:text-2xl font-bold">⚙ API 配置</h2>
                     <button onclick="closeConfigModal()" class="w-9 h-9 flex items-center justify-center text-2xl text-gray-600 hover:text-black border border-gray-300 hover:border-black transition-colors">×</button>
                 </div>
-                <div class="p-6">
+                <div class="p-3 md:p-6">
         <div id="panel-config" class="fade-in">
             <div class="bg-white p-6 manga-border panel-shadow mb-6">
                 <h2 class="text-xl font-bold mb-4">快速预设</h2>
@@ -287,17 +354,144 @@
             <div class="bg-white p-6 manga-border panel-shadow">
                 <h2 class="text-xl font-bold mb-4">输入小说内容</h2>
                 <textarea id="novel-text" rows="16" placeholder="请在此处粘贴小说内容...&#10;&#10;支持粘贴整章或整篇小说，系统会自动分页分段。&#10;&#10;建议每次处理3000-8000字，以获得最佳分镜效果。" class="w-full p-4 border-2 border-gray-300 focus:border-black outline-none transition-colors resize-none font-mono text-sm leading-relaxed"></textarea>
-                <div class="flex justify-between items-center mt-4">
+                <p class="mt-2 text-xs text-gray-400">✍️ AI 续写 / 润色可在此直接使用（生成分镜前建议先润色），也可到顶部「AI 写作」标签页，两处实时同步</p>
+
+                <!-- AI 写作 (分镜前润色/续写, 复用 AI 写作页逻辑, 作用域='input') -->
+                <div class="mt-4 border-2 border-gray-200">
+                    <div class="flex items-center justify-between bg-gray-50 px-4 py-2 cursor-pointer select-none" onclick="toggleInpAIWrite()">
+                        <h3 class="text-sm font-bold flex items-center gap-2">
+                            ✍️ AI 写作
+                            <span class="text-xs font-normal text-gray-400">分镜前可先润色 / 续写</span>
+                        </h3>
+                        <span id="inp-aw-toggle-icon" class="text-gray-500 text-lg">▼</span>
+                    </div>
+                    <div id="inp-aw-content" class="hidden p-4">
+                        <!-- AI 续写 -->
+                        <div class="mb-5">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <button id="inp-gen-options-btn" onclick="genPlotOptions('input')" class="border-2 border-black px-3 py-1.5 font-medium hover:bg-gray-100 flex items-center gap-2 text-sm">
+                                    <span id="inp-gen-options-label">🎬 生成剧情选项</span>
+                                    <span id="inp-gen-options-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
+                                </button>
+                                <span class="text-xs text-gray-400">让 AI 给出 3 个剧情发展方向</span>
+                            </div>
+                            <div id="inp-plot-options" class="mt-2 grid gap-2"></div>
+                            <div class="mt-2 flex flex-wrap items-center gap-2">
+                                <input id="inp-continue-direction" type="text" placeholder="点击上方选项，或自定义续写方向（可选）"
+                                       class="flex-1 min-w-[180px] p-2 border-2 border-gray-300 focus:border-black outline-none transition-colors text-sm">
+                                <select id="inp-continue-length" class="p-2 border-2 border-gray-300 text-sm">
+                                    <option value="300">约300字</option>
+                                    <option value="800" selected>约800字</option>
+                                    <option value="1500">约1500字</option>
+                                    <option value="3000">约3000字</option>
+                                </select>
+                                <button id="inp-continue-btn" onclick="continueNovel('input')" class="border-2 border-black px-3 py-1.5 font-medium hover:bg-gray-100 flex items-center gap-2 text-sm">
+                                    <span id="inp-continue-label">✍️ AI 续写</span>
+                                    <span id="inp-continue-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
+                                </button>
+                            </div>
+                        </div>
+                        <!-- AI 润色 -->
+                        <div>
+                            <div class="flex flex-wrap items-center gap-2">
+                                <button id="inp-gen-styles-btn" onclick="genPolishStyles('input')" class="border-2 border-black px-3 py-1.5 font-medium hover:bg-gray-100 flex items-center gap-2 text-sm">
+                                    <span id="inp-gen-styles-label">🎨 生成润色风格</span>
+                                    <span id="inp-gen-styles-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
+                                </button>
+                                <span class="text-xs text-gray-400">让 AI 给出几种润色风格建议</span>
+                            </div>
+                            <div id="inp-polish-styles" class="mt-2 grid gap-2"></div>
+                            <div class="mt-2 flex flex-wrap items-center gap-2">
+                                <input id="inp-polish-style" type="text" placeholder="点击上方风格，或自定义润色要求（可选）"
+                                       class="flex-1 min-w-[180px] p-2 border-2 border-gray-300 focus:border-black outline-none transition-colors text-sm">
+                                <button id="inp-polish-btn" onclick="polishNovel('input')" class="border-2 border-black px-3 py-1.5 font-medium hover:bg-gray-100 flex items-center gap-2 text-sm">
+                                    <span id="inp-polish-label">✨ AI 润色</span>
+                                    <span id="inp-polish-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
+                                </button>
+                            </div>
+                            <div id="inp-polish-progress" class="mt-3"></div>
+                        </div>
+                        <div class="mt-4 pt-3 border-t border-gray-200 flex justify-end">
+                            <button onclick="saveCurrentWriting()" class="border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">💾 保存到写作历史</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3 mt-4">
                     <div class="text-sm text-gray-500">
                         当前字数：<span id="char-count" class="font-bold text-black">0</span>
                         <span class="ml-3 text-xs text-blue-600">流程: 角色分析 → 上传人设图 → 分镜生成</span>
                     </div>
-                    <button id="start-segment-btn" onclick="startSegment()" class="btn-primary px-8 py-3 font-medium text-lg flex items-center gap-2">
+                    <button id="start-segment-btn" onclick="startSegment()" class="btn-primary w-full md:w-auto justify-center px-8 py-3 font-medium text-lg flex items-center gap-2">
                         <span id="start-segment-label">开始智能分镜</span>
                         <span id="segment-spinner" class="loading-spinner hidden"></span>
                     </button>
                 </div>
                 <div id="segment-progress" class="mt-4"></div>
+            </div>
+        </div>
+
+        <!-- AI 写作 Tab -->
+        <div id="panel-aiwrite" class="hidden fade-in">
+            <div class="bg-white p-6 manga-border panel-shadow mb-6">
+                <div class="flex justify-between items-center mb-4 gap-3">
+                    <h2 class="text-xl font-bold">✍️ AI 写作工作台</h2>
+                    <div class="flex items-center gap-3">
+                        <button onclick="saveCurrentWriting()" class="border-2 border-black px-3 py-1.5 text-xs font-medium hover:bg-gray-100 transition-colors">💾 保存到写作历史</button>
+                        <span class="text-xs text-gray-400">与「小说输入」文本框实时同步</span>
+                    </div>
+                </div>
+                <textarea id="aiwrite-text" rows="12" placeholder="此处的文本与「小说输入」页实时同步...&#10;&#10;可在此进行 AI 续写 / AI 润色。" class="w-full p-4 border-2 border-gray-300 focus:border-black outline-none transition-colors resize-none font-mono text-sm leading-relaxed"></textarea>
+                <div class="mt-2 text-sm text-gray-500">当前字数：<span id="aiwrite-char-count" class="font-bold text-black">0</span></div>
+            </div>
+
+            <!-- AI 续写 -->
+            <div class="bg-white p-6 manga-border panel-shadow mb-6">
+                <h2 class="text-xl font-bold mb-4">📖 AI 续写</h2>
+                <div class="flex flex-wrap items-center gap-2">
+                    <button id="gen-options-btn" onclick="genPlotOptions()" class="border-2 border-black px-4 py-2 font-medium hover:bg-gray-100 flex items-center gap-2">
+                        <span id="gen-options-label">🎬 生成剧情选项</span>
+                        <span id="gen-options-spinner" class="loading-spinner hidden"></span>
+                    </button>
+                    <span class="text-xs text-gray-400">让 AI 给出 3 个剧情发展方向</span>
+                </div>
+                <div id="plot-options" class="mt-2 grid gap-2"></div>
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                    <input id="continue-direction" type="text" placeholder="点击上方选项，或自定义续写方向（可选）"
+                           class="flex-1 min-w-[180px] p-2 border-2 border-gray-300 focus:border-black outline-none transition-colors text-sm">
+                    <select id="continue-length" class="p-2 border-2 border-gray-300 text-sm">
+                        <option value="300">约300字</option>
+                        <option value="800" selected>约800字</option>
+                        <option value="1500">约1500字</option>
+                        <option value="3000">约3000字</option>
+                    </select>
+                    <button id="continue-novel-btn" onclick="continueNovel()" class="border-2 border-black px-4 py-2 font-medium hover:bg-gray-100 flex items-center gap-2">
+                        <span id="continue-novel-label">✍️ AI 续写</span>
+                        <span id="continue-novel-spinner" class="loading-spinner hidden"></span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- AI 润色 -->
+            <div class="bg-white p-6 manga-border panel-shadow mb-6">
+                <h2 class="text-xl font-bold mb-4">✨ AI 润色</h2>
+                <div class="flex flex-wrap items-center gap-2">
+                    <button id="gen-styles-btn" onclick="genPolishStyles()" class="border-2 border-black px-4 py-2 font-medium hover:bg-gray-100 flex items-center gap-2">
+                        <span id="gen-styles-label">🎨 生成润色风格</span>
+                        <span id="gen-styles-spinner" class="loading-spinner hidden"></span>
+                    </button>
+                    <span class="text-xs text-gray-400">让 AI 给出几种润色风格建议</span>
+                </div>
+                <div id="polish-styles" class="mt-2 grid gap-2"></div>
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                    <input id="polish-style" type="text" placeholder="点击上方风格，或自定义润色要求（可选）"
+                           class="flex-1 min-w-[180px] p-2 border-2 border-gray-300 focus:border-black outline-none transition-colors text-sm">
+                    <button id="polish-novel-btn" onclick="polishNovel()" class="border-2 border-black px-4 py-2 font-medium hover:bg-gray-100 flex items-center gap-2">
+                        <span id="polish-novel-label">✨ AI 润色</span>
+                        <span id="polish-novel-spinner" class="loading-spinner hidden"></span>
+                    </button>
+                </div>
+                <div id="polish-progress" class="mt-4"></div>
             </div>
         </div>
 
@@ -325,28 +519,24 @@
 
         <!-- Segments Tab -->
         <div id="panel-segments" class="hidden fade-in">
-            <div class="flex justify-between items-center mb-4">
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3 mb-4">
                 <h2 class="text-xl font-bold">分镜管理</h2>
-                <div class="flex gap-2">
-                    <button id="batch-full-btn" onclick="generateAllFullPages()" class="btn-primary px-4 py-2 font-medium flex items-center gap-2">
+                <div class="flex flex-wrap gap-2">
+                    <button id="batch-full-btn" onclick="generateAllFullPages()" class="btn-primary px-3 md:px-4 py-2 text-xs md:text-sm font-medium flex items-center gap-2">
                         <span id="batch-full-label">批量整页生成</span>
                         <span id="batch-full-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
                     </button>
-                    <button id="batch-regen-btn" onclick="regenerateAllFullPages()" class="bg-red-700 text-white px-4 py-2 font-medium flex items-center gap-2 hover:bg-red-800 transition-colors">
+                    <button id="batch-regen-btn" onclick="regenerateAllFullPages()" class="bg-red-700 text-white px-3 md:px-4 py-2 text-xs md:text-sm font-medium flex items-center gap-2 hover:bg-red-800 transition-colors">
                         <span id="batch-regen-label">重新生成所有</span>
                         <span id="batch-regen-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
                     </button>
-                    <button id="batch-single-btn" onclick="generateAllImages()" class="bg-gray-700 text-white px-4 py-2 font-medium flex items-center gap-2 hover:bg-gray-800 transition-colors">
-                        <span id="batch-single-label">批量逐个生成（不推荐）</span>
-                        <span id="batch-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
-                    </button>
-                    <button id="batch-pause-btn" onclick="toggleBatchPause()" class="hidden border-2 border-yellow-500 bg-yellow-50 text-yellow-700 px-4 py-2 font-medium hover:bg-yellow-100 transition-colors">
+                    <button id="batch-pause-btn" onclick="toggleBatchPause()" class="hidden border-2 border-yellow-500 bg-yellow-50 text-yellow-700 px-3 md:px-4 py-2 text-xs md:text-sm font-medium hover:bg-yellow-100 transition-colors">
                         <span id="batch-pause-label">⏸️ 暂停</span>
                     </button>
-                    <button id="batch-stop-btn" onclick="stopBatchGenerate()" class="hidden border-2 border-red-500 bg-red-50 text-red-700 px-4 py-2 font-medium hover:bg-red-100 transition-colors">
+                    <button id="batch-stop-btn" onclick="stopBatchGenerate()" class="hidden border-2 border-red-500 bg-red-50 text-red-700 px-3 md:px-4 py-2 text-xs md:text-sm font-medium hover:bg-red-100 transition-colors">
                         ⛔ 停止
                     </button>
-                    <button onclick="exportScript()" class="bg-white border-2 border-black px-4 py-2 font-medium hover:bg-gray-50 transition-colors">导出脚本</button>
+                    <button onclick="exportScript()" class="bg-white border-2 border-black px-3 md:px-4 py-2 text-xs md:text-sm font-medium hover:bg-gray-50 transition-colors">导出脚本</button>
                 </div>
             </div>
             <div id="batch-progress" class="mt-4 mb-4"></div>
@@ -380,20 +570,34 @@
         <div class="bg-white p-6 manga-border panel-shadow">
             <div class="flex items-center justify-between mb-4">
                 <div>
-                    <h2 class="text-2xl font-bold">📚 历史作品</h2>
+                    <h2 class="text-2xl font-bold">📚 历史记录</h2>
                     <p class="text-sm text-gray-500 mt-1">
                         当前账号：<span id="history-username" class="font-mono">-</span>
                         <span class="mx-2">·</span>
-                        共 <span id="history-count" class="font-bold">0</span> 部作品
+                        共 <span id="history-count" class="font-bold">0</span> <span id="history-count-label">部漫画</span>
                     </p>
                 </div>
                 <div class="flex gap-2">
-                    <button onclick="saveCurrentToHistory()" class="border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">💾 保存当前</button>
-                    <button onclick="loadHistoryList()" class="border-2 border-gray-300 hover:border-black px-4 py-2 text-sm font-medium transition-colors">🔄 刷新</button>
+                    <button id="history-save-current-btn" onclick="saveCurrentToHistory()" class="border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">💾 保存当前</button>
+                    <button onclick="refreshCurrentHistoryList()" class="border-2 border-gray-300 hover:border-black px-4 py-2 text-sm font-medium transition-colors">🔄 刷新</button>
                 </div>
             </div>
-            <div id="history-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <div class="col-span-full text-center text-gray-400 py-12">加载中...</div>
+            <!-- 子切换: 漫画作品 / AI 写作 -->
+            <div class="flex gap-4 border-b-2 border-gray-200 mb-4">
+                <button id="hist-sub-comic" onclick="switchHistorySub('comic')" class="pb-2 px-1 text-base font-bold border-b-[3px] border-black">📖 漫画作品</button>
+                <button id="hist-sub-writing" onclick="switchHistorySub('writing')" class="pb-2 px-1 text-base text-gray-500 border-b-[3px] border-transparent hover:border-gray-300">✍️ AI 写作</button>
+            </div>
+            <!-- 漫画作品列表 -->
+            <div id="history-comic-wrap">
+                <div id="history-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div class="col-span-full text-center text-gray-400 py-12">加载中...</div>
+                </div>
+            </div>
+            <!-- AI 写作列表 -->
+            <div id="history-writing-wrap" class="hidden">
+                <div id="history-writing-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div class="col-span-full text-center text-gray-400 py-12">加载中...</div>
+                </div>
             </div>
         </div>
     </div>
@@ -426,13 +630,13 @@
 
             <!-- Vision Model Config -->
             <div class="mt-4 p-4 bg-gray-50 border border-gray-200">
-                <div class="flex items-center gap-4">
+                <div class="flex flex-col md:flex-row items-stretch md:items-center gap-3">
                     <div class="flex-1">
                         <label class="block text-sm font-medium mb-1">视觉模型名称（需支持图片识别）</label>
                         <input type="text" id="vision-model" placeholder="gpt-4o / claude-3-5-sonnet / 自定义" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
                     </div>
                     <div class="flex items-end">
-                        <button onclick="startComicToNovel()" id="comic2novel-btn" class="btn-primary px-8 py-3 font-medium text-lg flex items-center gap-2">
+                        <button onclick="startComicToNovel()" id="comic2novel-btn" class="btn-primary w-full md:w-auto justify-center px-8 py-3 font-medium text-lg flex items-center gap-2">
                             <span>开始转换</span>
                             <span id="comic2novel-spinner" class="loading-spinner hidden"></span>
                         </button>
@@ -461,15 +665,40 @@
     </div>
 
     <!-- Image Preview Modal -->
-    <div id="image-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden z-50 flex items-center justify-center p-4" onclick="closeModal()">
+    <div id="image-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden z-50 flex items-center justify-center p-2 md:p-4" onclick="closeModal()">
         <div class="relative max-w-4xl max-h-full" onclick="event.stopPropagation()">
-            <img id="modal-image" src="" alt="预览" class="max-w-full max-h-[85vh] object-contain border-4 border-white">
+            <img id="modal-image" src="" alt="预览" class="max-w-full max-h-[85dvh] object-contain border-4 border-white">
             <button onclick="closeModal()" class="absolute -top-10 right-0 text-white text-2xl hover:text-gray-300">✕</button>
         </div>
     </div>
 
+    <!-- AI 润色对比预览 Modal -->
+    <div id="polish-compare-modal" class="fixed inset-0 z-50 hidden">
+        <div class="absolute inset-0 bg-black bg-opacity-50" onclick="cancelPolishCompare()"></div>
+        <div class="relative modal-panel-compare max-w-6xl mx-auto mt-2 mb-2 md:mt-8 md:mb-8 bg-white manga-border panel-shadow" style="display: flex; flex-direction: column;">
+            <div class="flex items-center justify-between px-4 py-3 md:px-6 md:py-4 border-b-2 border-gray-200">
+                <h2 class="text-xl font-bold">✨ 润色对比预览</h2>
+                <button onclick="cancelPolishCompare()" class="w-9 h-9 flex items-center justify-center text-2xl text-gray-600 hover:text-black border border-gray-300 hover:border-black transition-colors">×</button>
+            </div>
+            <div class="flex-1 grid grid-cols-1 md:grid-cols-2 gap-0 p-3 md:p-6" style="min-height: 0;">
+                <div class="flex flex-col" style="min-width: 0;">
+                    <div class="text-sm font-bold text-gray-500 mb-2">📄 原文</div>
+                    <div id="polish-original" class="whitespace-pre-wrap text-sm leading-relaxed border border-gray-300 p-3 bg-gray-50 overflow-y-auto" style="max-height: 60vh; flex: 1;"></div>
+                </div>
+                <div class="flex flex-col mt-4 md:mt-0 md:ml-4" style="min-width: 0;">
+                    <div class="text-sm font-bold text-green-700 mb-2">✨ 润色稿</div>
+                    <div id="polish-result" class="whitespace-pre-wrap text-sm leading-relaxed border-2 border-green-300 p-3 bg-green-50 overflow-y-auto" style="max-height: 60vh; flex: 1;"></div>
+                </div>
+            </div>
+            <div class="flex justify-end gap-3 px-4 py-3 md:px-6 md:py-4 border-t-2 border-gray-200">
+                <button onclick="cancelPolishCompare()" class="border-2 border-gray-300 hover:border-black px-6 py-2 font-medium transition-colors">✗ 放弃</button>
+                <button onclick="confirmPolishReplace()" class="btn-primary px-6 py-2 font-medium">✓ 替换文本</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Notification -->
-    <div id="toast" class="fixed bottom-6 right-6 bg-black text-white px-6 py-3 rounded shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 z-50"></div>
+    <div id="toast" class="fixed bottom-24 md:bottom-6 right-6 bg-black text-white px-6 py-3 rounded shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 z-50"></div>
 
     <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>

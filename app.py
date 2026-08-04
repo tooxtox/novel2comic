@@ -6,19 +6,33 @@ import requests
 import json
 import os
 import re
+import sys
 import time
 import hashlib
 import hmac
 import uuid
 import secrets
 import shutil
+import socket
 from datetime import datetime, timedelta
 from io import BytesIO
 import base64
+import threading
+import webbrowser
 from PIL import Image, ImageDraw, ImageFont
 
+# ========== PyInstaller 兼容: 区分只读资源目录 (_MEIPASS) 与可写持久化目录 ==========
+# 打包运行 (sys.frozen=True) 时, __file__ 指向 _MEIPASS 临时目录, 写文件到那里会丢失.
+# 因此 BASE_DIR 必须指向 exe 所在目录, 而 Flask 的 templates/static 用 _MEIPASS 路径.
+if getattr(sys, 'frozen', False):
+    _RESOURCE_DIR = sys._MEIPASS  # 只读: templates / static / 字体
+    _PERSIST_DIR = os.path.dirname(os.path.abspath(sys.executable))  # 可写: .env / users.json / 生成图
+else:
+    _RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
+    _PERSIST_DIR = _RESOURCE_DIR
+
 # ========== .env 加载 (python-dotenv 可选, 没装就用手写 mini 解析) ==========
-ENV_FILE = os.path.join(os.path.dirname(__file__), '.env')
+ENV_FILE = os.path.join(_PERSIST_DIR, '.env')
 
 
 def _parse_env_file(path):
@@ -113,7 +127,7 @@ _ADMIN_PASSWORD_JUST_GENERATED = 'MANGA_ADMIN_PASSWORD' not in os.environ
 ADMIN_USERNAME = _ensure_env('MANGA_ADMIN_USERNAME', lambda: 'admin', write_back=False)
 ADMIN_PASSWORD = _ensure_env('MANGA_ADMIN_PASSWORD', lambda: secrets.token_urlsafe(16))
 
-app = Flask(__name__, static_folder='static', template_folder='templates')
+app = Flask(__name__, static_folder=None, template_folder=os.path.join(_RESOURCE_DIR, 'templates'))
 app.secret_key = SECRET_KEY
 CORS(app, supports_credentials=True)
 
@@ -121,23 +135,36 @@ CORS(app, supports_credentials=True)
 # async_mode='threading' 兼容同步 Flask, 无需 eventlet/gevent
 socketio = SocketIO(app, cors_allowed_origins="*", manage_session=False, async_mode='threading')
 
-BASE_DIR = os.path.dirname(__file__)
+BASE_DIR = _PERSIST_DIR
 CONFIG_LOCAL_PATH = os.path.join(BASE_DIR, 'config.local.json')
 CONFIG_TEMPLATE_PATH = os.path.join(BASE_DIR, 'config.json')
+
+# ========== PyInstaller 兼容: 自定义 static 路由, 兼顾内置资源和用户生成文件 ==========
+# Flask 默认的 /static 只服务 static_folder (此处 _MEIPASS/static), 但生成图在 BASE_DIR/static.
+# static_folder=None 时 Flask 不注册 'static' 端点, 这里用 endpoint='static' 补上,
+# 使模板里的 url_for('static', filename=...) 能正确生成 URL.
+@app.route('/static/<path:filename>', endpoint='static')
+def _pyinstaller_static(filename):
+    for base in (_RESOURCE_DIR, BASE_DIR):
+        candidate = os.path.join(base, 'static', filename)
+        if os.path.isfile(candidate):
+            return send_file(candidate)
+    from flask import abort
+    abort(404)
 
 OUTPUT_DIR = os.path.join(BASE_DIR, 'static', 'output')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # 参考图缓存目录
-CACHE_DIR = os.path.join(os.path.dirname(__file__), 'static', 'cache')
+CACHE_DIR = os.path.join(BASE_DIR, 'static', 'cache')
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # 会话结果持久化目录（内网穿透场景下，先由主机接收再传给用户）
-RESULTS_DIR = os.path.join(os.path.dirname(__file__), 'results')
+RESULTS_DIR = os.path.join(BASE_DIR, 'results')
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # 用户作品永久保存目录（账号维度）
-USER_DATA_DIR = os.path.join(os.path.dirname(__file__), 'static', 'users')
+USER_DATA_DIR = os.path.join(BASE_DIR, 'static', 'users')
 os.makedirs(USER_DATA_DIR, exist_ok=True)
 
 # 注册用户凭据文件 ( username → {password_hash, salt, created_at} )
@@ -202,10 +229,22 @@ def get_work_dir(username, work_id):
 
 
 def get_current_work_id():
-    """获取当前会话绑定的作品ID（用户未显式创建时，使用session_id作为虚拟账号）"""
+    """获取当前会话绑定的作品ID（用户未显式创建时，使用session_id作为虚拟账号）
+
+    优先从请求体读 work_id (小程序前端会传, 用于云存储路径),
+    其次用 session 中的 work_id。
+    """
     sid = get_session_id()
     username = session.get('username') or f'guest_{sid[:8]}'
-    return session.get('work_id'), username
+    work_id = session.get('work_id')
+    try:
+        body = request.get_json(silent=True) or {}
+        req_work_id = body.get('work_id')
+        if req_work_id:
+            work_id = req_work_id
+    except Exception:
+        pass
+    return work_id, username
 
 
 def list_user_works(username):
@@ -231,6 +270,99 @@ def save_user_history(username, history):
             json.dump(history, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"Save history error: {e}")
+
+
+# ========== AI 写作历史 (与漫画作品分开存储) ==========
+# 每篇写作 = users/<username>/writings/<writing_id>.json
+# 索引     = users/<username>/writings/writings_history.json
+
+def _current_username():
+    """当前登录用户名 (未注册会话用 guest_<sid> 兜底)"""
+    return session.get('username') or f'guest_{get_session_id()[:8]}'
+
+
+def get_writings_dir(username):
+    """获取用户写作目录，不存在则创建"""
+    d = os.path.join(USER_DATA_DIR, username, 'writings')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def list_writings(username):
+    """列出用户的写作历史索引 [{writing_id,title,created_at,updated_at,content_len}]"""
+    idx = os.path.join(get_writings_dir(username), 'writings_history.json')
+    if not os.path.exists(idx):
+        return []
+    try:
+        with open(idx, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"List writings error: {e}")
+        return []
+
+
+def save_writings_history(username, history):
+    """保存用户的写作历史索引"""
+    idx = os.path.join(get_writings_dir(username), 'writings_history.json')
+    tmp = idx + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, idx)
+    except Exception as e:
+        print(f"Save writings history error: {e}")
+
+
+def read_writing(username, writing_id):
+    """读取一篇写作，不存在返回 None"""
+    if not writing_id:
+        return None
+    path = os.path.join(get_writings_dir(username), f'{writing_id}.json')
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Read writing error: {e}")
+        return None
+
+
+def save_writing(username, writing_id, doc):
+    """保存一篇写作 (原子写: tmp + os.replace)"""
+    path = os.path.join(get_writings_dir(username), f'{writing_id}.json')
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    # 更新索引 (按 updated_at 倒序)
+    history = [w for w in list_writings(username) if w.get('writing_id') != writing_id]
+    history.insert(0, {
+        'writing_id': writing_id,
+        'title': doc.get('title', ''),
+        'created_at': doc.get('created_at', ''),
+        'updated_at': doc.get('updated_at', ''),
+        'content_len': len(doc.get('content', '') or ''),
+    })
+    save_writings_history(username, history)
+
+
+def delete_writing(username, writing_id):
+    """删除一篇写作及索引项，返回是否成功"""
+    if not writing_id:
+        return False
+    path = os.path.join(get_writings_dir(username), f'{writing_id}.json')
+    removed = False
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            removed = True
+    except Exception as e:
+        print(f"Delete writing file error: {e}")
+        return False
+    history = [w for w in list_writings(username) if w.get('writing_id') != writing_id]
+    save_writings_history(username, history)
+    return removed
 
 
 def migrate_legacy_output():
@@ -393,7 +525,7 @@ def cache_reference_image(url, name=""):
             if resp.status_code == 200:
                 img_data = resp.content
         elif url.startswith('/static'):
-            local_path = os.path.join(os.path.dirname(__file__), url.lstrip('/'))
+            local_path = os.path.join(BASE_DIR, url.lstrip('/'))
             if os.path.exists(local_path):
                 with open(local_path, 'rb') as f:
                     img_data = f.read()
@@ -439,7 +571,7 @@ def get_cached_image_base64(cache_url):
     if not cache_url:
         return None
     try:
-        local_path = os.path.join(os.path.dirname(__file__), cache_url.lstrip('/'))
+        local_path = os.path.join(BASE_DIR, cache_url.lstrip('/'))
         if os.path.exists(local_path):
             with open(local_path, 'rb') as f:
                 img_data = f.read()
@@ -561,7 +693,7 @@ def login_required(f):
 # 进度事件通过 task_id 区分不同任务, 前端订阅后按 task_id 过滤
 
 def emit_progress(task_id, progress, message, stage=None, extra=None):
-    """向所有客户端推送进度事件 (前端按 task_id 过滤)
+    """向云函数 reportProgress 上报进度 (替代原 SocketIO 推送, 前端轮询云数据库)
 
     Args:
         task_id:  任务唯一ID (前端生成, 随请求传给后端)
@@ -571,15 +703,19 @@ def emit_progress(task_id, progress, message, stage=None, extra=None):
         extra:    可选的附加数据 dict
     """
     try:
-        socketio.emit('task_progress', {
-            'task_id': task_id,
+        url = os.environ.get('CLOUDBASE_REPORT_PROGRESS_URL', '')
+        if not url:
+            return  # 未配置云函数 HTTP 触发 URL 则跳过, 不影响主流程
+        payload = {
+            'taskId': task_id,
             'progress': min(100, max(0, int(progress))),
             'message': str(message),
             'stage': stage or '',
             'extra': extra or {}
-        })
+        }
+        requests.post(url, json=payload, timeout=5)
     except Exception as e:
-        print(f"[WebSocket] emit_progress error: {e}")
+        print(f"[emit_progress] report failed: {e}")
 
 
 @socketio.on('connect')
@@ -593,6 +729,58 @@ def on_connect():
 @socketio.on('disconnect')
 def on_disconnect():
     print(f"[WebSocket] client disconnected, sid={request.sid}")
+
+
+def _host_machine_identifiers():
+    """返回"主机本机"的身份标识集合 (全小写): 环回名 + 本机主机名 + 本机所有局域网 IPv4.
+    用于判定请求是否来自主机本机访问."""
+    names = {'localhost', '127.0.0.1', '::1', '0.0.0.0'}
+    try:
+        names.add(socket.gethostname().lower())
+    except Exception:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            addr = info[4][0]
+            if addr and not addr.startswith('127.'):
+                names.add(addr.lower())
+    except Exception:
+        pass
+    # 兜底: UDP 探测本机出网 IP (connect 只在本地路由表查一下, 不真正发包)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        addr = s.getsockname()[0]
+        if addr and not addr.startswith('127.'):
+            names.add(addr.lower())
+        s.close()
+    except Exception:
+        pass
+    return names
+
+
+def _request_hostname():
+    """提取请求 Host 头的纯主机名 (去掉端口 / IPv6 方括号), 小写."""
+    host = (request.headers.get('Host') or '').strip().lower()
+    if host.startswith('['):  # [::1]:2778
+        host = host[1:].split(']')[0]
+    elif ':' in host:         # localhost:2778 / 192.168.1.5:2778
+        host = host.rsplit(':', 1)[0]
+    return host
+
+
+def _is_host_machine_request():
+    """判定当前请求是否来自"主机本机"访问 (而非内网穿透/反向代理转发).
+
+    关键点: natapp/ngrok/frp 等内网穿透工具会在主机本地把公网请求转发给 127.0.0.1,
+    所以 request.remote_addr 对本机访问和穿透访问都是 127.0.0.1, 无法区分.
+    可靠的信号是 Host 头: 本机访问时浏览器发送 localhost/127.0.0.1/本机IP,
+    穿透访问时 Host 是穿透域名或公网地址.
+    """
+    host = _request_hostname()
+    if not host:
+        return False
+    return host in _host_machine_identifiers()
 
 
 @app.route('/')
@@ -612,6 +800,10 @@ def login():
 
     # 1. 先校验管理员 (来自 .env)
     if username == ADMIN_USERNAME and hmac.compare_digest(password, ADMIN_PASSWORD):
+        # 安全: admin 账号只能在主机本机登录, 禁止经内网穿透/公网远程登录
+        if not _is_host_machine_request():
+            print(f"[login] BLOCKED admin login from non-host: remote={request.remote_addr} host={request.headers.get('Host')}")
+            return jsonify({'success': False, 'error': '管理员账号仅限主机本机登录'}), 403
         session['logged_in'] = True
         session['username'] = username
         session['is_admin'] = True
@@ -717,7 +909,7 @@ def segment_novel():
     prompt = f"""将以下小说转换漫画分镜，每页分镜数{segments_hint}。同时提取所有主要出场角色。只返回JSON，无解释。
 
 小说：
-{text[:4000]}
+{text[:2000] + text[-2000:]}
 
 每个分镜必须输出以下字段，camera_angle/composition/mood/shot_scale/lighting/of_type 必须从给定枚举中选一个（最贴近情节的）；dialogue_type 也必须从给定枚举中选一个（决定对话气泡形状，是漫画分镜师的"语气设计"）：
 - scene_description: 简短场景描述（中文，20字内）
@@ -1015,7 +1207,7 @@ def save_image_result(image_url, prefix="manga", work_id=None, work_username=Non
                 f.write(img_response.content)
 
             # 返回以 /static/ 为前缀的URL
-            rel_path = os.path.relpath(filepath, os.path.join(os.path.dirname(__file__), 'static'))
+            rel_path = os.path.relpath(filepath, os.path.join(BASE_DIR, 'static'))
             local_url = '/static/' + rel_path.replace(os.sep, '/')
             print(f"Saved to work dir: {local_url}")
             return local_url, None
@@ -1037,11 +1229,42 @@ def save_image_result(image_url, prefix="manga", work_id=None, work_username=Non
         with open(filepath, 'wb') as f:
             f.write(base64.b64decode(image_data))
 
-        rel_path = os.path.relpath(filepath, os.path.join(os.path.dirname(__file__), 'static'))
+        rel_path = os.path.relpath(filepath, os.path.join(BASE_DIR, 'static'))
         local_url = '/static/' + rel_path.replace(os.sep, '/')
         return local_url, None
 
     return None, {'error': '无法获取图片'}
+
+
+def upload_to_cloud_storage(local_url, work_id=None, prefix="manga"):
+    """把本地 /static/... 图片上传到云存储, 返回 cloud:// fileID。
+
+    调用 uploadImage 云函数 HTTP 触发 URL (env CLOUDBASE_UPLOAD_IMAGE_URL)。
+    失败返回 None (不影响主流程, 调用方回退返回本地 URL)。
+    """
+    try:
+        url = os.environ.get('CLOUDBASE_UPLOAD_IMAGE_URL', '')
+        if not url:
+            return None
+        abs_path = _local_image_abs_path(local_url)
+        if not abs_path or not os.path.exists(abs_path):
+            return None
+        with open(abs_path, 'rb') as f:
+            b64 = base64.b64encode(f.read()).decode('ascii')
+        filename = os.path.basename(abs_path)
+        wid = work_id or 'unknown'
+        cloud_path = f'works/{wid}/images/{prefix}_{filename}'
+        resp = requests.post(url, json={'cloudPath': cloud_path, 'base64': b64}, timeout=120)
+        data = resp.json()
+        if data and data.get('code') == 0 and data.get('data'):
+            file_id = data['data'].get('fileID')
+            print(f"[CloudUpload] uploaded {local_url} -> {file_id}")
+            return file_id
+        print(f"[CloudUpload] unexpected resp: {data}")
+        return None
+    except Exception as e:
+        print(f"[CloudUpload] failed for {local_url}: {e}")
+        return None
 
 
 def prepare_ref_images(character_references, previous_page_image=None):
@@ -1078,147 +1301,6 @@ def prepare_ref_images(character_references, previous_page_image=None):
                 print(f"Failed to read cached previous page image")
     
     return ref_images
-
-
-@app.route('/api/generate-image', methods=['POST'])
-@login_required
-def generate_image():
-    data = request.json
-    prompt = data.get('prompt', '')
-    # dialogue: 该分镜的对话原文 (可选, 用于强制模型渲染对话气泡)
-    dialogue = (data.get('dialogue') or '').strip()
-    api_url = data.get('api_url', '')
-    api_key = data.get('api_key', '')
-    model = data.get('model', '')
-    # 默认 negative_prompt 不再包含 'text overlay' / 'text' (否则模型会不渲染对话文字)
-    negative_prompt = data.get('negative_prompt', 'color, colorful, vibrant, chromatic, saturated, blurry, low quality, distorted, watermark, signature, logo')
-    style_tags = data.get('style_tags', '').strip()
-    # 向后兼容: 优先 character_references, 回退 references (新字段名)
-    character_references = data.get('character_references') or data.get('references') or []
-    # 参考强度 (0-1, 默认 0.6)
-    reference_strength = data.get('reference_strength', 0.6)
-    try:
-        reference_strength = float(reference_strength)
-    except (TypeError, ValueError):
-        reference_strength = 0.6
-    reference_strength = max(0.0, min(1.0, reference_strength))
-    page_idx = data.get('page_idx')
-    seg_idx = data.get('seg_idx')
-    task_id = data.get('task_id', '')
-
-    if not prompt or not api_url:
-        return jsonify({'error': '缺少必要参数'}), 400
-
-    emit_progress(task_id, 10, '正在构建提示词和准备参考图...', 'preparing')
-
-    # 任务2: 结构化字段(camera_angle/composition/mood/shot_scale/lighting/of_type)升级 prompt
-    structured_fields = {
-        'camera_angle': data.get('camera_angle', ''),
-        'composition': data.get('composition', ''),
-        'mood': data.get('mood', ''),
-        'shot_scale': data.get('shot_scale', ''),
-        'lighting': data.get('lighting', ''),
-        'of_type': data.get('of_type', ''),
-    }
-    # 只在至少有一个结构化字段非空时才升级
-    if any((v or '').strip() for v in structured_fields.values()):
-        # 把前端传来的 style_prompt 字段合并进来 (若未传, 则以原 prompt 作为 base)
-        structured_fields['style_prompt'] = data.get('style_prompt') or prompt
-        upgraded = upgrade_segment_prompt(structured_fields)
-        if upgraded:
-            # 升级后的 prompt 取代原始 prompt
-            prompt = upgraded
-            print(f"[Task2] Upgraded prompt with structured tags: {[k for k,v in structured_fields.items() if k != 'style_prompt' and (v or '').strip()]}")
-
-    style_suffix = f", {style_tags}" if style_tags else ""
-    # 对话文本不再交给图像 API 渲染, 由后端 PIL 叠加 (避免乱码)
-    # 这里明确要求图像 API 不画任何文字/气泡
-    manga_prompt = (
-        f"ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, "
-        f"pure monochrome, grayscale only. detailed ink drawing, high contrast, dramatic shadows, "
-        f"cross-hatching{style_suffix}, {prompt}. "
-        f"NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text overlay."
-    )
-
-    # 构建角色设定文本
-    if character_references and len(character_references) > 0:
-        # 根据 reference_strength 生成不同强度的提示
-        if reference_strength >= 0.8:
-            ref_weight_hint = "CRITICAL (high weight): Reference characters' appearance MUST be preserved EXACTLY — identical facial features, body proportions, clothing, hair color and style. Any deviation is unacceptable."
-        elif reference_strength >= 0.5:
-            ref_weight_hint = "IMPORTANT (medium weight): Reference characters' appearance should be strongly preserved — keep core facial features, hair, and clothing consistent."
-        elif reference_strength > 0.0:
-            ref_weight_hint = "(low weight) Reference characters should be loosely inspired by the references — main identity should be recognizable but variations are allowed."
-        else:
-            ref_weight_hint = ""
-
-        char_sheet = []
-        for char in character_references:
-            name = char.get('name', '')
-            desc = char.get('description', '')
-            char_sheet.append(f"[CHARACTER: {name}]\nAPPEARANCE: {desc}\nThis character MUST appear exactly as described above.")
-
-        char_section = "\n\n=== CHARACTER REFERENCE SHEET (reference_strength={:.2f}) ===\n".format(reference_strength) + "\n\n".join(char_sheet) + (f"\n\n{ref_weight_hint}" if ref_weight_hint else "\n\nAll characters' appearance MUST strictly follow the descriptions above.")
-        manga_prompt += char_section
-
-    # 准备参考图片（缓存到本地后转base64）
-    ref_images = prepare_ref_images(character_references)
-
-    try:
-        payload = {
-            'model': model or 'doubao-seedream-4-5-251128',
-            'prompt': manga_prompt,
-            'size': '2K',
-            'response_format': 'url',
-            'watermark': False,
-        }
-
-        # 参考图片通过image字段传入（支持单图字符串或多图数组）
-        if ref_images:
-            if len(ref_images) == 1:
-                payload['image'] = ref_images[0]
-            else:
-                payload['image'] = ref_images
-            # 顺带把 reference_strength 传给API（部分实现支持此字段）
-            payload['reference_strength'] = reference_strength
-            print(f"Included {len(ref_images)} reference image(s) in API payload (strength={reference_strength:.2f})")
-
-        emit_progress(task_id, 30, '正在调用图像生成 API (可能需要 10-60 秒)...', 'calling_image_api')
-
-        image_url, result = call_image_api(api_url, api_key, payload)
-        work_id, work_username = get_current_work_id()
-
-        emit_progress(task_id, 75, '图片生成完成, 正在下载保存...', 'downloading')
-
-        local_url, error = save_image_result(image_url, "manga", work_id, work_username)
-
-        if local_url:
-            # PIL 叠加对话气泡 (替代图像 API 渲染, 避免乱码)
-            _overlay_bubble_on_segment(local_url, {
-                'dialogue': dialogue,
-                'dialogue_type': data.get('dialogue_type') or 'dialogue',
-            })
-            # 持久化图片映射（内网穿透恢复用）
-            if page_idx is not None and seg_idx is not None:
-                images_data = load_session_data('images') or {'images': []}
-                images_data['images'].append({
-                    'key': f'{page_idx}-{seg_idx}',
-                    'local_url': local_url,
-                    'timestamp': datetime.now().isoformat()
-                })
-                save_session_data('images', images_data)
-            emit_progress(task_id, 100, '图片生成完成', 'done')
-            return jsonify({'success': True, 'image_url': local_url})
-        else:
-            emit_progress(task_id, 0, '图片生成失败', 'error')
-            return jsonify({'error': error.get('error', '无法获取图片'), 'raw': result}), 500
-
-    except Exception as e:
-        import traceback
-        print(f"Image generation error: {str(e)}")
-        print(traceback.format_exc())
-        emit_progress(task_id, 0, f'图片生成失败: {e}', 'error')
-        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/save-config', methods=['POST'])
@@ -1446,9 +1528,11 @@ def generate_character_image():
                 local_url, error = save_image_result(image_url, "char", work_id, work_username)
 
                 if local_url:
+                    # 上传人设图到云存储, 返回 cloud:// fileID
+                    file_id = upload_to_cloud_storage(local_url, work_id, "char")
                     return jsonify({
                         'success': True,
-                        'image_url': local_url,
+                        'image_url': file_id or local_url,
                         'attempts': attempt,
                         'max_attempts': max_attempts
                     })
@@ -1481,7 +1565,7 @@ def download_image(url):
             response = requests.get(url, timeout=30)
             return Image.open(BytesIO(response.content))
         elif url.startswith('/static'):
-            local_path = os.path.join(os.path.dirname(__file__), url.lstrip('/'))
+            local_path = os.path.join(BASE_DIR, url.lstrip('/'))
             return Image.open(local_path)
         elif url.startswith('data:image'):
             image_data = url.split(',')[1]
@@ -2096,7 +2180,7 @@ def _local_image_abs_path(local_url):
     """把 /static/xxx URL 转成本地绝对路径; 非 /static/ 前缀返回 None"""
     if not local_url or not local_url.startswith('/static/'):
         return None
-    return os.path.join(os.path.dirname(__file__), local_url[1:])
+    return os.path.join(BASE_DIR, local_url[1:])
 
 
 def _save_clean_copy(local_url):
@@ -2109,39 +2193,12 @@ def _save_clean_copy(local_url):
     clean_abs_path = base + '_clean' + (ext or '.png')
     try:
         shutil.copy2(abs_path, clean_abs_path)
-        rel_path = os.path.relpath(clean_abs_path, os.path.join(os.path.dirname(__file__), 'static'))
+        rel_path = os.path.relpath(clean_abs_path, os.path.join(BASE_DIR, 'static'))
         clean_url = '/static/' + rel_path.replace(os.sep, '/')
         return clean_url
     except Exception as e:
         print(f"[CleanCopy] failed for {local_url}: {e}")
         return None
-
-
-def _overlay_bubble_on_segment(local_url, seg_info):
-    """在单张分镜图上用 PIL 叠加对话气泡, 覆盖原文件.
-    seg_info: {'dialogue': str, 'dialogue_type': str}
-    无 dialogue 直接返回."""
-    if not seg_info or not (seg_info.get('dialogue') or '').strip():
-        return
-    abs_path = _local_image_abs_path(local_url)
-    if not abs_path or not os.path.exists(abs_path):
-        print(f"[PIL-Overlay] image not found: {local_url}")
-        return
-    try:
-        with Image.open(abs_path) as img:
-            img = img.convert('RGB')
-            W, H = img.size
-            font = _get_chinese_font(max(16, int(H * 0.04)))
-            draw = ImageDraw.Draw(img)
-            panel_box = {'x': 0, 'y': 0, 'w': W, 'h': H}
-            render_panel_bubble(
-                draw, panel_box, seg_info, font,
-                overflow=True, canvas_bounds=(0, 0, W, H)
-            )
-            img.save(abs_path)
-            print(f"[PIL-Overlay] segment bubble overlaid: {abs_path}")
-    except Exception as e:
-        print(f"[PIL-Overlay] failed for {local_url}: {e}")
 
 
 def _overlay_bubbles_on_page(local_url, segments):
@@ -2186,98 +2243,6 @@ def _overlay_bubbles_on_page(local_url, segments):
     except Exception as e:
         print(f"[PIL-Overlay] failed for page {local_url}: {e}")
     return clean_url, bubbles
-
-
-@app.route('/api/combine-page', methods=['POST'])
-@login_required
-def combine_page():
-    data = request.json
-    segments = data.get('segments', [])
-    page_num = data.get('page_num', 1)
-    # 任务3 新增: 手动布局 (可选) + 越界选项 (默认 True)
-    manual_layout = data.get('panel_layout')
-    allow_overflow = bool(data.get('allow_overflow', True))
-    canvas_w = data.get('canvas_w')
-    canvas_h = data.get('canvas_h')
-    # 标题/页码区高度
-    title_h = 50
-    gap = 4
-
-    if not segments:
-        return jsonify({'error': '缺少分镜数据'}), 400
-
-    try:
-        images = []
-        for seg in segments:
-            if seg.get('image_url'):
-                img = download_image(seg['image_url'])
-                if img:
-                    images.append((img, seg))
-
-        if not images:
-            return jsonify({'error': '没有可用的图片'}), 400
-
-        panel_count = len(images)
-        # 默认画布: 1024*cols 宽, 1024*rows 高 (留 title_h 顶部)
-        rows_map = {1: 1, 2: 1, 3: 1, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 3, 12: 3, 13: 4, 14: 4, 15: 4, 16: 4}
-        cols_map = {1: 1, 2: 2, 3: 3, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4, 9: 3, 10: 4, 11: 4, 12: 4, 13: 4, 14: 4, 15: 4, 16: 4}
-        rows = rows_map.get(panel_count, max(1, (panel_count + 3) // 4))
-        cols = cols_map.get(panel_count, min(4, (panel_count + rows - 1) // rows))
-
-        cell_w = 1024
-        cell_h = 1024
-        if canvas_w and canvas_h:
-            cell_w = int((canvas_h - title_h) / rows)
-            cell_h = int((canvas_w - title_h) / cols)
-
-        canvas_width = cell_w * cols + gap * (cols + 1)
-        canvas_height = cell_h * rows + gap * (rows + 1) + title_h
-
-        layout = compute_grid_layout(panel_count, canvas_width, canvas_height - title_h, gap=gap, manual_layout=manual_layout)
-        # 把 layout 整体下移 title_h
-        for box in layout:
-            box['y'] += title_h
-
-        combined = Image.new('RGB', (canvas_width, canvas_height), 'white')
-        draw = ImageDraw.Draw(combined)
-
-        font = _get_chinese_font(16)
-
-        for idx, (img, seg) in enumerate(images):
-            box = layout[idx]
-            # 缩放 img 到 panel 尺寸
-            panel_img = img.resize((box['w'], box['h']), Image.LANCZOS)
-            combined.paste(panel_img, (box['x'], box['y']))
-            # panel 边框
-            draw.rectangle([box['x'], box['y'], box['x'] + box['w'], box['y'] + box['h']], outline='black', width=3)
-            # panel 编号
-            badge_font = _get_chinese_font(18)
-            draw.text((box['x'] + 6, box['y'] + 6), str(idx + 1), fill='yellow', font=badge_font)
-            # 注: 分镜图已在 /api/generate-image 阶段叠加过气泡, 这里不再重复画
-
-        # 页码/标题
-        title_text = f"第 {page_num} 页"
-        title_font = _get_chinese_font(24)
-        draw.text((20, 12), title_text, fill='black', font=title_font)
-
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"comic_page_{page_num}_{timestamp}.png"
-        filepath = os.path.join(OUTPUT_DIR, filename)
-        combined.save(filepath)
-
-        return jsonify({
-            'success': True,
-            'image_url': f'/static/output/{filename}',
-            'layout': layout,
-            'canvas': {'w': canvas_width, 'h': canvas_height},
-            'panel_count': panel_count
-        })
-
-    except Exception as e:
-        import traceback
-        print(f"Combine page error: {str(e)}")
-        print(traceback.format_exc())
-        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/generate-page', methods=['POST'])
@@ -2357,10 +2322,27 @@ NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text ov
             char_sheet = []
             for char in character_references:
                 name = char.get('name', '')
-                desc = char.get('description', '')
-                char_sheet.append(f"[CHARACTER: {name}]\nAPPEARANCE: {desc}\nThis character MUST appear exactly as described throughout ALL panels.")
-            char_section = "\n\n=== CHARACTER REFERENCE SHEET ===\n" + "\n\n".join(char_sheet) + "\n\nCRITICAL: All characters' appearance MUST be identical across all panels. Maintain absolute consistency in facial features, body type, clothing, and hairstyle throughout the entire page."
-            page_prompt += char_section
+                has_image = bool((char.get('image_url') or '').strip())
+                desc = (char.get('description') or '').strip()
+                char_prompt = (char.get('char_prompt') or '').strip()
+                # 没有参考人设图的角色: 把人设prompt(自定义外观提示词)作为文字描述喂给图像模型,
+                # 让模型在无参考图时仍能按文字生成其外观; 有图角色仍走参考图通道, 描述仅作辅助.
+                # 两者皆无外观信息则跳过该角色.
+                if not has_image and char_prompt:
+                    appearance = char_prompt
+                    note = ' (text appearance prompt, no reference image — render EXACTLY per this appearance prompt)'
+                else:
+                    appearance = desc
+                    note = ''
+                if not appearance:
+                    continue
+                char_sheet.append(
+                    f"[CHARACTER: {name}]\nAPPEARANCE: {appearance}{note}\n"
+                    f"This character MUST appear exactly as described throughout ALL panels."
+                )
+            if char_sheet:
+                char_section = "\n\n=== CHARACTER REFERENCE SHEET ===\n" + "\n\n".join(char_sheet) + "\n\nCRITICAL: All characters' appearance MUST be identical across all panels. Maintain absolute consistency in facial features, body type, clothing, and hairstyle throughout the entire page."
+                page_prompt += char_section
 
         if previous_page_image:
             page_prompt += f"\n\n=== PREVIOUS PAGE REFERENCE ===\nA reference image of the previous page (Page {page_num-1}) is provided. This page MUST have exactly the same art style, line quality, shading technique, and visual tone as the reference. Characters should look identical to how they appear in the previous page."
@@ -2409,11 +2391,14 @@ NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text ov
                     'timestamp': datetime.now().isoformat()
                 })
                 save_session_data('full_pages', fp_data)
+            # 上传整页 (含气泡) 和干净图到云存储, 返回 cloud:// fileID
+            file_id = upload_to_cloud_storage(local_url, work_id, f"comic_page_{page_num}_full")
+            clean_file_id = upload_to_cloud_storage(clean_url, work_id, f"comic_page_{page_num}_clean") if clean_url else None
             emit_progress(task_id, 100, f'第 {page_num} 页生成完成', 'done')
             return jsonify({
                 'success': True,
-                'image_url': local_url,
-                'clean_image_url': clean_url,
+                'image_url': file_id or local_url,
+                'clean_image_url': clean_file_id or clean_url,
                 'bubbles': bubbles,
             })
         else:
@@ -2569,7 +2554,7 @@ def work_save_state():
         try:
             # URL → 磁盘路径
             rel_path = url.lstrip('/')
-            disk_path = os.path.join(os.path.dirname(__file__), rel_path)
+            disk_path = os.path.join(BASE_DIR, rel_path)
             if not os.path.isfile(disk_path):
                 return url  # 文件不存在, 保持原 URL (可能是外部链接)
             # 生成新文件名
@@ -2687,7 +2672,7 @@ def history_detail(work_id):
     if os.path.isdir(images_dir):
         for fn in sorted(os.listdir(images_dir)):
             if fn.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-                rel = os.path.relpath(os.path.join(images_dir, fn), os.path.join(os.path.dirname(__file__), 'static'))
+                rel = os.path.relpath(os.path.join(images_dir, fn), os.path.join(BASE_DIR, 'static'))
                 url = '/static/' + rel.replace(os.sep, '/')
                 image_files.append(url)
                 stem = os.path.splitext(fn)[0]
@@ -2854,6 +2839,100 @@ def history_rename(work_id):
     return jsonify({'success': True, 'title': new_title})
 
 
+# ========== AI 写作历史接口 ==========
+
+@app.route('/api/writing/save', methods=['POST'])
+@login_required
+def writing_save():
+    """保存一篇 AI 写作: 有 writing_id 且属于当前用户则更新, 否则新建.
+    新建时如果没传 title, 用内容首行做标题兜底. 返回 {success, writing_id}."""
+    data = request.json or {}
+    content = data.get('content', '') or ''
+    title = (data.get('title') or '').strip()
+    writing_id = (data.get('writing_id') or '').strip() or session.get('writing_id') or ''
+
+    username = _current_username()
+    now = datetime.now().isoformat()
+
+    doc = None
+    if writing_id:
+        doc = read_writing(username, writing_id)
+
+    if doc is None:
+        # 新建
+        writing_id = str(uuid.uuid4())
+        if not title:
+            first_line = next((ln.strip() for ln in content.split('\n') if ln.strip()), '') or ''
+            title = first_line[:30] or f"写作 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        doc = {
+            'writing_id': writing_id,
+            'title': title,
+            'content': content,
+            'created_at': now,
+            'updated_at': now,
+        }
+    else:
+        doc['content'] = content
+        if title:
+            doc['title'] = title
+        doc['updated_at'] = now
+
+    save_writing(username, writing_id, doc)
+    session['writing_id'] = writing_id
+    return jsonify({'success': True, 'writing_id': writing_id})
+
+
+@app.route('/api/writings', methods=['GET'])
+@login_required
+def writings_list():
+    """列出当前用户的写作历史索引 (不含全文)"""
+    username = _current_username()
+    works = list_writings(username)
+    works.sort(key=lambda x: x.get('updated_at', ''), reverse=True)
+    return jsonify({'success': True, 'works': works, 'username': username})
+
+
+@app.route('/api/writing/<writing_id>', methods=['GET'])
+@login_required
+def writing_detail(writing_id):
+    """获取一篇写作全文"""
+    username = _current_username()
+    doc = read_writing(username, writing_id)
+    if not doc:
+        return jsonify({'error': '写作不存在'}), 404
+    return jsonify({'success': True, 'data': doc})
+
+
+@app.route('/api/writing/<writing_id>/rename', methods=['POST'])
+@login_required
+def writing_rename(writing_id):
+    """重命名一篇写作"""
+    data = request.json or {}
+    new_title = (data.get('title') or '').strip()
+    if not new_title:
+        return jsonify({'error': '标题不能为空'}), 400
+    username = _current_username()
+    doc = read_writing(username, writing_id)
+    if not doc:
+        return jsonify({'error': '写作不存在'}), 404
+    doc['title'] = new_title
+    doc['updated_at'] = datetime.now().isoformat()
+    save_writing(username, writing_id, doc)
+    return jsonify({'success': True, 'title': new_title})
+
+
+@app.route('/api/writing/<writing_id>', methods=['DELETE'])
+@login_required
+def writing_delete(writing_id):
+    """删除一篇写作"""
+    username = _current_username()
+    if not delete_writing(username, writing_id):
+        return jsonify({'error': '写作不存在'}), 404
+    if session.get('writing_id') == writing_id:
+        session.pop('writing_id', None)
+    return jsonify({'success': True})
+
+
 @app.route('/api/generate-title', methods=['POST'])
 @login_required
 def generate_title():
@@ -2909,6 +2988,401 @@ def generate_title():
         print(f"[generate-title] Error: {e}")
         # 失败时返回默认标题, 不阻断流程
         return jsonify({'success': False, 'title': f"漫画作品 {datetime.now().strftime('%Y-%m-%d')}", 'error': str(e)})
+
+
+# 长文本续写上下文压缩: 超过阈值时, 用模型把前情压成摘要再续写,
+# 避免超长小说只取末尾 N 字导致早期剧情丢失
+_COMPRESS_THRESHOLD = 8000    # 原文超过该字数才触发压缩
+_CONTEXT_TAIL = 4000          # 保留的原文尾部字数 (verbatim)
+_SUMMARIZE_HEAD_CAP = 12000   # 参与压缩的"前情"上限 (只取最近 N 字)
+
+
+def _summarize_head(head, api_url, api_key, model):
+    """把小说的"前情"(除最近尾部外的部分) 压缩成 ≤500 字摘要.
+    失败抛异常, 由调用方兜底退化为只取尾部."""
+    sample = head[-_SUMMARIZE_HEAD_CAP:]
+    prompt = (
+        "你是小说编辑。请把下面这段小说内容压缩成一份不超过500字的\"前情摘要\",\n"
+        "保留所有关键剧情推进、人物关系、重要设定与伏笔, 以便在后续续写中引用。\n"
+        "只输出摘要本身, 不要任何前缀、标题或解释。\n\n"
+        f"小说内容:\n{sample}"
+    )
+    headers = {'Content-Type': 'application/json'}
+    if api_key:
+        headers['Authorization'] = f'Bearer {api_key}'
+    payload = {
+        'model': model or 'minimax-m3-1-250227',
+        'messages': [
+            {'role': 'system', 'content': '你是一位专业的小说编辑, 只输出摘要文本, 不要任何解释或前缀。'},
+            {'role': 'user', 'content': prompt}
+        ],
+        'temperature': 0.4,
+        'max_tokens': 2048,
+    }
+    resp = requests.post(api_url, headers=headers, json=payload, timeout=180)
+    resp.raise_for_status()
+    result = resp.json()
+    content = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+    if not content:
+        raise RuntimeError('summarize returned empty')
+    return content
+
+
+def _build_continue_context(text, api_url, api_key, model):
+    """构造续写/剧情选项的上下文. 文本过长时先用模型压缩前情, 返回 (context, compressed)."""
+    if len(text) > _COMPRESS_THRESHOLD:
+        tail = text[-_CONTEXT_TAIL:]
+        try:
+            summary = _summarize_head(text[:-_CONTEXT_TAIL], api_url, api_key, model)
+            return f"[前情摘要]\n{summary}\n\n[最近原文]\n{tail}", True
+        except Exception as e:
+            print(f"[context] compress failed, fallback to tail-only: {e}")
+            return tail, False
+    return text[-6000:], False
+
+
+@app.route('/api/plot-options', methods=['POST'])
+@login_required
+def plot_options():
+    """用 LLM 基于小说结尾构思 3 个剧情发展方向"""
+    data = request.json or {}
+    text = (data.get('text') or '').strip()
+    api_url = data.get('api_url', '')
+    api_key = data.get('api_key', '')
+    model = data.get('model', '')
+
+    if not text:
+        return jsonify({'error': '缺少小说原文'}), 400
+    if not api_url:
+        return jsonify({'error': '缺少 LLM API 地址'}), 400
+
+    # 取末尾作为上下文 (剧情从结尾继续); 超长时先用模型压缩前情
+    context, compressed = _build_continue_context(text, api_url, api_key, model)
+
+    prompt = (
+        "阅读以下小说的内容, 构思 3 个不同的剧情发展方向。\n\n"
+        "要求:\n"
+        "1. 每个方向用一句话概括 (15-40 个汉字), 彼此风格和走向差异明显\n"
+        "2. 必须基于已有角色、设定和伏笔, 逻辑合理, 不要凭空引入全新世界观\n"
+        "3. 只返回 JSON 数组, 格式如 [\"方向一\",\"方向二\",\"方向三\"], 不要任何解释或前缀\n\n"
+        f"小说内容:\n{context}"
+    )
+
+    try:
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+        payload = {
+            'model': model or 'minimax-m3-1-250227',
+            'messages': [
+                {'role': 'system', 'content': '你是一位小说剧情策划师, 只返回 JSON 数组, 不要任何解释或前缀。'},
+                {'role': 'user', 'content': prompt}
+            ],
+            'temperature': 0.8,
+            # 推理型模型 (如 minimax-m3) 会先输出 reasoning_content 再输出正式内容,
+            # max_tokens 必须给足, 否则预算被思考链耗尽, content 为空
+            'max_tokens': 4000,
+        }
+        resp = requests.post(api_url, headers=headers, json=payload, timeout=120)
+        resp.raise_for_status()
+        result = resp.json()
+        raw = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+
+        # 优先按 JSON 数组解析
+        options = []
+        m = re.search(r'\[.*\]', raw, re.DOTALL)
+        if m:
+            try:
+                parsed = json.loads(m.group(0))
+                if isinstance(parsed, list):
+                    options = [str(x).strip() for x in parsed if str(x).strip()]
+            except (ValueError, TypeError):
+                options = []
+        # 兜底: 按行切分, 去掉 "1." "2." "3." 之类编号
+        if not options:
+            for line in raw.split('\n'):
+                cleaned = re.sub(r'^[\d一二三四五六]*[\.、)）]\s*', '', line).strip().strip('"\'“”')
+                if cleaned:
+                    options.append(cleaned)
+        # 清理每个选项里的编号/前缀残留
+        options = [re.sub(r'^[\d一二三四五六]*[\.、)）]\s*', '', o).strip() for o in options[:3]]
+
+        if not options:
+            return jsonify({'error': '剧情方向生成失败（模型思考过长或未按要求返回，请重试）'}), 502
+        return jsonify({'success': True, 'options': options})
+    except Exception as e:
+        print(f"[plot-options] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/continue-novel', methods=['POST'])
+@login_required
+def continue_novel():
+    """用 LLM 按指定方向续写小说, 返回新内容 (不含原文)"""
+    data = request.json or {}
+    text = (data.get('text') or '').strip()
+    api_url = data.get('api_url', '')
+    api_key = data.get('api_key', '')
+    model = data.get('model', '')
+    direction = (data.get('direction') or '').strip()
+
+    try:
+        length = int(data.get('length', 800))
+    except (TypeError, ValueError):
+        length = 800
+    length = max(100, min(length, 3000))
+
+    if not text:
+        return jsonify({'error': '缺少小说原文'}), 400
+    if not api_url:
+        return jsonify({'error': '缺少 LLM API 地址'}), 400
+
+    # 取末尾作为上下文 (故事从结尾继续); 超长时先用模型压缩前情, 避免早期剧情丢失
+    context, compressed = _build_continue_context(text, api_url, api_key, model)
+
+    prompt = (
+        "请续写以下小说的后续内容。\n\n"
+        "要求:\n"
+        "1. 保持与原文一致的人称、叙事视角、文风和节奏, 沿用已有角色、设定和伏笔\n"
+        "2. 承接上文情节自然推进, 人物性格与行为逻辑保持一致, 不要突然引入大量新角色\n"
+        "3. 不要重复、复述或改写原文中已有的内容, 直接从情节的下一步写起\n"
+        "4. 只输出新续写的内容本身, 不要输出\"续写:\"\"以下为续写内容\"之类的说明、前缀或标题\n"
+        "5. 续写约 {length} 个汉字, 自然分段, 到末尾可留悬念以便继续下一段\n\n"
+        f"小说结尾原文:\n{context}"
+    )
+    if direction:
+        prompt += f"\n\n作者方向要求: {direction}"
+
+    # 中文约 1 字 ≈ 1~1.5 token; 额外预留推理型模型的思考预算, 防止预算被 reasoning 耗尽
+    max_tokens = max(2048, min(int(length * 1.5) + 2048, 16384))
+
+    try:
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+        payload = {
+            'model': model or 'minimax-m3-1-250227',
+            'messages': [
+                {'role': 'system', 'content': '你是一位擅长中文长篇小说续写的作者, 只输出新续写内容, 不要任何解释或前缀。'},
+                {'role': 'user', 'content': prompt}
+            ],
+            'temperature': 0.7,
+            'max_tokens': max_tokens,
+        }
+        resp = requests.post(api_url, headers=headers, json=payload, timeout=300)
+        resp.raise_for_status()
+        result = resp.json()
+        continuation = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+
+        # 清理前缀/说明 (如 "续写:", "以下是续写内容:")
+        for _ in range(3):
+            stripped = continuation.lstrip()
+            if not stripped:
+                break
+            m = re.match(r'^(?:以下(?:为|是)?|接着)?续写(?:内容|结果|部分)?[:：]', stripped)
+            if m:
+                continuation = stripped[m.end():].lstrip()
+            else:
+                break
+        # 防模型重复原文结尾: 去掉续写开头与原文末尾重复的部分
+        tail = context[-80:]
+        for i in range(min(60, len(tail)), 0, -1):
+            if continuation.startswith(tail[-i:]):
+                continuation = continuation[i:]
+                break
+        continuation = continuation.lstrip()
+        # 硬性长度上限, 防止模型超发
+        continuation = continuation[:int(length * 1.4) + 300].rstrip()
+        if not continuation:
+            return jsonify({'error': '续写结果为空（模型思考过长或未按要求返回，请重试或减小字数）'}), 502
+        return jsonify({
+            'success': True,
+            'continuation': continuation,
+            'length': len(continuation),
+            'compressed': compressed,
+        })
+    except Exception as e:
+        print(f"[continue-novel] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/polish-styles', methods=['POST'])
+@login_required
+def polish_styles():
+    """用 LLM 基于小说文本生成 3-4 个润色风格选项"""
+    data = request.json or {}
+    text = (data.get('text') or '').strip()
+    api_url = data.get('api_url', '')
+    api_key = data.get('api_key', '')
+    model = data.get('model', '')
+
+    if not text:
+        return jsonify({'error': '缺少小说原文'}), 400
+    if not api_url:
+        return jsonify({'error': '缺少 LLM API 地址'}), 400
+
+    # 头尾各取 2000 字, 比只取结尾更贴合作者文风
+    context = text[:2000] + '\n……\n' + text[-2000:]
+
+    prompt = (
+        "阅读以下小说片段, 构思 3-4 个不同的润色风格。\n\n"
+        "要求:\n"
+        "1. 每个风格包含 name (一句话风格名, 如 \"保持原味\"\"更生动\"\"更精炼\"\"更文艺\") 和 instruction (给润色引擎的具体润色要求, 2-3 句)\n"
+        "2. 风格之间差异明显, 都要基于这段文本的文风特点\n"
+        "3. 只返回 JSON 数组, 格式如 [{\"name\":\"更生动\",\"instruction\":\"用更具体更有画面感的动词和细节\"}], 不要任何解释或前缀\n\n"
+        f"小说片段:\n{context}"
+    )
+
+    try:
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+        payload = {
+            'model': model or 'minimax-m3-1-250227',
+            'messages': [
+                {'role': 'system', 'content': '你是一位小说编辑, 只返回 JSON 数组, 不要任何解释或前缀。'},
+                {'role': 'user', 'content': prompt}
+            ],
+            'temperature': 0.8,
+            # 推理型模型会先输出 reasoning_content, max_tokens 必须给足
+            'max_tokens': 4000,
+        }
+        resp = requests.post(api_url, headers=headers, json=payload, timeout=120)
+        resp.raise_for_status()
+        result = resp.json()
+        raw = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+
+        styles = []
+        m = re.search(r'\[.*\]', raw, re.DOTALL)
+        if m:
+            try:
+                parsed = json.loads(m.group(0))
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if isinstance(item, dict) and item.get('name') and item.get('instruction'):
+                            styles.append({
+                                'name': str(item['name']).strip(),
+                                'instruction': str(item['instruction']).strip()
+                            })
+            except (ValueError, TypeError):
+                styles = []
+        styles = styles[:4]
+        if not styles:
+            return jsonify({'error': '润色风格生成失败（模型思考过长或未按要求返回，请重试）'}), 502
+        return jsonify({'success': True, 'styles': styles})
+    except Exception as e:
+        print(f"[polish-styles] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/polish-novel', methods=['POST'])
+@login_required
+def polish_novel():
+    """按指定风格润色小说文本; 长文本分块处理, 逐块调用 LLM"""
+    data = request.json or {}
+    text = (data.get('text') or '').strip()
+    api_url = data.get('api_url', '')
+    api_key = data.get('api_key', '')
+    model = data.get('model', '')
+    style = (data.get('style') or '').strip() or '在保留原文情节、人物、结构的前提下，优化语言表达、用词与节奏'
+    task_id = data.get('task_id', '')
+
+    if not text:
+        return jsonify({'error': '缺少小说原文'}), 400
+    if not api_url:
+        return jsonify({'error': '缺少 LLM API 地址'}), 400
+
+    def split_chunks(t, max_len=1800):
+        """按段落分组切块 (≤max_len 字); 单个超长段按字符硬切"""
+        chunks, cur, cur_len = [], [], 0
+        for para in t.split('\n'):
+            para_len = len(para)
+            if para_len > max_len:
+                if cur:
+                    chunks.append('\n'.join(cur))
+                    cur, cur_len = [], 0
+                for i in range(0, para_len, max_len):
+                    chunks.append(para[i:i + max_len])
+            elif cur_len + para_len + 1 > max_len:
+                chunks.append('\n'.join(cur))
+                cur, cur_len = [para], para_len
+            else:
+                cur.append(para)
+                cur_len += para_len + 1
+        if cur:
+            chunks.append('\n'.join(cur))
+        return chunks
+
+    def call_polish(chunk, prev_tail):
+        """单块调用 LLM 润色, 返回润色文本 (空则说明预算耗尽/模型异常)"""
+        user = (
+            "请对下面的小说段落进行润色。\n\n"
+            f"润色风格要求: {style}\n\n"
+            "要求:\n"
+            "1. 保持情节、人物、对话、场景、段落结构完全不变, 只优化语言表达、用词、句式与节奏\n"
+            "2. 不要增删剧情内容, 不要改动人物名字和关键设定\n"
+            "3. 只输出润色后的段落本身, 不要输出\"润色后:\"之类的说明、前缀或标题\n"
+        )
+        if prev_tail:
+            user += f"\n注意: 上文结尾是这样的, 请紧接上文自然衔接, 不要重复或遗漏衔接处:\n{prev_tail}\n"
+        user += f"\n待润色段落:\n{chunk}"
+
+        payload = {
+            'model': model or 'minimax-m3-1-250227',
+            'messages': [
+                {'role': 'system', 'content': '你是一位专业的小说润色编辑, 只输出润色后的文本, 不要任何解释或前缀。'},
+                {'role': 'user', 'content': user}
+            ],
+            'temperature': 0.6,
+            # 推理模型需预留 reasoning 预算 (4096 保底) + 输出预算 (约 1.6 token/字)
+            'max_tokens': min(12000, 4096 + int(len(chunk) * 1.6)),
+        }
+        resp = requests.post(api_url, headers=headers, json=payload, timeout=300)
+        resp.raise_for_status()
+        result = resp.json()
+        out = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+        # 清理前缀/说明 (如 "润色后:" "以下为润色稿:")
+        for _ in range(3):
+            stripped = out.lstrip()
+            if not stripped:
+                break
+            m = re.match(r'^(?:以下(?:为|是)?)?润色(?:稿|后|结果|后的内容|后的文本)?[:：]', stripped)
+            if m:
+                out = stripped[m.end():].lstrip()
+            else:
+                break
+        return out.strip()
+
+    try:
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+
+        emit_progress(task_id, 5, '正在分段…', 'preparing')
+        chunks = split_chunks(text)
+        total = len(chunks)
+        polished_chunks = []
+
+        for i, chunk in enumerate(chunks):
+            emit_progress(task_id, 5 + int((i / total) * 85), f'正在润色第 {i + 1}/{total} 段…', 'polishing')
+            prev_tail = chunks[i - 1][-300:] if i > 0 else ''
+            polished = call_polish(chunk, prev_tail)
+            if not polished:
+                emit_progress(task_id, 0, '润色失败（某段返回为空），请重试', 'error')
+                return jsonify({'error': '润色失败（模型思考过长或未按要求返回，请重试）'}), 502
+            polished_chunks.append(polished)
+
+        emit_progress(task_id, 90, '正在合并…', 'merging')
+        polished_text = '\n\n'.join(polished_chunks).strip()
+        emit_progress(task_id, 100, '润色完成', 'done')
+        return jsonify({'success': True, 'polished': polished_text, 'length': len(polished_text)})
+    except Exception as e:
+        print(f"[polish-novel] Error: {e}")
+        try:
+            emit_progress(task_id, 0, f'润色失败: {e}', 'error')
+        except Exception:
+            pass
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/work/rename-current', methods=['POST'])
@@ -3025,7 +3499,7 @@ def download_image_proxy():
             response.raise_for_status()
             image_data = BytesIO(response.content)
         elif url.startswith('/static'):
-            local_path = os.path.join(os.path.dirname(__file__), url.lstrip('/'))
+            local_path = os.path.join(BASE_DIR, url.lstrip('/'))
             image_data = BytesIO()
             with open(local_path, 'rb') as f:
                 image_data.write(f.read())
@@ -3229,4 +3703,17 @@ if __name__ == '__main__':
         print(f'[manga] admin pass : <从 .env 读取>')
     print(f'[manga] secret_key : 来自 .env / os.urandom  (持久化到 .env)')
     print('=' * 60)
+
+    # 自动打开浏览器 (debug 模式 reloader 会 fork 子进程, 仅子进程打开避免重复)
+    def _open_browser_delayed():
+        url = 'http://127.0.0.1:2778'
+        print(f'[manga] opening browser: {url}')
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            print(f'[manga] auto-open browser failed: {e}; please visit {url} manually')
+
+    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        threading.Timer(1.5, _open_browser_delayed).start()
+
     socketio.run(app, host='0.0.0.0', port=2778, debug=True, allow_unsafe_werkzeug=True)

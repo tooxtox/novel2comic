@@ -4,12 +4,12 @@ let isGenerating = false;
 let characters = [];
 let batchPaused = false;  // 批量生成暂停控制
 let batchStopRequested = false;  // 批量生成停止控制 (用户主动停止)
-let combinedPages = [];
 let fullPageImages = {};  // 整页生成的图片
-let combinedPageImages = {};  // 任务3: 拼版预览生成的图片 (key: pageIdx)
+let combinedPageImages = {};  // 兼容旧会话: 历史拼版图映射 (拼版功能已移除, 仅保留旧数据)
 let fullPageCleanImages = {};  // 整页生成图的无气泡干净副本 (key: pageIdx → clean_url)
 let fullPageBubbles = {};  // 整页生成图的气泡坐标 (key: pageIdx → [{x,y,w,h,dialogue,dialogue_type}])
 let progressInterval = null;
+let currentWritingId = localStorage.getItem('writing_id') || null;  // 当前写作历史文档ID (跨刷新持久化)
 
 // WebSocket 实时进度
 let socket = null;
@@ -21,7 +21,7 @@ let taskProgressCallbacks = {};  // task_id -> { onProgress, onComplete, onError
 let comicUploadedImages = [];  // {name, data: base64, pageIndex}
 let comicNovelResult = null;   // {novel_text, pages}
 
-const tabs = ['input', 'segments', 'characters', 'gallery', 'history', 'comic2novel'];
+const tabs = ['input', 'aiwrite', 'characters', 'segments', 'gallery', 'history', 'comic2novel'];
 const CONCURRENT_LIMIT = 3;
 const MAX_RETRIES = 3;
 
@@ -252,7 +252,7 @@ async function recoverSession() {
             console.log(`Recovered ${fpResult.data.pages.length} full pages from server`);
         }
 
-        // 恢复拼版映射
+        // 兼容旧会话: 恢复历史拼版图映射
         try {
             const cpResponse = await fetchWithRetry('/api/results/combined_pages', { credentials: 'include' }, 1);
             const cpResult = await cpResponse.json();
@@ -736,11 +736,14 @@ async function testImage() {
 
 function switchTab(tabName) {
     tabs.forEach(t => {
-        document.getElementById(`tab-${t}`).className = t === tabName ? 'tab-active pb-2 px-1 text-lg transition-all' : 'tab-inactive pb-2 px-1 text-lg transition-all';
+        const topTab = document.getElementById(`tab-${t}`);
+        if (topTab) topTab.className = t === tabName ? 'tab-active pb-2 px-1 text-lg transition-all' : 'tab-inactive pb-2 px-1 text-lg transition-all';
+        const mtab = document.getElementById(`mtab-${t}`);
+        if (mtab) mtab.className = t === tabName ? 'mtab-active' : 'mtab-inactive';
         document.getElementById(`panel-${t}`).classList.add('hidden');
     });
     document.getElementById(`panel-${tabName}`).classList.remove('hidden');
-    if (tabName === 'history') loadHistoryList();
+    if (tabName === 'history') refreshCurrentHistoryList();
 }
 
 function openConfigModal() {
@@ -755,6 +758,7 @@ function closeConfigModal() {
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         closeConfigModal();
+        cancelPolishCompare();
     }
 });
 
@@ -906,6 +910,7 @@ async function loadHistoryWork(workId) {
             if (el) {
                 el.value = state.novel_text;
                 updateCharCount();
+                mirrorNovelText();
             }
         }
         currentSegments = state.segments || { pages: [] };
@@ -1016,6 +1021,197 @@ async function renameHistoryWork(workId, oldTitle) {
     }
 }
 
+// ===== AI 写作历史 (与漫画历史分开) =====
+let _historySub = 'comic';  // 历史页子切换: comic | writing
+
+function switchHistorySub(sub) {
+    _historySub = sub;
+    const comicBtn = document.getElementById('hist-sub-comic');
+    const writingBtn = document.getElementById('hist-sub-writing');
+    const comicWrap = document.getElementById('history-comic-wrap');
+    const writingWrap = document.getElementById('history-writing-wrap');
+    const saveBtn = document.getElementById('history-save-current-btn');
+    const countLabel = document.getElementById('history-count-label');
+    const activeCls = 'pb-2 px-1 text-base font-bold border-b-[3px] border-black';
+    const inactiveCls = 'pb-2 px-1 text-base text-gray-500 border-b-[3px] border-transparent hover:border-gray-300';
+    if (sub === 'writing') {
+        comicBtn.className = inactiveCls;
+        writingBtn.className = activeCls;
+        if (comicWrap) comicWrap.classList.add('hidden');
+        if (writingWrap) writingWrap.classList.remove('hidden');
+        if (saveBtn) saveBtn.classList.add('hidden');
+        if (countLabel) countLabel.textContent = '篇写作';
+        loadWritingHistoryList();
+    } else {
+        writingBtn.className = inactiveCls;
+        comicBtn.className = activeCls;
+        if (writingWrap) writingWrap.classList.add('hidden');
+        if (comicWrap) comicWrap.classList.remove('hidden');
+        if (saveBtn) saveBtn.classList.remove('hidden');
+        if (countLabel) countLabel.textContent = '部漫画';
+        loadHistoryList();
+    }
+}
+
+function refreshCurrentHistoryList() {
+    if (_historySub === 'writing') loadWritingHistoryList();
+    else loadHistoryList();
+}
+
+async function loadWritingHistoryList() {
+    const container = document.getElementById('history-writing-list');
+    const countEl = document.getElementById('history-count');
+    if (!container) return;
+    container.innerHTML = '<div class="col-span-full text-center text-gray-400 py-12">加载中...</div>';
+    try {
+        const response = await fetchWithRetry('/api/writings', { credentials: 'include' });
+        const result = await response.json();
+        if (!result.success) throw new Error(result.error || '加载失败');
+        const works = result.works || [];
+        if (countEl) countEl.textContent = works.length;
+        if (works.length === 0) {
+            container.innerHTML = '<div class="col-span-full text-center text-gray-400 py-12">还没有写作记录，<br>在「小说输入」或「AI 写作」里续写 / 润色后会自动保存到这里</div>';
+            return;
+        }
+        container.innerHTML = '';
+        for (const w of works) {
+            const card = document.createElement('div');
+            card.className = 'manga-border bg-gray-50 p-4 flex flex-col';
+            const title = w.title || '未命名';
+            const created = formatDateTime(w.created_at);
+            const updated = formatDateTime(w.updated_at);
+            const chars = w.content_len || 0;
+            card.innerHTML = `
+                <div class="mb-2 w-10 h-10 bg-black text-white flex items-center justify-center text-xl">✍️</div>
+                <h3 class="font-bold text-base mb-1 truncate" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
+                <p class="text-xs text-gray-500 mb-1">🕐 创建: ${created}</p>
+                <p class="text-xs text-gray-500 mb-1">📝 更新: ${updated}</p>
+                <p class="text-xs text-gray-500 mb-3">📄 ${chars} 字</p>
+                <div class="flex gap-2 mt-auto">
+                    <button onclick="loadWritingWork('${w.writing_id}')" class="flex-1 border-2 border-black bg-black text-white px-2 py-1.5 text-xs font-medium hover:bg-gray-800 transition-colors">📂 加载</button>
+                    <button onclick="renameWritingWork('${w.writing_id}','${escapeHtml(title)}')" class="border-2 border-gray-300 hover:border-black px-2 py-1.5 text-xs transition-colors">✏</button>
+                    <button onclick="deleteWritingWork('${w.writing_id}')" class="border-2 border-gray-300 hover:border-red-500 hover:text-red-500 px-2 py-1.5 text-xs transition-colors">🗑</button>
+                </div>
+            `;
+            container.appendChild(card);
+        }
+    } catch (e) {
+        container.innerHTML = `<div class="col-span-full text-center text-red-400 py-12">加载失败: ${escapeHtml(String(e.message || e))}</div>`;
+    }
+}
+
+async function loadWritingWork(id) {
+    try {
+        const response = await fetchWithRetry(`/api/writing/${id}`, { credentials: 'include' });
+        const result = await response.json();
+        if (!result.success) throw new Error(result.error || '加载失败');
+        const content = result.data.content || '';
+        document.getElementById('novel-text').value = content;
+        updateCharCount();
+        mirrorNovelText();  // novel -> aiwrite
+        currentWritingId = result.data.writing_id;
+        localStorage.setItem('writing_id', currentWritingId);
+        showToast(`已加载写作「${result.data.title || '未命名'}」`, 'success');
+        switchTab('input');
+    } catch (e) {
+        showToast('加载失败: ' + e.message, 'error');
+    }
+}
+
+async function renameWritingWork(id, currentTitle) {
+    const newTitle = prompt('重命名写作:', currentTitle || '');
+    if (newTitle === null) return;
+    const t = newTitle.trim();
+    if (!t || t === currentTitle) return;
+    try {
+        const response = await fetchWithRetry(`/api/writing/${id}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ title: t })
+        });
+        const result = await response.json();
+        if (!result.success) throw new Error(result.error || '重命名失败');
+        showToast('已重命名', 'success');
+        loadWritingHistoryList();
+    } catch (e) {
+        showToast('重命名失败: ' + e.message, 'error');
+    }
+}
+
+async function deleteWritingWork(id) {
+    if (!confirm('确定删除这篇写作记录吗？')) return;
+    try {
+        const response = await fetchWithRetry(`/api/writing/${id}`, {
+            method: 'DELETE',
+            credentials: 'include'
+        });
+        const result = await response.json();
+        if (!result.success) throw new Error(result.error || '删除失败');
+        if (currentWritingId === id) {
+            currentWritingId = null;
+            localStorage.removeItem('writing_id');
+        }
+        showToast('已删除', 'success');
+        loadWritingHistoryList();
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'error');
+    }
+}
+
+// 自动保存当前文本到写作历史 (续写/润色成功后调用; 无 id 时新建一篇)
+async function autoSaveWriting() {
+    const content = document.getElementById('novel-text')?.value || '';
+    if (!content.trim()) return;
+    const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
+    let title;
+    if (!currentWritingId && config.llm_api_url) {
+        // 首次保存: 尝试用 LLM 生成标题 (失败则后端用首行兜底)
+        try {
+            const resp = await fetchWithRetry('/api/generate-title', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({
+                    text: content.slice(0, 2000),
+                    api_url: config.llm_api_url,
+                    api_key: config.llm_api_key || '',
+                    model: config.llm_model || ''
+                })
+            });
+            const r = await resp.json();
+            title = r.title || '';
+        } catch (e) {
+            console.warn('autoSaveWriting title gen skipped:', e);
+        }
+    }
+    try {
+        const resp = await fetchWithRetry('/api/writing/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ writing_id: currentWritingId || undefined, title, content })
+        });
+        const result = await resp.json();
+        if (result.success) {
+            currentWritingId = result.writing_id;
+            localStorage.setItem('writing_id', currentWritingId);
+        }
+    } catch (e) {
+        console.warn('autoSaveWriting failed:', e);
+    }
+}
+
+async function saveCurrentWriting() {
+    const content = document.getElementById('novel-text')?.value || '';
+    if (!content.trim()) {
+        showToast('请先输入小说内容', 'error');
+        return;
+    }
+    await autoSaveWriting();
+    showToast('已保存到写作历史', 'success');
+}
+
 function showToast(message, type = 'info') {
     const toast = document.getElementById('toast');
     toast.textContent = message;
@@ -1065,7 +1261,46 @@ function updateCharCount() {
     document.getElementById('char-count').textContent = text.length;
 }
 
-document.getElementById('novel-text').addEventListener('input', updateCharCount);
+function updateAiwriteCharCount() {
+    const t = document.getElementById('aiwrite-text');
+    const el = document.getElementById('aiwrite-char-count');
+    if (t && el) el.textContent = t.value.length;
+}
+
+// ===== 小说输入框 <-> AI 写作工作台 双向实时同步 =====
+// 两个 textarea 不会同时可见, 无光标跳动问题; 守卫 + 值相等早退避免循环
+let _textSyncing = false;
+function mirrorNovelText() {           // novel -> aiwrite
+    if (_textSyncing) return;
+    const s = document.getElementById('novel-text');
+    const d = document.getElementById('aiwrite-text');
+    if (!s || !d || s.value === d.value) return;
+    _textSyncing = true;
+    d.value = s.value;
+    _textSyncing = false;
+    updateAiwriteCharCount();
+}
+function mirrorAiwriteText() {         // aiwrite -> novel
+    if (_textSyncing) return;
+    const s = document.getElementById('aiwrite-text');
+    const d = document.getElementById('novel-text');
+    if (!s || !d || s.value === d.value) return;
+    _textSyncing = true;
+    d.value = s.value;
+    _textSyncing = false;
+    updateCharCount();
+}
+document.getElementById('novel-text').addEventListener('input', () => {
+    updateCharCount();
+    mirrorNovelText();
+});
+const _aiwriteTextEl = document.getElementById('aiwrite-text');
+if (_aiwriteTextEl) {
+    _aiwriteTextEl.addEventListener('input', () => {
+        updateAiwriteCharCount();
+        mirrorAiwriteText();
+    });
+}
 
 // ===== 风格Tag管理 =====
 function renderStylePresets() {
@@ -1289,8 +1524,90 @@ function applyConfigToForm(config) {
     updateStyleSummary();
 }
 
-async function startSegment() {
-    const text = document.getElementById('novel-text').value.trim();
+// ===== AI 写作作用域: 同一套续写/润色逻辑服务「AI 写作」页(默认)与「小说输入」页 =====
+// scope 'aiwrite' → 用现有无前缀元素; scope 'input' → 用小说输入页的 inp- 前缀元素
+function awId(scope, key) {
+    const map = scope === 'input' ? {
+        text: 'novel-text',
+        plotOptions: 'inp-plot-options',
+        direction: 'inp-continue-direction',
+        length: 'inp-continue-length',
+        genOptionsBtn: 'inp-gen-options-btn',
+        genOptionsLabel: 'inp-gen-options-label',
+        genOptionsSpinner: 'inp-gen-options-spinner',
+        continueBtn: 'inp-continue-btn',
+        continueLabel: 'inp-continue-label',
+        continueSpinner: 'inp-continue-spinner',
+        polishStyles: 'inp-polish-styles',
+        polishStyle: 'inp-polish-style',
+        genStylesBtn: 'inp-gen-styles-btn',
+        genStylesLabel: 'inp-gen-styles-label',
+        genStylesSpinner: 'inp-gen-styles-spinner',
+        polishBtn: 'inp-polish-btn',
+        polishLabel: 'inp-polish-label',
+        polishSpinner: 'inp-polish-spinner',
+        progress: 'inp-polish-progress',
+    } : {
+        text: 'aiwrite-text',
+        plotOptions: 'plot-options',
+        direction: 'continue-direction',
+        length: 'continue-length',
+        genOptionsBtn: 'gen-options-btn',
+        genOptionsLabel: 'gen-options-label',
+        genOptionsSpinner: 'gen-options-spinner',
+        continueBtn: 'continue-novel-btn',
+        continueLabel: 'continue-novel-label',
+        continueSpinner: 'continue-novel-spinner',
+        polishStyles: 'polish-styles',
+        polishStyle: 'polish-style',
+        genStylesBtn: 'gen-styles-btn',
+        genStylesLabel: 'gen-styles-label',
+        genStylesSpinner: 'gen-styles-spinner',
+        polishBtn: 'polish-novel-btn',
+        polishLabel: 'polish-novel-label',
+        polishSpinner: 'polish-novel-spinner',
+        progress: 'polish-progress',
+    };
+    return map[key];
+}
+
+function awEl(scope, key) {
+    const id = awId(scope, key);
+    return id ? document.getElementById(id) : null;
+}
+
+function awReadText(scope) {
+    const el = awEl(scope, 'text');
+    return el ? el.value : '';
+}
+
+function awApplyText(scope, newValue) {
+    if (scope === 'input') {
+        document.getElementById('novel-text').value = newValue;
+        mirrorNovelText();
+        updateCharCount();
+    } else {
+        document.getElementById('aiwrite-text').value = newValue;
+        mirrorAiwriteText();
+        updateAiwriteCharCount();
+    }
+}
+
+// 小说输入页的 AI 写作折叠区
+function toggleInpAIWrite() {
+    const content = document.getElementById('inp-aw-content');
+    const icon = document.getElementById('inp-aw-toggle-icon');
+    if (!content) return;
+    const hidden = content.classList.toggle('hidden');
+    if (icon) icon.textContent = hidden ? '▼' : '▲';
+}
+
+// ===== AI 续写: 生成剧情选项 → 选择/自定义方向 → 续写 =====
+let _plotOptions = [];
+let _polishScope = 'aiwrite';  // 润色对比确认时回写的作用域
+
+async function genPlotOptions(scope = 'aiwrite') {
+    const text = awReadText(scope).trim();
     if (!text) {
         showToast('请先输入小说内容', 'error');
         return;
@@ -1303,14 +1620,327 @@ async function startSegment() {
         return;
     }
 
-    // 任务: 人设图缺失拦截
-    // - 角色列表为空 → 不阻塞, 让 LLM 在 /api/segment 里自动提取 (兼容老流程)
-    // - 角色列表有但还有人没设人设图 → 弹模态框, 让用户选 "去补" / "继续不用"
-    const missingImages = (characters || []).filter(c => !(c.image_url || '').trim());
-    if (missingImages.length > 0) {
-        const goAhead = await showMissingPersonaModal(missingImages);
-        if (!goAhead) return;  // 用户跳去补图, 啥都不做
-        // 用户选"仍然继续", 进入正常流程
+    const btn = awEl(scope, 'genOptionsBtn');
+    const labelEl = awEl(scope, 'genOptionsLabel');
+    const spinner = awEl(scope, 'genOptionsSpinner');
+    spinner.classList.remove('hidden');
+    const unlock = lockButton(btn, labelEl, '⏳ 构思中…');
+    const toastId = showLoadingToast('正在构思剧情发展方向…');
+
+    try {
+        const response = await fetchWithRetry('/api/plot-options', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                text: text,
+                api_url: config.llm_api_url,
+                api_key: config.llm_api_key || '',
+                model: config.llm_model || ''
+            })
+        });
+        const result = await response.json();
+        dismissLoadingToast(toastId);
+        if (result.success && Array.isArray(result.options) && result.options.length > 0) {
+            _plotOptions = result.options;
+            renderPlotOptions(scope);
+            showToast('已生成剧情方向，点击选择一个', 'success');
+        } else {
+            showToast(result.error || '剧情方向生成失败', 'error');
+        }
+    } catch (e) {
+        dismissLoadingToast(toastId);
+        showToast('生成失败: ' + e.message, 'error');
+    } finally {
+        spinner.classList.add('hidden');
+        unlock();
+    }
+}
+
+function renderPlotOptions(scope = 'aiwrite') {
+    const container = awEl(scope, 'plotOptions');
+    if (!container) return;
+    container.innerHTML = '';
+    _plotOptions.forEach((opt, idx) => {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'plot-option-card text-left p-3 border-2 border-gray-300 hover:border-black hover:bg-gray-50 transition-colors text-sm flex items-start gap-2';
+        card.innerHTML = `<span class="font-bold text-xs text-gray-400 mt-0.5">${idx + 1}</span><span>${escapeHtml(opt)}</span>`;
+        card.onclick = () => selectPlotOption(idx, scope);
+        container.appendChild(card);
+    });
+}
+
+function selectPlotOption(idx, scope = 'aiwrite') {
+    const opt = _plotOptions[idx];
+    if (!opt) return;
+    const dirInput = awEl(scope, 'direction');
+    if (dirInput) dirInput.value = opt;
+    // 高亮选中卡片 (只作用于当前作用域的卡片)
+    document.querySelectorAll(`#${awId(scope, 'plotOptions')} .plot-option-card`).forEach((el, i) => {
+        el.classList.toggle('border-black', i === idx);
+        el.classList.toggle('bg-gray-100', i === idx);
+        el.classList.toggle('border-gray-300', i !== idx);
+    });
+}
+
+async function continueNovel(scope = 'aiwrite') {
+    const text = awReadText(scope).trim();
+    if (!text) {
+        showToast('请先输入小说内容', 'error');
+        return;
+    }
+
+    const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
+    if (!config.llm_api_url) {
+        showToast('请先配置大语言模型API', 'error');
+        openConfigModal();
+        return;
+    }
+
+    const length = parseInt(awEl(scope, 'length')?.value || '800', 10);
+    const direction = (awEl(scope, 'direction')?.value || '').trim();
+
+    const btn = awEl(scope, 'continueBtn');
+    const labelEl = awEl(scope, 'continueLabel');
+    const spinner = awEl(scope, 'continueSpinner');
+    spinner.classList.remove('hidden');
+    const unlock = lockButton(btn, labelEl, '⏳ 续写中…');
+    const toastId = showLoadingToast('AI 续写中，约需 30-60 秒…');
+
+    try {
+        const response = await fetchWithRetry('/api/continue-novel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                text: text,
+                api_url: config.llm_api_url,
+                api_key: config.llm_api_key || '',
+                model: config.llm_model || '',
+                length: length,
+                direction: direction
+            })
+        });
+        const result = await response.json();
+        dismissLoadingToast(toastId);
+        if (result.success && result.continuation) {
+            awApplyText(scope, awReadText(scope).trimEnd() + '\n\n' + result.continuation);
+            const ta = awEl(scope, 'text');
+            if (ta) ta.scrollTop = ta.scrollHeight;
+            const total = awReadText(scope).length;
+            const n = result.length || result.continuation.length;
+            const extra = [];
+            if (result.compressed) extra.push('原文过长已用模型压缩前情上下文');
+            if (total > 4000) extra.push('分镜可能只取头尾各2000字');
+            const note = extra.length ? '，' + extra.join('，') : '';
+            showToast(`已续写 ${n} 字（当前共 ${total} 字）${note}`, 'success');
+            // 续写完成, 清空已选的剧情选项, 避免下次使用过期方向
+            _plotOptions = [];
+            renderPlotOptions(scope);
+            // 续写后自动保存到写作历史
+            autoSaveWriting();
+        } else {
+            showToast(result.error || '续写失败', 'error');
+        }
+    } catch (e) {
+        dismissLoadingToast(toastId);
+        showToast('续写失败: ' + e.message, 'error');
+    } finally {
+        spinner.classList.add('hidden');
+        unlock();
+    }
+}
+
+// ===== AI 润色: 生成润色风格 → 选择/自定义 → 润色 → 对比预览 → 替换 =====
+let _polishStyles = [];
+let _polishOriginal = '';
+let _polishResult = '';
+
+async function genPolishStyles(scope = 'aiwrite') {
+    const text = awReadText(scope).trim();
+    if (!text) {
+        showToast('请先输入小说内容', 'error');
+        return;
+    }
+
+    const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
+    if (!config.llm_api_url) {
+        showToast('请先配置大语言模型API', 'error');
+        openConfigModal();
+        return;
+    }
+
+    const btn = awEl(scope, 'genStylesBtn');
+    const labelEl = awEl(scope, 'genStylesLabel');
+    const spinner = awEl(scope, 'genStylesSpinner');
+    spinner.classList.remove('hidden');
+    const unlock = lockButton(btn, labelEl, '⏳ 构思中…');
+    const toastId = showLoadingToast('正在构思润色风格…');
+
+    try {
+        const response = await fetchWithRetry('/api/polish-styles', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                text: text,
+                api_url: config.llm_api_url,
+                api_key: config.llm_api_key || '',
+                model: config.llm_model || ''
+            })
+        });
+        const result = await response.json();
+        dismissLoadingToast(toastId);
+        if (result.success && Array.isArray(result.styles) && result.styles.length > 0) {
+            _polishStyles = result.styles;
+            renderPolishStyles(scope);
+            showToast('已生成润色风格，点击选择一个', 'success');
+        } else {
+            showToast(result.error || '润色风格生成失败', 'error');
+        }
+    } catch (e) {
+        dismissLoadingToast(toastId);
+        showToast('生成失败: ' + e.message, 'error');
+    } finally {
+        spinner.classList.add('hidden');
+        unlock();
+    }
+}
+
+function renderPolishStyles(scope = 'aiwrite') {
+    const container = awEl(scope, 'polishStyles');
+    if (!container) return;
+    container.innerHTML = '';
+    _polishStyles.forEach((style, idx) => {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'polish-style-card text-left p-3 border-2 border-gray-300 hover:border-black hover:bg-gray-50 transition-colors text-sm';
+        card.innerHTML = `<div class="font-bold mb-0.5">${escapeHtml(style.name)}</div><div class="text-xs text-gray-500">${escapeHtml(style.instruction)}</div>`;
+        card.onclick = () => selectPolishStyle(idx, scope);
+        container.appendChild(card);
+    });
+}
+
+function selectPolishStyle(idx, scope = 'aiwrite') {
+    const style = _polishStyles[idx];
+    if (!style) return;
+    const input = awEl(scope, 'polishStyle');
+    if (input) input.value = style.instruction;
+    // 高亮选中卡片
+    document.querySelectorAll(`#${awId(scope, 'polishStyles')} .polish-style-card`).forEach((el, i) => {
+        el.classList.toggle('border-black', i === idx);
+        el.classList.toggle('bg-gray-100', i === idx);
+        el.classList.toggle('border-gray-300', i !== idx);
+    });
+}
+
+async function polishNovel(scope = 'aiwrite') {
+    const text = awReadText(scope).trim();
+    if (!text) {
+        showToast('请先输入小说内容', 'error');
+        return;
+    }
+
+    const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
+    if (!config.llm_api_url) {
+        showToast('请先配置大语言模型API', 'error');
+        openConfigModal();
+        return;
+    }
+
+    // 捕获润色前的原文, 用于对比预览; 记录作用域以便确认时回写
+    _polishOriginal = awReadText(scope);
+    _polishScope = scope;
+
+    if (text.length > 8000) {
+        showToast('内容较长，润色可能需要 1-3 分钟', 'info');
+    }
+
+    const style = (awEl(scope, 'polishStyle')?.value || '').trim();
+    const btn = awEl(scope, 'polishBtn');
+    const labelEl = awEl(scope, 'polishLabel');
+    const spinner = awEl(scope, 'polishSpinner');
+    spinner.classList.remove('hidden');
+    const unlock = lockButton(btn, labelEl, '⏳ 润色中…');
+
+    // 分块润色可能耗时较长, 用进度条 (WebSocket 不可用时降级到 fake progress)
+    const task = registerTaskProgress(awId(scope, 'progress'));
+    task.startFallback(240000);
+
+    try {
+        const response = await fetchWithRetry('/api/polish-novel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                text: text,
+                api_url: config.llm_api_url,
+                api_key: config.llm_api_key || '',
+                model: config.llm_model || '',
+                style: style,
+                task_id: task.task_id
+            })
+        });
+        const result = await response.json();
+        task.finish();
+        if (result.success && result.polished) {
+            _polishResult = result.polished;
+            openPolishCompare();
+        } else {
+            showToast(result.error || '润色失败', 'error');
+        }
+    } catch (e) {
+        task.finish();
+        showToast('润色失败: ' + e.message, 'error');
+    } finally {
+        spinner.classList.add('hidden');
+        unlock();
+    }
+}
+
+function openPolishCompare() {
+    const modal = document.getElementById('polish-compare-modal');
+    if (!modal) return;
+    document.getElementById('polish-original').textContent = _polishOriginal;
+    document.getElementById('polish-result').textContent = _polishResult;
+    modal.classList.remove('hidden');
+}
+
+function cancelPolishCompare() {
+    const modal = document.getElementById('polish-compare-modal');
+    if (modal) modal.classList.add('hidden');
+}
+
+function confirmPolishReplace() {
+    const scope = _polishScope || 'aiwrite';
+    // 润色期间原文可能被改过, 提醒用户
+    if (awReadText(scope) !== _polishOriginal && !confirm('原文在润色期间被修改过，确定用润色稿覆盖吗？')) {
+        return;
+    }
+    awApplyText(scope, _polishResult);
+    cancelPolishCompare();
+    const total = awReadText(scope).length;
+    showToast(`润色完成并已替换（当前共 ${total} 字）`, 'success');
+    // 清理已生成的风格, 避免下次使用过期风格
+    _polishStyles = [];
+    renderPolishStyles(scope);
+    // 润色替换后自动保存到写作历史
+    autoSaveWriting();
+}
+
+async function startSegment() {
+    const text = document.getElementById('novel-text').value.trim();
+    if (!text) {
+        showToast('请先输入小说内容', 'error');
+        return;
+    }
+
+    const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
+    if (!config.llm_api_url) {
+        showToast('请先配置大语言模型API', 'error');
+        openConfigModal();
+        return;
     }
 
     const spinner = document.getElementById('segment-spinner');
@@ -1412,7 +2042,6 @@ function renderSegments() {
 
     container.innerHTML = currentSegments.pages.map((page, pageIdx) => {
         const hasFullPageImage = fullPageImages[pageIdx];
-        const hasCombinedPage = combinedPageImages;
         const allSelectedChars = [];
         page.segments.forEach(seg => {
             if (seg.selected_characters) {
@@ -1429,16 +2058,9 @@ function renderSegments() {
             <div class="flex justify-between items-center mb-4 pb-2 border-b-2 border-gray-200">
                 <h3 class="text-lg font-bold">第 ${page.page_number} 页</h3>
                 <div class="flex gap-2">
-                    <button onclick="generatePageImages(${pageIdx})" class="text-sm bg-gray-700 text-white px-3 py-1 hover:bg-gray-800 transition-colors">
-                        逐个生成（不推荐）
-                    </button>
                     <button onclick="generateFullPage(${pageIdx}, false, null, this)" class="text-sm bg-black text-white px-3 py-1 hover:bg-gray-800 transition-colors flex items-center gap-1">
                         <span>整页生成</span>
                         <span id="full-page-spinner-${pageIdx}" class="loading-spinner hidden" style="width:12px;height:12px;border-width:1px;"></span>
-                    </button>
-                    <button onclick="combinePage(${pageIdx}, this)" class="text-sm bg-yellow-400 text-black border-2 border-black px-3 py-1 hover:bg-yellow-300 transition-colors flex items-center gap-1" title="任务3: 用本页已生成的 segment 图 + dialogue 自动拼版 (自适应网格 + 4 种气泡)">
-                        <span>拼版预览</span>
-                        <span id="combine-spinner-${pageIdx}" class="loading-spinner hidden" style="width:12px;height:12px;border-width:1px;"></span>
                     </button>
                 </div>
             </div>
@@ -1448,28 +2070,13 @@ function renderSegments() {
                 <img src="${hasFullPageImage}" class="w-full cursor-pointer" onclick="openModal('${hasFullPageImage}')">
             </div>
             ` : ''}
-            ${hasCombinedPage[pageIdx] ? `
-            <div class="mb-6 border-2 border-yellow-500 p-1 bg-yellow-50">
-                <div class="text-sm text-gray-700 mb-2 flex justify-between items-center">
-                    <span>📒 拼版预览 (任务3 - 自适应网格 + 4 种气泡)</span>
-                    <button onclick="combinePage(${pageIdx}, this)" class="text-xs text-blue-700 hover:underline">重新拼版</button>
-                </div>
-                <img src="${hasCombinedPage[pageIdx]}" class="w-full cursor-pointer border-2 border-black" onclick="openModal('${hasCombinedPage[pageIdx]}')">
-            </div>
-            ` : ''}
             <div class="text-xs text-gray-500 mb-3">
                 本页出场角色: ${allSelectedChars.length > 0 ? allSelectedChars.map(cIdx => characters[cIdx]?.name || cIdx).join(', ') : '（未选择角色）'}
             </div>
             <div class="grid md:grid-cols-2 gap-4">
                 ${page.segments.map((seg, segIdx) => {
                     const key = `${pageIdx}-${segIdx}`;
-                    const hasImage = generatedImages[key];
                     const selectedChars = seg.selected_characters || [];
-                    // 计算该分镜实际可用的参考图数量
-                    const refCount = selectedChars.filter(cIdx => characters[cIdx] && characters[cIdx].image_url).length;
-                    const refBadge = refCount > 0
-                        ? `<span class="ml-1 inline-flex items-center justify-center text-[10px] font-bold bg-yellow-300 text-black px-1.5 py-0.5 rounded leading-none" title="该分镜将使用 ${refCount} 张角色参考图">${refCount}参考</span>`
-                        : '';
                     // 任务2: 镜头语言枚举选项 (与服务端 STYLE_TAG_MAP 一致)
                     const camOpts = ['俯视','仰视','平视','斜视','主观视角'];
                     const compOpts = ['三分法','对称','中心对称','框架式','引导线'];
@@ -1563,19 +2170,6 @@ function renderSegments() {
                                 class="w-full p-2 border border-gray-300 text-sm mt-1 resize-none focus:border-black outline-none font-mono text-xs"
                                 rows="2">${seg.style_prompt || 'black and white manga style, detailed ink drawing'}</textarea>
                         </div>
-                        <div class="flex gap-2">
-                            <button onclick="generateSingleImage(${pageIdx}, ${segIdx}, false, this)"
-                                class="flex-1 bg-gray-800 text-white text-sm py-2 hover:bg-black transition-colors flex items-center justify-center gap-1">
-                                <span>生成图片</span>
-                                ${refBadge}
-                            </button>
-                            ${hasImage ? `<button onclick="viewImage('${key}')" class="px-3 py-2 border-2 border-black text-sm hover:bg-gray-100">查看</button>` : ''}
-                        </div>
-                        ${hasImage ? `
-                        <div class="mt-3 border-2 border-gray-300 p-1">
-                            <img src="${generatedImages[key]}" class="w-full h-40 object-cover cursor-pointer" onclick="openModal('${generatedImages[key]}')">
-                        </div>
-                        ` : ''}
                     </div>
                     `;
                 }).join('')}
@@ -1600,112 +2194,6 @@ function toggleCharacter(pageIdx, segIdx, charIdx) {
         selected.push(charIdx);
     }
     renderSegments();
-}
-
-async function generateSingleImage(pageIdx, segIdx, skipLock = false, btn = null) {
-    if (!skipLock && isGenerating) {
-        showToast('请等待当前生成完成', 'error');
-        return;
-    }
-
-    const config = JSON.parse(localStorage.getItem('manga_config') || '{}');
-    if (!config.img_api_url) {
-        showToast('请先配置图像生成API', 'error');
-        openConfigModal();
-        return;
-    }
-
-    const seg = currentSegments.pages[pageIdx].segments[segIdx];
-    const prompt = seg.style_prompt ? `${seg.style_prompt}, ${seg.scene_description}` : seg.scene_description;
-
-    const selectedChars = seg.selected_characters || [];
-    const characterReferences = selectedChars.map(charIdx => ({
-        name: characters[charIdx].name,
-        description: characters[charIdx].description,
-        image_url: characters[charIdx].image_url || null
-    })).filter(c => c.image_url);
-
-    if (!skipLock) isGenerating = true;
-    // 优先用传进来的 btn (动态生成的 segment 按钮), 否则兜底用 querySelector
-    const targetBtn = btn || document.querySelector(`#segment-${pageIdx}-${segIdx} button`);
-    const labelEl = targetBtn ? targetBtn.querySelector('span') : null;
-    const unlock = lockButton(targetBtn, labelEl, '⏳ 生成中…');
-    if (targetBtn) {
-        targetBtn.innerHTML = '<span class="loading-spinner" style="width:16px;height:16px;border-width:2px;"></span>';
-        targetBtn.disabled = true;
-    }
-
-    // WebSocket 实时进度 (单张图生成, 仅在非批量模式下显示进度条)
-    let task = null;
-    if (!skipLock) {
-        task = registerTaskProgress(`single-progress-${pageIdx}-${segIdx}`);
-        task.startFallback(60000);
-    }
-
-    try {
-        const response = await fetchWithRetry('/api/generate-image', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify({
-                prompt: prompt,
-                style_prompt: seg.style_prompt || '',
-                dialogue: seg.dialogue || '',  // 传对话原文给后端, 用于 PIL 叠加气泡
-                dialogue_type: seg.dialogue_type || 'dialogue',  // 气泡类型 (dialogue/thought/shout/narration)
-                api_url: config.img_api_url,
-                api_key: config.img_api_key,
-                model: config.img_model,
-                negative_prompt: config.negative_prompt,
-                style_tags: getStyleTagsString(),
-                character_references: characterReferences,
-                references: characterReferences,  // 兼容新字段名
-                reference_strength: (config.reference_strength ?? 0.6),
-                // 任务2: 镜头语言结构化字段
-                camera_angle: seg.camera_angle || '',
-                composition: seg.composition || '',
-                mood: seg.mood || '',
-                shot_scale: seg.shot_scale || '',
-                lighting: seg.lighting || '',
-                of_type: seg.of_type || '',
-                page_idx: pageIdx,
-                seg_idx: segIdx,
-                task_id: task ? task.task_id : ''
-            })
-        });
-
-        const result = await response.json();
-        if (task) task.finish();
-        if (result.success) {
-            let finalImageUrl = result.image_url;
-            generatedImages[`${pageIdx}-${segIdx}`] = finalImageUrl;
-            renderSegments();
-            renderGallery();
-            syncResults();  // 主动同步图片映射到服务器
-            showToast('图片生成成功', 'success');
-        } else {
-            showToast(result.error || '生成失败', 'error');
-        }
-    } catch (e) {
-        if (task) task.finish();
-        showToast('请求失败: ' + e.message, 'error');
-    } finally {
-        if (!skipLock) isGenerating = false;
-        // unlock 会自动恢复 labelEl 原文字 + 解除 disabled
-        if (targetBtn) {
-            // 重新渲染以恢复原 button 内部结构 (含 refBadge)
-            unlock();
-            renderSegments();
-        }
-    }
-}
-
-async function generatePageImages(pageIdx) {
-    const segs = currentSegments.pages[pageIdx].segments;
-    for (let i = 0; i < segs.length; i++) {
-        await generateSingleImage(pageIdx, i);
-        await new Promise(r => setTimeout(r, 500));
-    }
-    showToast(`第 ${pageIdx + 1} 页生成完成`, 'success');
 }
 
 async function generateFullPage(pageIdx, skipLock = false, previousPageImage = null, btn = null) {
@@ -1740,13 +2228,18 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
         }
     }
 
-    const characterReferences = characters
-        .filter(char => char.image_url)
-        .map(char => ({
+    // 参考角色: 有参考人设图的角色作为参考图发给图像API;
+    // 没有参考人设图的角色, 把其"人设prompt"(char_prompt)作为文字描述一起传上去,
+    // 由后端拼进生成提示词, 让图像模型仍知道该角色长什么样
+    const characterReferences = characters.map(char => {
+        const ref = {
             name: char.name,
             description: char.description,
-            image_url: char.image_url
-        }));
+            char_prompt: char.char_prompt || ''
+        };
+        if (char.image_url) ref.image_url = char.image_url;
+        return ref;
+    });
 
     // WebSocket 实时进度 (单页生成, 仅在非批量模式下显示进度条)
     let task = null;
@@ -1796,65 +2289,6 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
         showToast('请求失败: ' + e.message, 'error');
     } finally {
         if (!skipLock) isGenerating = false;
-        if (spinner) spinner.classList.add('hidden');
-        unlock();
-    }
-}
-
-async function combinePage(pageIdx, btn = null) {
-    const page = currentSegments.pages[pageIdx];
-    if (!page) {
-        showToast('找不到分镜页', 'error');
-        return;
-    }
-    const segs = page.segments;
-    const segImgs = segs.map((_, segIdx) => generatedImages[`${pageIdx}-${segIdx}`]);
-    if (segImgs.every(u => !u)) {
-        showToast('本页还没有任何分镜图, 请先生成图片', 'error');
-        return;
-    }
-    const spinner = document.getElementById(`combine-spinner-${pageIdx}`);
-    if (spinner) spinner.classList.remove('hidden');
-    showLoadingToast('正在拼版...');
-
-    // 任务: 拼版期间禁用按钮, 防止点 "重新拼版" 引发并发请求
-    const targetBtn = btn || document.querySelector(`#panel-segments button[onclick*="combinePage(${pageIdx}"]`);
-    const labelEl = targetBtn ? targetBtn.querySelector('span:not([id*="spinner"])') : null;
-    const unlock = lockButton(targetBtn, labelEl, '⏳ 拼版中…');
-
-    try {
-        const response = await fetch('/api/combine-page', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                page_idx: pageIdx,
-                segments: segs.map((s, segIdx) => ({
-                    scene_description: s.scene_description || '',
-                    dialogue: s.dialogue || '',
-                    dialogue_type: s.dialogue_type || 'dialogue',
-                    image_url: generatedImages[`${pageIdx}-${segIdx}`] || null,
-                })),
-                panel_layout: null,         // 用自适应网格
-                allow_overflow: true,       // 允许气泡越界 (后端字段名)
-                gap: 4,
-                padding: 4,
-            })
-        });
-        const result = await response.json();
-        if (result.success && result.image_url) {
-            combinedPageImages[pageIdx] = result.image_url;
-            renderSegments();
-            renderGallery();
-            syncResults();
-            showToast(`第 ${page.page_number} 页拼版完成 (${result.panel_count || segs.length} 格)`, 'success');
-        } else {
-            showToast('拼版失败: ' + (result.error || '未知错误'), 'error');
-        }
-    } catch (e) {
-        console.error('combinePage error:', e);
-        showToast('拼版请求失败: ' + e.message, 'error');
-    } finally {
-        dismissLoadingToast();
         if (spinner) spinner.classList.add('hidden');
         unlock();
     }
@@ -2094,86 +2528,12 @@ async function autoSaveWorkWithLLMTitle(allDone) {
     }
 }
 
-async function generateAllImages() {
-    if (isGenerating) {
-        showToast('请等待当前生成完成', 'error');
-        return;
-    }
-
-    const spinner = document.getElementById('batch-spinner');
-    spinner.classList.remove('hidden');
-    isGenerating = true;
-    const unlock = lockButton(
-        document.getElementById('batch-single-btn'),
-        document.getElementById('batch-single-label'),
-        '⏳ 批量逐个生成中…'
-    );
-
-    const itemsToGenerate = [];
-    for (let p = 0; p < currentSegments.pages.length; p++) {
-        for (let s = 0; s < currentSegments.pages[p].segments.length; s++) {
-            const key = `${p}-${s}`;
-            if (!generatedImages[key]) {
-                itemsToGenerate.push({ pageIdx: p, segIdx: s });
-            }
-        }
-    }
-
-    // WebSocket 实时进度 (不可用时降级到 fake progress)
-    const task = registerTaskProgress('batch-progress', {
-        onProgress: (progress, message, stage, extra) => {
-            if (extra && extra.current !== undefined && extra.total !== undefined) {
-                const text = document.getElementById('batch-progress-text');
-                if (text) text.textContent = `${progress}% - ${message} (${extra.current}/${extra.total})`;
-            }
-        }
-    });
-    task.startFallback(120000);
-
-    // 串行生成
-    // 显示暂停按钮
-    const pauseBtn = document.getElementById('batch-pause-btn');
-    if (pauseBtn) {
-        batchPaused = false;
-        document.getElementById('batch-pause-label').textContent = '⏸️ 暂停';
-        pauseBtn.classList.remove('hidden');
-    }
-
-    let generatedCount = 0;
-    for (const item of itemsToGenerate) {
-        // 暂停检查
-        const shouldContinue = await _checkBatchPause();
-        if (!shouldContinue) break;
-
-        await generateSingleImage(item.pageIdx, item.segIdx, true);
-        generatedCount++;
-        await new Promise(r => setTimeout(r, 300));
-    }
-
-    // 隐藏暂停按钮
-    if (pauseBtn) pauseBtn.classList.add('hidden');
-    batchPaused = false;
-    task.finish();
-
-    isGenerating = false;
-    spinner.classList.add('hidden');
-    unlock();
-    if (generatedCount < itemsToGenerate.length) {
-        showToast('批量逐个生成已暂停', 'info');
-    } else {
-        showToast('批量逐个生成完成', 'success');
-    }
-    switchTab('gallery');
-}
-
 function renderGallery() {
     const container = document.getElementById('gallery-container');
 
     const hasFullPages = Object.keys(fullPageImages).length > 0;
-    const hasIndividual = Object.keys(generatedImages).length > 0;
-    const hasCombined = Object.keys(combinedPageImages).length > 0;
 
-    if (!hasFullPages && !hasIndividual && !hasCombined) {
+    if (!hasFullPages) {
         container.innerHTML = `
             <div class="text-center py-20 text-gray-400">
                 <div class="text-6xl mb-4">🎨</div>
@@ -2183,29 +2543,6 @@ function renderGallery() {
     }
 
     let html = '';
-
-    if (hasCombined) {
-        html += `
-        <div class="mb-8">
-            <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
-                <span class="bg-yellow-400 text-black border-2 border-black px-2 py-1 text-sm">📒 拼版预览 (任务3)</span>
-            </h2>
-            <div class="space-y-6">
-                ${currentSegments.pages.map((page, pageIdx) => {
-                    const img = combinedPageImages[pageIdx];
-                    if (!img) return '';
-                    return `
-                    <div class="comic-page p-4">
-                        <h3 class="text-lg font-bold mb-3 text-center border-b-2 border-black pb-2">第 ${page.page_number} 页</h3>
-                        <div class="border-2 border-yellow-500">
-                            <img src="${img}" class="w-full cursor-pointer" onclick="openModal('${img}')">
-                        </div>
-                    </div>
-                    `;
-                }).join('')}
-            </div>
-        </div>`;
-    }
 
     if (hasFullPages) {
         html += `
@@ -2236,50 +2573,7 @@ function renderGallery() {
         </div>`;
     }
 
-    if (hasIndividual) {
-        html += `
-        <div>
-            <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
-                <span class="bg-gray-700 text-white px-2 py-1 text-sm">单个分镜</span>
-            </h2>
-            <div class="space-y-6">
-                ${currentSegments.pages.map((page, pageIdx) => {
-                    const pageHasImages = page.segments.some((_, segIdx) => generatedImages[`${pageIdx}-${segIdx}`]);
-                    if (!pageHasImages) return '';
-
-                    return `
-                    <div class="comic-page p-6">
-                        <h3 class="text-lg font-bold mb-4 text-center border-b-2 border-black pb-2">第 ${page.page_number} 页</h3>
-                        <div class="grid grid-cols-2 gap-3">
-                            ${page.segments.map((seg, segIdx) => {
-                                const key = `${pageIdx}-${segIdx}`;
-                                const img = generatedImages[key];
-                                if (!img) return '';
-                                return `
-                                <div class="border-2 border-black relative group">
-                                    <img src="${img}" class="w-full h-64 object-cover cursor-pointer" onclick="openModal('${img}')">
-                                    ${seg.dialogue ? `
-                                    <div class="absolute bottom-0 left-0 right-0 bg-white bg-opacity-95 border-t-2 border-black p-2">
-                                        <p class="text-sm font-medium">${seg.dialogue}</p>
-                                    </div>
-                                    ` : ''}
-                                </div>
-                                `;
-                            }).join('')}
-                        </div>
-                    </div>
-                    `;
-                }).join('')}
-            </div>
-        </div>`;
-    }
-
     container.innerHTML = html;
-}
-
-function viewImage(key) {
-    const img = generatedImages[key];
-    if (img) openModal(img);
 }
 
 function openModal(src) {
@@ -2329,7 +2623,7 @@ function openBubbleEditor(pageIdx) {
             </div>
             <div class="flex-1 overflow-auto bg-gray-200 p-4 flex justify-center">
                 <div id="bubble-editor-img-wrap" class="relative inline-block">
-                    <img id="bubble-editor-img" src="${cleanUrl}" class="block" style="max-width: 100%; max-height: calc(100vh - 140px); object-fit: contain;">
+                    <img id="bubble-editor-img" src="${cleanUrl}" class="block" style="max-width: 100%; max-height: calc(100dvh - 140px); object-fit: contain;">
                 </div>
             </div>
         </div>
@@ -2476,61 +2770,6 @@ async function saveBubblePositions(pageIdx, bubbles) {
     renderGallery();
     syncResults();
     showToast('气泡位置已保存', 'success');
-}
-
-// ===== 人设图缺失拦截模态框 =====
-function showMissingPersonaModal(missingChars) {
-    return new Promise((resolve) => {
-        // 移除旧模态框 (避免叠加)
-        const old = document.getElementById('missing-persona-modal');
-        if (old) old.remove();
-
-        const names = missingChars.map(c => c.name || '(未命名)').join('、');
-        const html = `
-        <div id="missing-persona-modal" class="fixed inset-0 z-50 flex items-center justify-center">
-            <div class="absolute inset-0 bg-black bg-opacity-50" onclick="document.getElementById('missing-persona-modal')?._resolveCancel()"></div>
-            <div class="relative bg-white manga-border panel-shadow max-w-md w-full mx-4 p-6 z-10">
-                <h3 class="text-xl font-bold mb-3 flex items-center gap-2">🎭 角色人设图缺失</h3>
-                <p class="text-sm text-gray-700 mb-2">
-                    以下 <span class="font-bold text-red-600">${missingChars.length}</span> 个角色还没上传/生成 <b>人设图</b>:
-                </p>
-                <div class="bg-yellow-50 border-l-4 border-yellow-400 p-3 mb-4 text-sm text-gray-700 max-h-32 overflow-y-auto">
-                    ${names}
-                </div>
-                <p class="text-xs text-gray-500 mb-4">
-                    没有统一人设图, 各分镜的角色形象会不一致. 建议先去 <b>角色管理</b> 手动上传或自动生成, 再来分镜.
-                </p>
-                <div class="flex flex-col gap-2">
-                    <button id="persona-modal-go" class="btn-primary py-2 text-sm font-medium">
-                        🎨 去角色管理上传/生成
-                    </button>
-                    <button id="persona-modal-skip" class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-2 text-sm">
-                        仍然继续 (不用人设图)
-                    </button>
-                </div>
-            </div>
-        </div>
-        `;
-        const wrap = document.createElement('div');
-        wrap.innerHTML = html;
-        document.body.appendChild(wrap.firstElementChild);
-
-        const modal = document.getElementById('missing-persona-modal');
-        // 让点遮罩 = 取消
-        modal._resolveCancel = () => {
-            modal.remove();
-            resolve(false);
-        };
-        document.getElementById('persona-modal-go').onclick = () => {
-            modal.remove();
-            switchTab('characters');
-            resolve(false);
-        };
-        document.getElementById('persona-modal-skip').onclick = () => {
-            modal.remove();
-            resolve(true);
-        };
-    });
 }
 
 function exportScript() {
@@ -2949,78 +3188,117 @@ async function generateCharacterImage(idx, btn = null) {
     }
 }
 
-async function combineAllPages() {
-    if (!currentSegments.pages || currentSegments.pages.length === 0) {
-        showToast('请先生成分镜', 'error');
-        return;
-    }
+// ===== 浏览器/设备识别（仅用于移动端适配，在 <html>/<body> 上打标记，不改动业务数据） =====
+function detectBrowserDevice() {
+    const ua = navigator.userAgent || '';
+    const uaData = navigator.userAgentData;
+    const hasTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0;
+    const isAndroid = /Android/i.test(ua);
+    const isIPhone = /iPhone|iPod/i.test(ua);
+    const isIPad = /iPad/i.test(ua) || (/Macintosh/i.test(ua) && hasTouch && navigator.platform === 'MacIntel');
+    const isMobileUA = /Mobi/i.test(ua) || isIPhone || isAndroid || /Windows Phone|IEMobile/i.test(ua) || (uaData && uaData.mobile === true);
 
-    const spinner = document.getElementById('combine-spinner');
-    spinner.classList.remove('hidden');
-    combinedPages = [];
+    let device;
+    if (isIPad) device = 'tablet';
+    else if (isMobileUA) device = 'mobile';
+    else if (hasTouch && window.innerWidth < 1024) device = 'tablet';
+    else device = 'desktop';
 
-    try {
-        for (let pageIdx = 0; pageIdx < currentSegments.pages.length; pageIdx++) {
-            const page = currentSegments.pages[pageIdx];
-            const segmentsWithImages = page.segments.map((seg, segIdx) => ({
-                ...seg,
-                image_url: generatedImages[`${pageIdx}-${segIdx}`] || null
-            })).filter(seg => seg.image_url);
+    let browser = 'other';
+    if (/MicroMessenger/i.test(ua)) browser = 'wechat';
+    else if (/QQ/i.test(ua) || /MQQBrowser/i.test(ua)) browser = 'qq';
+    else if (/DingTalk|Dingding/i.test(ua)) browser = 'dingtalk';
+    else if (/Edg/i.test(ua)) browser = 'edge';
+    else if (/Firefox/i.test(ua)) browser = 'firefox';
+    else if (/UCBrowser/i.test(ua)) browser = 'uc';
+    else if (/Chrome/i.test(ua)) browser = 'chrome';
+    else if (/Safari/i.test(ua)) browser = 'safari';
 
-            if (segmentsWithImages.length === 0) continue;
+    const info = { device, browser, isMobile: device === 'mobile', isTouch: hasTouch, isWechat: browser === 'wechat', ua };
+    window.APP_DEVICE = info;
 
-            const response = await fetch('/api/combine-page', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
-                body: JSON.stringify({
-                    segments: segmentsWithImages,
-                    page_num: page.page_number
-                })
-            });
+    const root = document.documentElement;
+    root.dataset.device = device;
+    root.dataset.browser = browser;
+    const body = document.body;
+    body.classList.remove('device-mobile', 'device-tablet', 'device-desktop', 'touch-device', 'browser-wechat');
+    body.classList.add('device-' + device, 'touch-device');
+    if (browser === 'wechat') body.classList.add('browser-wechat');
 
-            const result = await response.json();
-            if (result.success) {
-                combinedPages.push({ page_num: page.page_number, image_url: result.image_url });
-            }
-        }
-
-        renderCombinedPages();
-        showToast(`成功合并 ${combinedPages.length} 页`, 'success');
-    } catch (e) {
-        showToast('合并失败: ' + e.message, 'error');
-    } finally {
-        spinner.classList.add('hidden');
-    }
+    maybeShowInAppBanner(info);   // 微信/QQ 内打开时提示用浏览器打开
+    return info;
 }
 
-function renderCombinedPages() {
-    const container = document.getElementById('combined-pages');
-    if (combinedPages.length === 0) {
-        container.innerHTML = '';
+// 微信/QQ 内置浏览器打开时，提示用户改用外部浏览器（可关闭，按浏览器记忆忽略）
+function maybeShowInAppBanner(info) {
+    const banner = document.getElementById('inapp-browser-banner');
+    if (!banner) return;
+    const isInApp = (info.browser === 'wechat' || info.browser === 'qq') && info.device !== 'desktop';
+    let dismissed = null;
+    try { dismissed = localStorage.getItem('inapp_banner_dismissed'); } catch (e) { /* 无痕/禁用存储时忽略 */ }
+    if (!isInApp || dismissed === info.browser) {
+        banner.classList.add('hidden');
         return;
     }
+    const textEl = document.getElementById('inapp-browser-text');
+    if (textEl) {
+        textEl.textContent = info.browser === 'wechat'
+            ? '微信内打开功能受限，建议点击右上角「···」，选择「在浏览器打开」'
+            : 'QQ 内打开功能受限，建议点击右上角「···」，选择「在浏览器打开」';
+    }
+    banner.classList.remove('hidden');
+}
 
-    container.innerHTML = `
-        <div class="bg-white p-6 manga-border panel-shadow">
-            <h2 class="text-xl font-bold mb-4 border-b-2 border-black pb-2">合并页面</h2>
-            <div class="space-y-6">
-                ${combinedPages.map(page => `
-                <div class="border-2 border-gray-300">
-                    <img src="${page.image_url}" class="w-full cursor-pointer" onclick="openModal('${page.image_url}')">
-                </div>
-                `).join('')}
-            </div>
-        </div>
-    `;
+// 旋转 / 窗口尺寸变化时重新识别设备（防抖）
+let _deviceResizeTimer = null;
+window.addEventListener('resize', function () {
+    clearTimeout(_deviceResizeTimer);
+    _deviceResizeTimer = setTimeout(detectBrowserDevice, 200);
+    adjustBottomNav();
+});
+
+// 移动端底部导航：避免与浏览器底部工具栏 / 虚拟键盘重叠（iOS Safari / WKWebView 常见问题）。
+// 通过 visualViewport 高度差算出被浏览器底栏/键盘占用的高度，把导航栏抬上去。
+function adjustBottomNav() {
+    const nav = document.getElementById('mobile-bottom-nav');
+    if (!nav) return;
+    // 桌面端 (md 及以上) 底栏本来就隐藏，无需处理
+    if (window.matchMedia && window.matchMedia('(min-width: 768px)').matches) return;
+    const vv = window.visualViewport;
+    let offset = 0;
+    if (vv && window.innerHeight > vv.height) {
+        offset = Math.round(window.innerHeight - vv.height);
+    }
+    nav.style.bottom = offset + 'px';
+}
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', adjustBottomNav);
+    window.visualViewport.addEventListener('scroll', adjustBottomNav);
 }
 
 window.addEventListener('DOMContentLoaded', () => {
+    detectBrowserDevice();
+    adjustBottomNav();
+
+    // 微信/QQ 提示横幅关闭按钮：记住忽略，避免每次进入都弹出
+    const bannerClose = document.getElementById('inapp-browser-close');
+    if (bannerClose) {
+        bannerClose.addEventListener('click', function () {
+            const info = window.APP_DEVICE || {};
+            if (info.browser) {
+                try { localStorage.setItem('inapp_banner_dismissed', info.browser); } catch (e) {}
+            }
+            const banner = document.getElementById('inapp-browser-banner');
+            if (banner) banner.classList.add('hidden');
+        });
+    }
+
     renderStylePresets();
     renderCustomStyleTags();
     updateStyleSummary();
     loadConfig();
     updateCharCount();
+    mirrorNovelText();
     recoverSession();  // 尝试恢复之前可能因内网穿透断开丢失的会话数据
     initWebSocket();   // 初始化 WebSocket 实时进度连接
 });
