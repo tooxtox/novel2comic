@@ -1,6 +1,5 @@
-from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, send_file, session
 from flask_cors import CORS
-from flask_socketio import SocketIO, emit
 from functools import wraps
 import requests
 import json
@@ -131,10 +130,7 @@ app = Flask(__name__, static_folder=None, template_folder=os.path.join(_RESOURCE
 app.secret_key = SECRET_KEY
 CORS(app, supports_credentials=True)
 
-# WebSocket 实时进度推送
-# async_mode='threading' 兼容同步 Flask, 无需 eventlet/gevent
-socketio = SocketIO(app, cors_allowed_origins="*", manage_session=False, async_mode='threading')
-
+# WebSocket 已移除: 后端从未 emit 进度事件, 前端一律使用 fake progress
 BASE_DIR = _PERSIST_DIR
 CONFIG_LOCAL_PATH = os.path.join(BASE_DIR, 'config.local.json')
 CONFIG_TEMPLATE_PATH = os.path.join(BASE_DIR, 'config.json')
@@ -521,9 +517,12 @@ def cache_reference_image(url, name=""):
         # 下载图片
         img_data = None
         if url.startswith('http'):
-            resp = requests.get(url, timeout=30)
-            if resp.status_code == 200:
+            try:
+                resp = _api_request('GET', url, timeout=30, retries=2)
                 img_data = resp.content
+            except Exception as e:
+                print(f"[cache-ref] download failed: {e}")
+                img_data = None
         elif url.startswith('/static'):
             local_path = os.path.join(BASE_DIR, url.lstrip('/'))
             if os.path.exists(local_path):
@@ -680,6 +679,24 @@ def upgrade_segment_prompt(seg):
     return tag_block
 
 
+def _colorize_style_text(text):
+    """彩色漫画模式下, 把 style_prompt 中强制黑白的短语替换成彩色描述"""
+    if not text:
+        return text
+    t = text
+    t = re.sub(r'ABSOLUTELY\s+NO\s+COLOR[^,.;]*', 'vibrant full color', t, flags=re.IGNORECASE)
+    t = re.sub(r'Strict\s+black\s+and\s+white\s+manga,?\s*', 'full color manga, ', t, flags=re.IGNORECASE)
+    t = re.sub(r'black\s+and\s+white\s+manga\s+style', 'colorful manga style', t, flags=re.IGNORECASE)
+    t = re.sub(r'black\s+and\s+white\s+manga', 'colorful manga', t, flags=re.IGNORECASE)
+    t = re.sub(r'pure\s+monochrome,?\s*', 'rich saturated colors, ', t, flags=re.IGNORECASE)
+    t = re.sub(r'monochrome', 'colorful', t, flags=re.IGNORECASE)
+    t = re.sub(r'grayscale\s+only', 'full color', t, flags=re.IGNORECASE)
+    t = re.sub(r'black\s+ink\s+on\s+white\s+paper', 'vibrant colors, colorful inking', t, flags=re.IGNORECASE)
+    t = re.sub(r'no\s+text\s+overlay', '', t, flags=re.IGNORECASE)
+    t = re.sub(r',\s*,', ',', t)
+    return t.strip(' ,.').strip()
+
+
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -716,19 +733,6 @@ def emit_progress(task_id, progress, message, stage=None, extra=None):
         requests.post(url, json=payload, timeout=5)
     except Exception as e:
         print(f"[emit_progress] report failed: {e}")
-
-
-@socketio.on('connect')
-def on_connect():
-    """客户端连接时验证登录状态"""
-    if not session.get('logged_in'):
-        return False  # 拒绝未登录连接
-    print(f"[WebSocket] client connected, sid={request.sid}")
-
-
-@socketio.on('disconnect')
-def on_disconnect():
-    print(f"[WebSocket] client disconnected, sid={request.sid}")
 
 
 def _host_machine_identifiers():
@@ -891,6 +895,10 @@ def segment_novel():
     model = data.get('model', '')
     segments_per_page = data.get('segments_per_page', 0)  # 0 = LLM 自由控制
     task_id = data.get('task_id', '')
+    # 漫画模式: bw=黑白 (默认) / color=彩色
+    comic_mode = data.get('comic_mode', 'bw')
+    if comic_mode not in ('bw', 'color'):
+        comic_mode = 'bw'
 
     if not text or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
@@ -976,7 +984,7 @@ def segment_novel():
 
         emit_progress(task_id, 15, '正在调用 LLM 生成分镜 (可能需要 30-120 秒)...', 'calling_llm')
 
-        response = requests.post(api_url, headers=headers, json=payload, timeout=300)
+        response = _api_request('POST', api_url, headers=headers, json=payload, timeout=300)
         print(f"Response status: {response.status_code}")
         print(f"Response headers: {dict(response.headers)}")
         print(f"Response text: {response.text}")
@@ -985,61 +993,13 @@ def segment_novel():
 
         emit_progress(task_id, 70, 'LLM 返回结果, 正在解析 JSON...', 'parsing')
 
-        content = ''
-        if 'choices' in result and len(result['choices']) > 0:
-            choice = result['choices'][0]
-            if 'message' in choice:
-                content = choice['message']['content']
-            elif 'text' in choice:
-                content = choice['text']
-        elif 'response' in result:
-            content = result['response']
-        elif 'text' in result:
-            content = result['text']
-        elif 'content' in result:
-            content = result['content']
-        elif 'data' in result:
-            content = str(result['data'])
-        else:
-            content = str(result)
+        content = _extract_llm_content(result)
 
         print(f"Extracted content length: {len(content)}")
 
         content = re.sub(r'```json\s*', '', content)
         content = re.sub(r'```\s*', '', content)
         content = content.strip()
-
-        def repair_json(json_str):
-            result = []
-            in_string = False
-            escape_next = False
-            i = 0
-            while i < len(json_str):
-                char = json_str[i]
-                if escape_next:
-                    result.append(char)
-                    escape_next = False
-                elif char == '\\':
-                    result.append(char)
-                    escape_next = True
-                elif char == '"' and not escape_next:
-                    in_string = not in_string
-                    result.append(char)
-                elif in_string:
-                    if char == '\n':
-                        result.append('\\n')
-                    elif char == '\r':
-                        result.append('\\r')
-                    elif char == '\t':
-                        result.append('\\t')
-                    elif ord(char) < 32:
-                        result.append(' ')
-                    else:
-                        result.append(char)
-                else:
-                    result.append(char)
-                i += 1
-            return ''.join(result)
 
         def _post_process(parsed):
             """解析成功后: 补全分镜字段 + 同步角色到 session, 返回 (pages, characters)"""
@@ -1051,7 +1011,10 @@ def segment_novel():
                     seg['segment_number'] = seg_idx + 1
                     if 'style_prompt' not in seg:
                         # 移除 'no text overlay' 避免模型不渲染对话文字
-                        seg['style_prompt'] = 'ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, pure monochrome, detailed ink drawing'
+                        if comic_mode == 'color':
+                            seg['style_prompt'] = 'vibrant full color manga, rich saturated colors, detailed colorful illustration, cel shading, no watermark'
+                        else:
+                            seg['style_prompt'] = 'ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga, pure monochrome, detailed ink drawing'
                     for k, dv in (('camera_angle', '平视'), ('composition', '三分法'), ('mood', ''),
                                   ('shot_scale', ''), ('lighting', ''), ('of_type', '静态')):
                         if k not in seg or seg.get(k) is None:
@@ -1073,39 +1036,15 @@ def segment_novel():
                 save_session_data('characters', {'characters': chars})
             return chars
 
-        try:
-            parsed = json.loads(content)
-            chars = _post_process(parsed)
-            parsed = _clean_placeholder_dialogue(parsed)
-            save_session_data('segments', parsed)
-            emit_progress(task_id, 95, '分镜解析完成, 正在保存...', 'saving')
-            return jsonify({'success': True, 'data': parsed, 'characters': chars})
-        except json.JSONDecodeError as e1:
-            print(f"First JSON parse error: {e1}")
-            try:
-                repaired = repair_json(content)
-                parsed = json.loads(repaired)
-                chars = _post_process(parsed)
-                parsed = _clean_placeholder_dialogue(parsed)
-                save_session_data('segments', parsed)
-                emit_progress(task_id, 95, '分镜解析完成, 正在保存...', 'saving')
-                return jsonify({'success': True, 'data': parsed, 'characters': chars})
-            except json.JSONDecodeError as e2:
-                print(f"Second JSON parse error: {e2}")
-                json_match = re.search(r'\{[\s\S]*\}', content)
-                if json_match:
-                    try:
-                        repaired_match = repair_json(json_match.group())
-                        parsed = json.loads(repaired_match)
-                        chars = _post_process(parsed)
-                        parsed = _clean_placeholder_dialogue(parsed)
-                        save_session_data('segments', parsed)
-                        emit_progress(task_id, 95, '分镜解析完成, 正在保存...', 'saving')
-                        return jsonify({'success': True, 'data': parsed, 'characters': chars})
-                    except json.JSONDecodeError as e3:
-                        print(f"Third JSON parse error: {e3}")
-                emit_progress(task_id, 0, 'JSON 解析失败', 'error')
-                return jsonify({'error': f'JSON解析失败，请重试或检查小说内容', 'detail': str(e1)}), 500
+        parsed = _try_parse_json(content)
+        if parsed is None:
+            emit_progress(task_id, 0, 'JSON 解析失败', 'error')
+            return jsonify({'error': 'JSON解析失败，请重试或检查小说内容'}), 500
+        chars = _post_process(parsed)
+        parsed = _clean_placeholder_dialogue(parsed)
+        save_session_data('segments', parsed)
+        emit_progress(task_id, 95, '分镜解析完成, 正在保存...', 'saving')
+        return jsonify({'success': True, 'data': parsed, 'characters': chars})
 
     except Exception as e:
         import traceback
@@ -1113,6 +1052,75 @@ def segment_novel():
         print(traceback.format_exc())
         emit_progress(task_id, 0, f'分镜生成失败: {e}', 'error')
         return jsonify({'error': str(e)}), 500
+
+
+def _extract_llm_content(result):
+    """从各种 LLM 响应格式 (OpenAI / 兼容 API / 自定义) 中提取 content 字符串."""
+    content = ''
+    if 'choices' in result and len(result['choices']) > 0:
+        choice = result['choices'][0]
+        if 'message' in choice:
+            content = choice['message']['content']
+        elif 'text' in choice:
+            content = choice['text']
+    elif 'response' in result:
+        content = result['response']
+    elif 'text' in result:
+        content = result['text']
+    elif 'content' in result:
+        content = result['content']
+    elif 'data' in result:
+        content = str(result['data'])
+    else:
+        content = str(result)
+    return content
+
+
+def _repair_json(json_str):
+    """把 LLM 输出中的裸换行/控制字符转义, 使 json.loads 能接受."""
+    result = []
+    in_string = False
+    escape_next = False
+    for char in json_str:
+        if escape_next:
+            result.append(char)
+            escape_next = False
+        elif char == '\\':
+            result.append(char)
+            escape_next = True
+        elif char == '"' and not escape_next:
+            in_string = not in_string
+            result.append(char)
+        elif in_string:
+            if char == '\n':
+                result.append('\\n')
+            elif char == '\r':
+                result.append('\\r')
+            elif char == '\t':
+                result.append('\\t')
+            elif ord(char) < 32:
+                result.append(' ')
+            else:
+                result.append(char)
+        else:
+            result.append(char)
+    return ''.join(result)
+
+
+def _try_parse_json(text):
+    """LLM 输出容错解析: 原文 → repair → 抽取首个大括号块再 repair. 全部失败返回 None."""
+    for candidate in (text, _repair_json(text)):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+    m = re.search(r'\{[\s\S]*\}', text)
+    if m:
+        try:
+            return json.loads(_repair_json(m.group()))
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 def _clean_placeholder_dialogue(parsed):
@@ -1137,6 +1145,34 @@ def _clean_placeholder_dialogue(parsed):
     return parsed
 
 
+def _api_request(method, url, retries=3, base_delay=2.0, backoff=2.0, **kwargs):
+    """带指数退避的 HTTP 请求封装, 用于 LLM/图像 API 等长耗时调用.
+
+    对 429 限流 / 5xx 服务端错误 / 网络抖动自动重试, 间隔按 2s -> 4s -> 8s 递增;
+    其余 4xx (参数/鉴权错误) 不重试直接抛错. 返回状态码为 2xx 的 response.
+    """
+    kwargs.setdefault('timeout', 300)
+    last_exc = None
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            resp = requests.request(method, url, **kwargs)
+            if resp.status_code in (429, 500, 502, 503, 504):
+                raise RuntimeError('HTTP %d: %s' % (resp.status_code, resp.text[:200]))
+            resp.raise_for_status()
+            return resp
+        except requests.HTTPError:
+            # 4xx 业务错误 (参数/鉴权等) 不重试, 直接抛出, 避免无意义等待
+            raise
+        except (requests.RequestException, RuntimeError) as e:
+            last_exc = e
+            if attempt < retries:
+                delay = base_delay * (backoff ** (attempt - 1))
+                print('[api_retry] %s %s attempt %d/%d failed: %s; retry in %.1fs'
+                      % (method, url, attempt, retries, e, delay))
+                time.sleep(delay)
+    raise last_exc
+
+
 def call_image_api(api_url, api_key, payload):
     """调用图片生成API，兼容OpenAI SDK格式"""
     headers = {'Content-Type': 'application/json'}
@@ -1152,7 +1188,7 @@ def call_image_api(api_url, api_key, payload):
         else:
             print(f"Reference image: 1 image")
     
-    response = requests.post(api_url, headers=headers, json=payload, timeout=300)
+    response = _api_request('POST', api_url, headers=headers, json=payload, timeout=300)
     print(f"Image API status: {response.status_code}")
     if response.status_code != 200:
         print(f"Image API error response: {response.text[:2000]}")
@@ -1200,8 +1236,7 @@ def save_image_result(image_url, prefix="manga", work_id=None, work_username=Non
             filename = f"{prefix}_{timestamp}.png"
             filepath = os.path.join(images_dir, filename)
 
-            img_response = requests.get(image_url, timeout=120)
-            img_response.raise_for_status()
+            img_response = _api_request('GET', image_url, timeout=120)
 
             with open(filepath, 'wb') as f:
                 f.write(img_response.content)
@@ -1254,7 +1289,7 @@ def upload_to_cloud_storage(local_url, work_id=None, prefix="manga"):
         filename = os.path.basename(abs_path)
         wid = work_id or 'unknown'
         cloud_path = f'works/{wid}/images/{prefix}_{filename}'
-        resp = requests.post(url, json={'cloudPath': cloud_path, 'base64': b64}, timeout=120)
+        resp = _api_request('POST', url, json={'cloudPath': cloud_path, 'base64': b64}, timeout=120)
         data = resp.json()
         if data and data.get('code') == 0 and data.get('data'):
             file_id = data['data'].get('fileID')
@@ -1442,17 +1477,13 @@ def generate_characters():
 
         print(f"Generating character analysis...")
         emit_progress(task_id, 20, '正在调用 LLM 分析角色 (可能需要 20-60 秒)...', 'calling_llm')
-        response = requests.post(api_url, headers=headers, json=payload, timeout=300)
+        response = _api_request('POST', api_url, headers=headers, json=payload, timeout=300)
         response.raise_for_status()
         result = response.json()
 
         emit_progress(task_id, 75, 'LLM 返回结果, 正在解析...', 'parsing')
 
-        content = ''
-        if 'choices' in result and len(result['choices']) > 0:
-            choice = result['choices'][0]
-            if 'message' in choice:
-                content = choice['message']['content']
+        content = _extract_llm_content(result)
 
         content = re.sub(r'```json\s*', '', content)
         content = re.sub(r'```\s*', '', content)
@@ -1489,6 +1520,11 @@ def generate_character_image():
     except (TypeError, ValueError):
         max_attempts = 3
     max_attempts = max(1, min(5, max_attempts))
+    # 漫画模式: bw=黑白 (默认) / color=彩色
+    comic_mode = data.get('comic_mode', 'bw')
+    if comic_mode not in ('bw', 'color'):
+        comic_mode = 'bw'
+    is_color = comic_mode == 'color'
 
     if not description or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
@@ -1497,19 +1533,36 @@ def generate_character_image():
     for attempt in range(1, max_attempts + 1):
         # 有自定义 prompt 就始终用它 (不区分第几次)
         if custom_prompt:
-            prompt = custom_prompt.rstrip('.') + f", {name}, {description}. Strictly black and white manga, no color, pure monochrome."
+            if is_color:
+                prompt = custom_prompt.rstrip('.') + f", {name}, {description}. Vibrant full color manga, rich colors, colorful illustration."
+            else:
+                prompt = custom_prompt.rstrip('.') + f", {name}, {description}. Strictly black and white manga, no color, pure monochrome."
         elif attempt == 1:
-            prompt = f"ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga character design sheet, pure monochrome, grayscale. full body portrait, {name}, {description}, detailed line art, high contrast, dramatic shading, cross-hatching, single character only, plain background, reference sheet style"
+            if is_color:
+                prompt = f"no watermark, no signature, no text overlay. Vibrant full color manga character design sheet, rich saturated colors, colorful illustration. full body portrait, {name}, {description}, detailed colorful line art, cel shading, single character only, plain background, reference sheet style"
+            else:
+                prompt = f"ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. Strict black and white manga character design sheet, pure monochrome, grayscale. full body portrait, {name}, {description}, detailed line art, high contrast, dramatic shading, cross-hatching, single character only, plain background, reference sheet style"
         else:
-            prompt = (
-                f"ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. "
-                f"Strict black and white manga character design sheet, pure monochrome, grayscale. "
-                f"SINGLE CHARACTER ONLY, no other figures, no crowd, no group shot. "
-                f"full body, front view, simple plain white background. "
-                f"Character name: {name}. Appearance: {description}. "
-                f"clean line art, high contrast, detailed, professional character reference sheet. "
-                f"Regeneration attempt {attempt} — must show exactly ONE character."
-            )
+            if is_color:
+                prompt = (
+                    f"no watermark, no signature, no text overlay. "
+                    f"Vibrant full color manga character design sheet, rich saturated colors, colorful illustration. "
+                    f"SINGLE CHARACTER ONLY, no other figures, no crowd, no group shot. "
+                    f"full body, front view, simple plain white background. "
+                    f"Character name: {name}. Appearance: {description}. "
+                    f"clean colorful line art, cel shading, detailed, professional character reference sheet. "
+                    f"Regeneration attempt {attempt} — must show exactly ONE character."
+                )
+            else:
+                prompt = (
+                    f"ABSOLUTELY NO COLOR, no watermark, no signature, no text overlay. "
+                    f"Strict black and white manga character design sheet, pure monochrome, grayscale. "
+                    f"SINGLE CHARACTER ONLY, no other figures, no crowd, no group shot. "
+                    f"full body, front view, simple plain white background. "
+                    f"Character name: {name}. Appearance: {description}. "
+                    f"clean line art, high contrast, detailed, professional character reference sheet. "
+                    f"Regeneration attempt {attempt} — must show exactly ONE character."
+                )
 
         try:
             payload = {
@@ -1557,22 +1610,6 @@ def generate_character_image():
         'error': f'基线图生成失败（已尝试 {max_attempts} 次）: {last_error}',
         'attempts': max_attempts
     }), 500
-
-
-def download_image(url):
-    try:
-        if url.startswith('http'):
-            response = requests.get(url, timeout=30)
-            return Image.open(BytesIO(response.content))
-        elif url.startswith('/static'):
-            local_path = os.path.join(BASE_DIR, url.lstrip('/'))
-            return Image.open(local_path)
-        elif url.startswith('data:image'):
-            image_data = url.split(',')[1]
-            return Image.open(BytesIO(base64.b64decode(image_data)))
-    except Exception as e:
-        print(f"Download image error: {e}")
-        return None
 
 
 # ============ 任务3: 自适应网格 + 4 种对话气泡 ============
@@ -1632,12 +1669,18 @@ def _get_font_bbox_top_offset(font):
         return 0
 
 
+def _grid_dims(panel_count):
+    """分镜数量 → (行数, 列数): 1→1x1, 2→2x1, 3→3x1, 4→2x2, 5→3+2, 6→3x2,
+    7→4+3, 8→4x2, 9→3x3, 10-12→4x3, 13-16→4x4."""
+    rows_map = {1: 1, 2: 1, 3: 1, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 3, 12: 3, 13: 4, 14: 4, 15: 4, 16: 4}
+    cols_map = {1: 1, 2: 2, 3: 3, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4, 9: 3, 10: 4, 11: 4, 12: 4, 13: 4, 14: 4, 15: 4, 16: 4}
+    rows = rows_map.get(panel_count, max(1, (panel_count + 3) // 4))
+    cols = cols_map.get(panel_count, min(4, (panel_count + rows - 1) // rows))
+    return rows, cols
+
+
 def compute_grid_layout(panel_count, canvas_w=None, canvas_h=None, gap=4, manual_layout=None):
     """依据 panel_count 自动选择 N×M 布局, 返回 [{x,y,w,h}] 列表 (像素坐标).
-
-    规则:
-      1→1x1, 2→2x1, 3→3x1, 4→2x2, 5→3+2(2行), 6→3x2,
-      7→4+3, 8→4x2, 9→3x3, 10-12→4x3, 13-16→4x4.
 
     manual_layout: 若提供 (list[{x,y,w,h} 或 ratio]), 则优先使用手动布局
       - ratio 形式 (0-1 浮点): 按 canvas_w/canvas_h 折算成像素
@@ -1658,10 +1701,7 @@ def compute_grid_layout(panel_count, canvas_w=None, canvas_h=None, gap=4, manual
         return [{'x': int(p.get('x', 0)), 'y': int(p.get('y', 0)), 'w': int(p.get('w', 0)), 'h': int(p.get('h', 0))} for p in manual_layout]
 
     # 2. 默认: 同质网格, 行数=ceil(sqrt(n)), 列数=ceil(n/rows)
-    rows_map = {1: 1, 2: 1, 3: 1, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 3, 12: 3, 13: 4, 14: 4, 15: 4, 16: 4}
-    cols_map = {1: 1, 2: 2, 3: 3, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4, 9: 3, 10: 4, 11: 4, 12: 4, 13: 4, 14: 4, 15: 4, 16: 4}
-    rows = rows_map.get(panel_count, max(1, (panel_count + 3) // 4))
-    cols = cols_map.get(panel_count, min(4, (panel_count + rows - 1) // rows))
+    rows, cols = _grid_dims(panel_count)
 
     if not canvas_w:
         # 没传画布尺寸, 给默认 2K 横向: 2048w * cols, 1536h * rows
@@ -1779,17 +1819,16 @@ def _draw_rounded_rect(draw, xy, radius, outline='black', fill='white', width=2)
         draw.rectangle(xy, outline=outline, fill=fill, width=width)
 
 
-def _bubble_speech_tail(draw, x, y, w, h, direction='bl', size=20):
+def _bubble_speech_tail(draw, x, y, w, h, size=20):
     """对话气泡的小尖角 (尾巴) 指向左下"""
-    if direction == 'bl':
-        # 尖角在底边偏左
-        tip_x = x + w * 0.25
-        tip_y = y + h + size
-        draw.polygon([
-            (x + w * 0.1, y + h - 1),
-            (x + w * 0.4, y + h - 1),
-            (tip_x, tip_y)
-        ], fill='white', outline='black')
+    # 尖角在底边偏左
+    tip_x = x + w * 0.25
+    tip_y = y + h + size
+    draw.polygon([
+        (x + w * 0.1, y + h - 1),
+        (x + w * 0.4, y + h - 1),
+        (tip_x, tip_y)
+    ], fill='white', outline='black')
 
 
 def draw_dialogue_bubble(draw, x, y, w, h, text, font, overflow=True, canvas_bounds=None):
@@ -1903,7 +1942,7 @@ def draw_whisper_bubble(draw, x, y, w, h, text, font, overflow=True, canvas_boun
     except Exception:
         pass
     # 小尾巴 (比 dialogue 小, 暗示安静)
-    _bubble_speech_tail(draw, x, y, w, h, direction='bl', size=int(h * 0.2))
+    _bubble_speech_tail(draw, x, y, w, h, size=int(h * 0.2))
     _draw_text_centered(draw, text, font, x + 4, y + 2, w - 8, h - 4)
 
 
@@ -2269,6 +2308,17 @@ def generate_page():
     previous_page_image = data.get('previous_page_image')
     page_idx = data.get('page_idx')
     task_id = data.get('task_id', '')
+    # 漫画模式: bw=黑白 (默认) / color=彩色
+    comic_mode = data.get('comic_mode', 'bw')
+    if comic_mode not in ('bw', 'color'):
+        comic_mode = 'bw'
+    is_color = comic_mode == 'color'
+
+    # 气泡渲染方式: pil=本地PIL叠加 (默认, 中文零乱码) / api=让图像API自己画气泡
+    bubble_render_mode = data.get('bubble_render_mode', 'pil')
+    if bubble_render_mode not in ('pil', 'api'):
+        bubble_render_mode = 'pil'
+    api_draws_bubbles = (bubble_render_mode == 'api')
 
     if not page or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
@@ -2285,33 +2335,86 @@ def generate_page():
         for idx, seg in enumerate(segments):
             # 调用 upgrade_segment_prompt 合并 style_prompt + 镜头语言 tags
             upgraded_style = upgrade_segment_prompt(seg)
-            base_style = upgraded_style or seg.get('style_prompt', '') or 'black and white manga style'
+            base_style = upgraded_style or seg.get('style_prompt', '') or ('colorful manga style' if is_color else 'black and white manga style')
             seg_style_tags = base_style
+            if is_color:
+                # 彩色模式: 清理分镜 style_prompt 里强制黑白的短语
+                seg_style_tags = _colorize_style_text(seg_style_tags)
 
             desc = f"Panel {idx+1}: {seg.get('scene_description', '')}"
             # 把升级后的 style_prompt 注入到每个 panel 描述
             desc += f" [style: {seg_style_tags}]"
             segment_descriptions.append(desc)
 
-        style_art = "detailed ink drawing, dramatic shadows, high contrast, cross-hatching, professional manga quality, black ink on white paper"
+        if is_color:
+            style_art = "detailed colorful manga art, vivid colors, professional manga coloring, cel shading, high quality full color illustration"
+        else:
+            style_art = "detailed ink drawing, dramatic shadows, high contrast, cross-hatching, professional manga quality, black ink on white paper"
         if style_tags:
             style_art = f"{style_tags}, {style_art}"
 
         # 显式指定网格布局, 让 API 按已知 RxC 出图 (后续 PIL 按同样的网格叠气泡)
         panel_count = len(segments)
-        rows_map = {1: 1, 2: 1, 3: 1, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 3, 12: 3, 13: 4, 14: 4, 15: 4, 16: 4}
-        cols_map = {1: 1, 2: 2, 3: 3, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4, 9: 3, 10: 4, 11: 4, 12: 4, 13: 4, 14: 4, 15: 4, 16: 4}
-        rows = rows_map.get(panel_count, max(1, (panel_count + 3) // 4))
-        cols = cols_map.get(panel_count, min(4, (panel_count + rows - 1) // rows))
+        rows, cols = _grid_dims(panel_count)
 
         # 对话文本不再交给图像 API 渲染, 由后端 PIL 叠加 (避免乱码)
         # 这里明确要求图像 API 不画任何文字/气泡, 并按指定网格出图
-        page_prompt = f"""ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga comic page, pure monochrome, grayscale only. Arrange exactly {panel_count} panels in a {rows}x{cols} grid, equal-sized, top-left to bottom-right reading order, with thin black gutters between panels.
+        if is_color:
+            page_header = (f"Vibrant full color manga comic page, rich saturated colors, colorful detailed art, "
+                           f"no watermark, no signature. Arrange exactly {panel_count} panels in a {rows}x{cols} grid, "
+                           f"equal-sized, top-left to bottom-right reading order, with thin black gutters between panels.")
+        else:
+            page_header = (f"ABSOLUTELY NO COLOR, no watermark, no signature. Strict black and white manga comic page, "
+                           f"pure monochrome, grayscale only. Arrange exactly {panel_count} panels in a {rows}x{cols} grid, "
+                           f"equal-sized, top-left to bottom-right reading order, with thin black gutters between panels.")
+        page_prompt = f"""{page_header}
 
 Panels:
 {chr(10).join(segment_descriptions)}
 
-Art style: {style_art}
+Art style: {style_art}"""
+
+        # 气泡渲染方式分流: PIL 模式强制 API 不画任何文字/气泡, 由本地 PIL 叠加;
+        # API 模式让图像 API 端到端绘制气泡 (按各 panel 的 dialogue_type 形状)
+        if api_draws_bubbles:
+            # 收集本页所有 panel 的 dialogue_type, 让模型按类型画对应气泡形状
+            dtype_hint_lines = []
+            for idx2, seg2 in enumerate(segments):
+                dt = (seg2.get('dialogue_type') or 'dialogue').lower()
+                dlg = (seg2.get('dialogue') or '').strip()
+                if not dlg:
+                    continue
+                dtype_hint_lines.append(
+                    f"- Panel {idx2+1}: dialogue_type={dt} → text=\"{dlg}\""
+                )
+            dtype_hint = "\n".join(dtype_hint_lines) if dtype_hint_lines else "(no dialogue in any panel)"
+            page_prompt += f"""
+
+IMPORTANT — Render dialogue as comic speech bubbles and captions INSIDE the panels.
+Each panel's dialogue has a specific bubble shape implied by its dialogue_type:
+
+  dialogue  → white rounded-rect speech bubble with a small tail toward the speaker
+  thought   → fluffy cloud-shaped bubble with small trailing circles
+  shout     → jagged / starburst / explosion-shaped bubble
+  whisper   → small rounded-rect with a dashed border and a tiny tail
+  burst     → radiating-ray / starburst shape (often used for sound effects)
+  narration → tan/beige rectangular caption box (no tail, third-person narration)
+  box       → plain rectangular caption box with thin border
+  caption   → black-filled rectangular caption with WHITE text (onomatopoeia / sound effect)
+
+Per-panel content:
+{dtype_hint}
+
+Rules:
+- Render all text legibly in clear, hand-lettered comic style.
+- Place each bubble INSIDE its corresponding panel, NOT overflowing panel borders.
+- Do NOT leave any dialogue or caption as floating text outside bubbles.
+- For caption/burst types, use large stylized lettering suitable for sound effects.
+- Do not invent extra dialogue that wasn't listed above.
+- Keep the same drawing style, character proportions, and line quality across all panels."""
+        else:
+            # PIL 模式: 严格禁止 API 渲染任何文字/气泡, 全部交给后端 PIL
+            page_prompt += """
 
 NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text overlay. Leave all panels completely free of any text or speech bubbles."""
 
@@ -2377,8 +2480,16 @@ NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text ov
         local_url, error = save_image_result(image_url, f"comic_page_{page_num}_full", work_id, work_username)
 
         if local_url:
-            # PIL 叠加每个 panel 的对话气泡 (替代图像 API 渲染, 避免乱码)
-            clean_url, bubbles = _overlay_bubbles_on_page(local_url, segments)
+            if api_draws_bubbles:
+                # API 模式: API 已把气泡画进图像, 不再调用 PIL 叠加
+                # 干净图概念不适用 (没有"无气泡"版本), clean_url 留 None 让前端明确知道不可编辑
+                clean_url = None
+                bubbles = []
+                print(f"[generate_page] bubble_render_mode=api: skip PIL overlay, return empty bubbles")
+            else:
+                # PIL 模式 (默认): 保留干净副本, 用 PIL 叠加气泡 (避免乱码)
+                clean_url, bubbles = _overlay_bubbles_on_page(local_url, segments)
+                print(f"[generate_page] bubble_render_mode=pil: PIL overlay wrote {len(bubbles)} bubbles")
             # 持久化整页图片映射
             if page_idx is not None:
                 fp_data = load_session_data('full_pages') or {'pages': []}
@@ -2400,6 +2511,7 @@ NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text ov
                 'image_url': file_id or local_url,
                 'clean_image_url': clean_file_id or clean_url,
                 'bubbles': bubbles,
+                'bubble_render_mode': bubble_render_mode,
             })
         else:
             emit_progress(task_id, 0, '页面生成失败', 'error')
@@ -2723,12 +2835,10 @@ def history_detail(work_id):
     # 2. 否则按多种命名约定匹配 (兼容 char_0, char_20260616_090739 等)
     # 3. 最后按 images_dir 中 char_*.png 顺序分配给没图片的角色
     chars = state.get('characters', [])
-    used_urls = set()
     for char in chars:
         url = char.get('image_url', '')
         # 如果已有 image_url 且能在当前 work_dir 的 images/ 中找到, 才算有效
         if url and url.startswith('/') and 'images/' + os.path.basename(url) in [os.path.join('images', os.path.basename(u)) for u in image_files]:
-            used_urls.add(url)
             continue
         # 否则清空, 后面会重新分配
         char['image_url'] = ''
@@ -2738,7 +2848,6 @@ def history_detail(work_id):
     for i, char in enumerate(unassigned_chars):
         if i < len(char_images):
             char['image_url'] = char_images[i]
-            used_urls.add(char_images[i])
         # 超出 char_images 数量的角色保持空 image_url
 
     return jsonify({
@@ -2973,7 +3082,7 @@ def generate_title():
             'temperature': 0.7,
             'max_tokens': 60,
         }
-        resp = requests.post(api_url, headers=headers, json=payload, timeout=30)
+        resp = _api_request('POST', api_url, headers=headers, json=payload, timeout=30)
         resp.raise_for_status()
         result = resp.json()
         title = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
@@ -3019,7 +3128,7 @@ def _summarize_head(head, api_url, api_key, model):
         'temperature': 0.4,
         'max_tokens': 2048,
     }
-    resp = requests.post(api_url, headers=headers, json=payload, timeout=180)
+    resp = _api_request('POST', api_url, headers=headers, json=payload, timeout=180)
     resp.raise_for_status()
     result = resp.json()
     content = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
@@ -3083,7 +3192,7 @@ def plot_options():
             # max_tokens 必须给足, 否则预算被思考链耗尽, content 为空
             'max_tokens': 4000,
         }
-        resp = requests.post(api_url, headers=headers, json=payload, timeout=120)
+        resp = _api_request('POST', api_url, headers=headers, json=payload, timeout=120)
         resp.raise_for_status()
         result = resp.json()
         raw = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
@@ -3169,7 +3278,7 @@ def continue_novel():
             'temperature': 0.7,
             'max_tokens': max_tokens,
         }
-        resp = requests.post(api_url, headers=headers, json=payload, timeout=300)
+        resp = _api_request('POST', api_url, headers=headers, json=payload, timeout=300)
         resp.raise_for_status()
         result = resp.json()
         continuation = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
@@ -3247,7 +3356,7 @@ def polish_styles():
             # 推理型模型会先输出 reasoning_content, max_tokens 必须给足
             'max_tokens': 4000,
         }
-        resp = requests.post(api_url, headers=headers, json=payload, timeout=120)
+        resp = _api_request('POST', api_url, headers=headers, json=payload, timeout=120)
         resp.raise_for_status()
         result = resp.json()
         raw = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
@@ -3337,7 +3446,7 @@ def polish_novel():
             # 推理模型需预留 reasoning 预算 (4096 保底) + 输出预算 (约 1.6 token/字)
             'max_tokens': min(12000, 4096 + int(len(chunk) * 1.6)),
         }
-        resp = requests.post(api_url, headers=headers, json=payload, timeout=300)
+        resp = _api_request('POST', api_url, headers=headers, json=payload, timeout=300)
         resp.raise_for_status()
         result = resp.json()
         out = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
@@ -3495,8 +3604,7 @@ def download_image_proxy():
     
     try:
         if url.startswith('http'):
-            response = requests.get(url, timeout=60)
-            response.raise_for_status()
+            response = _api_request('GET', url, timeout=60)
             image_data = BytesIO(response.content)
         elif url.startswith('/static'):
             local_path = os.path.join(BASE_DIR, url.lstrip('/'))
@@ -3586,17 +3694,11 @@ def comic_to_novel():
                 'temperature': 0.7
             }
 
-            response = requests.post(api_url, headers=headers, json=payload, timeout=300)
+            response = _api_request('POST', api_url, headers=headers, json=payload, timeout=300)
             response.raise_for_status()
             result = response.json()
 
-            page_text = ''
-            if 'choices' in result and len(result['choices']) > 0:
-                choice = result['choices'][0]
-                if 'message' in choice:
-                    page_text = choice['message']['content']
-                elif 'text' in choice:
-                    page_text = choice['text']
+            page_text = _extract_llm_content(result)
 
             all_page_texts.append(page_text.strip())
             print(f"Page {idx + 1} result: {len(page_text)} chars")
@@ -3716,4 +3818,4 @@ if __name__ == '__main__':
     if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
         threading.Timer(1.5, _open_browser_delayed).start()
 
-    socketio.run(app, host='0.0.0.0', port=2778, debug=True, allow_unsafe_werkzeug=True)
+    app.run(host='0.0.0.0', port=2778, debug=True)

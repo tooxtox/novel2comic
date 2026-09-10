@@ -5,22 +5,36 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>小说⇄漫画 双向转换器</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- socket.io 客户端 (用于 WebSocket 实时进度推送) -->
-    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Noto Sans SC', sans-serif; }
+
+        /* ===== 动效系统 ===== */
+        :root {
+            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+            --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+            --anim-fast: 0.18s;
+            --anim-base: 0.28s;
+        }
+
         .manga-border { border: 2px solid #1a1a1a; }
         .panel-shadow { box-shadow: 4px 4px 0px #1a1a1a; }
         .btn-primary {
             background: #1a1a1a;
             color: white;
-            transition: all 0.2s;
+            transition: transform var(--anim-fast) var(--ease-out-expo), box-shadow var(--anim-fast) var(--ease-out-expo), background-color var(--anim-fast);
         }
         .btn-primary:hover {
             transform: translate(-2px, -2px);
             box-shadow: 4px 4px 0px #666;
         }
+        .btn-primary:active {
+            transform: translate(0, 0) scale(0.98);
+            box-shadow: 1px 1px 0px #666;
+            transition-duration: 0.06s;
+        }
+        /* 通用按钮按压反馈 */
+        button:not(:disabled):active { transform: scale(0.98); }
         .loading-spinner {
             border: 3px solid #f3f3f3;
             border-top: 3px solid #1a1a1a;
@@ -40,11 +54,113 @@
         .progress-bar {
             height: 100%;
             background-color: #1a1a1a;
-            width: 0%;
-            transition: width 0.3s ease;
+            width: 100%;
+            transform-origin: left center;
+            transform: scaleX(0);
+            transition: transform 0.3s var(--ease-out-expo);
         }
-        .fade-in { animation: fadeIn 0.5s ease-in; }
+        .fade-in { animation: fadeIn 0.4s var(--ease-out-expo) both; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* ===== 模态框进出场 ===== */
+        @keyframes backdropIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes modalIn {
+            from { opacity: 0; transform: translateY(18px) scale(0.97); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .modal-backdrop { animation: backdropIn var(--anim-fast) ease-out both; }
+        .modal-card { animation: modalIn var(--anim-base) var(--ease-out-expo) both; will-change: transform, opacity; }
+        /* 关闭时由 JS 挂上 .modal-closing, 过渡结束后再 display:none */
+        .modal-closing .modal-backdrop {
+            opacity: 0;
+            transition: opacity 0.15s ease-in;
+        }
+        .modal-closing .modal-card {
+            opacity: 0;
+            transform: translateY(10px) scale(0.98);
+            transition: opacity 0.15s ease-in, transform 0.15s ease-in;
+        }
+
+        /* ===== 气泡编辑器: 按 dialogue_type 可视化 ===== */
+        /* 编辑器内每个气泡显示成接近最终成图的样子, 避免编辑前/后"类型变了"的误判 */
+        .bubble-edit-item .bubble-type-badge {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            font-size: 9px;
+            line-height: 1;
+            padding: 2px 4px;
+            border-radius: 3px;
+            background: rgba(0,0,0,0.78);
+            color: #fff;
+            pointer-events: none;
+            white-space: nowrap;
+            opacity: 0.92;
+        }
+        /* 类型徽标改成可点击下拉, 让用户在编辑器里直接换 dialogue_type */
+        .bubble-edit-item .bubble-type-select {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            z-index: 11;
+            font-size: 9px;
+            line-height: 1;
+            padding: 2px 14px 2px 4px;
+            border-radius: 3px;
+            border: 1px solid rgba(255,255,255,0.4);
+            background: rgba(0,0,0,0.82);
+            color: #fff;
+            white-space: nowrap;
+            opacity: 0.94;
+            cursor: pointer;
+            pointer-events: auto;
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'><path fill='white' d='M0 2l4 4 4-4z'/></svg>");
+            background-repeat: no-repeat;
+            background-position: right 4px center;
+            background-size: 7px 7px;
+        }
+        .bubble-edit-item .bubble-type-select:focus { outline: 2px solid #1a1a1a; outline-offset: 1px; }
+        .bubble-edit-item .bubble-type-select option { background: #1a1a1a; color: #fff; }
+        .bubble-edit-item[data-type="caption"] .bubble-type-select { background: rgba(255,255,255,0.92); color: #1a1a1a; border-color: rgba(0,0,0,0.4);
+            background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'><path fill='black' d='M0 2l4 4 4-4z'/></svg>");
+            background-repeat: no-repeat; background-position: right 4px center; background-size: 7px 7px; }
+        .bubble-edit-item[data-type="caption"] .bubble-type-select option { background: #fff; color: #1a1a1a; }
+        .bubble-edit-item { background: rgba(255,255,255,0.92); border: 2px solid #1a1a1a; border-radius: 8px; }
+        .bubble-edit-item[data-type="dialogue"]  { border-radius: 10px; }
+        .bubble-edit-item[data-type="thought"]   { border-radius: 22px; border-style: solid; background: #fafcff; }
+        .bubble-edit-item[data-type="thought"]::before {
+            content: ""; position: absolute; left: 8%; right: 8%; top: 4px; height: 10px;
+            border: 2px solid #1a1a1a; border-bottom: 0; border-radius: 16px 16px 0 0;
+            pointer-events: none;
+        }
+        .bubble-edit-item[data-type="thought"]::after {
+            content: ""; position: absolute; right: 14%; bottom: -10px;
+            width: 14px; height: 14px; border: 2px solid #1a1a1a; border-radius: 50%;
+            background: #fafcff; pointer-events: none;
+        }
+        .bubble-edit-item[data-type="shout"]     {
+            border-radius: 4px; border-width: 3px; border-color: #1a1a1a;
+            background: #fff7e6;
+            clip-path: polygon(
+                0% 18%, 6% 8%, 12% 16%, 20% 4%, 28% 14%, 36% 6%, 44% 16%, 52% 4%, 60% 14%, 68% 6%, 76% 16%, 84% 4%, 92% 14%, 100% 18%,
+                94% 32%, 100% 46%, 92% 58%, 100% 72%, 92% 82%, 100% 92%,
+                88% 100%, 70% 94%, 56% 100%, 40% 94%, 28% 100%, 12% 92%,
+                0% 100%, 6% 84%, 0% 70%, 6% 56%, 0% 42%, 6% 30%
+            );
+        }
+        .bubble-edit-item[data-type="whisper"]   { border-style: dashed; border-radius: 14px; background: #f6f6f0; }
+        .bubble-edit-item[data-type="burst"]     {
+            border-radius: 50%;
+            background: radial-gradient(circle at center, #fff8d6 0%, #fff8d6 60%, rgba(255,248,214,0) 70%);
+            border: 2px dashed #b8860b;
+        }
+        .bubble-edit-item[data-type="narration"] { border-radius: 2px; background: #f5f5dc; border-color: #333; }
+        .bubble-edit-item[data-type="box"]       { border-radius: 0; background: #ffffff; }
+        .bubble-edit-item[data-type="caption"]   { border-radius: 0; background: #1a1a1a; color: #ffffff; border-color: #1a1a1a; }
+        .bubble-edit-item[data-type="caption"] .bubble-type-badge { background: rgba(255,255,255,0.92); color: #1a1a1a; }
+        .bubble-edit-item[data-type="caption"] .bubble-edit-text   { color: #ffffff; }
         .comic-page {
             background: white;
             border: 3px solid #1a1a1a;
@@ -53,9 +169,10 @@
         .segment-box {
             border: 2px solid #333;
             background: #fafafa;
-            transition: all 0.3s;
+            transition: border-color var(--anim-fast), box-shadow var(--anim-fast) var(--ease-out-expo), transform var(--anim-fast) var(--ease-out-expo);
         }
-        .segment-box:hover { border-color: #1a1a1a; box-shadow: 3px 3px 0px #1a1a1a; }
+        .segment-box:hover { border-color: #1a1a1a; box-shadow: 3px 3px 0px #1a1a1a; transform: translateY(-2px); }
+        .segment-box:active { transform: translateY(0) scale(0.995); }
         .tab-active { border-bottom: 3px solid #1a1a1a; font-weight: 700; }
         .tab-inactive { border-bottom: 3px solid transparent; color: #666; }
         .tab-inactive:hover { border-bottom: 3px solid #ccc; }
@@ -87,6 +204,28 @@
         .mtab-inactive { color: #9ca3af; }
         /* 触屏设备：点击按钮时不选中文字、不呼出长按菜单 */
         body.touch-device button { user-select: none; -webkit-touch-callout: none; }
+
+        /* 无障碍: 用户偏好减少动效时, 所有动画/过渡坍缩为瞬时 */
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+                scroll-behavior: auto !important;
+            }
+        }
+
+        /* image-modal 的背景在根元素上, 关闭时整体淡出 */
+        #image-modal { transition: opacity 0.15s ease-in; }
+        #image-modal.modal-closing { opacity: 0; }
+
+        /* Toast: 弹入带轻微回弹, 背景色切换跟随语义类型 */
+        #toast {
+            transition:
+                transform 0.35s var(--ease-spring),
+                opacity 0.25s ease-out,
+                background-color var(--anim-fast);
+        }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
@@ -198,9 +337,9 @@
         <!-- Config Modal (右上角 ⚙ 按钮触发) -->
         <div id="config-modal" class="fixed inset-0 z-50 hidden">
             <!-- 背景遮罩 -->
-            <div class="absolute inset-0 bg-black bg-opacity-50" onclick="closeConfigModal()"></div>
+            <div class="modal-backdrop absolute inset-0 bg-black bg-opacity-50" onclick="closeConfigModal()"></div>
             <!-- 弹窗内容 -->
-            <div class="relative modal-panel max-w-5xl mx-auto mt-2 mb-2 md:mt-10 md:mb-10 bg-gray-100 rounded manga-border panel-shadow">
+            <div class="modal-card relative modal-panel max-w-5xl mx-auto mt-2 mb-2 md:mt-10 md:mb-10 bg-gray-100 rounded manga-border panel-shadow">
                 <div class="sticky top-0 bg-white border-b-2 border-gray-200 px-4 py-3 md:px-6 md:py-4 flex items-center justify-between manga-border z-10">
                     <h2 class="text-lg md:text-2xl font-bold">⚙ API 配置</h2>
                     <button onclick="closeConfigModal()" class="w-9 h-9 flex items-center justify-center text-2xl text-gray-600 hover:text-black border border-gray-300 hover:border-black transition-colors">×</button>
@@ -304,6 +443,46 @@
             <div class="bg-white p-6 manga-border panel-shadow mt-6">
                 <h2 class="text-xl font-bold mb-4">高级设置</h2>
                 <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium mb-2">漫画模式</label>
+                        <div class="flex flex-col sm:flex-row gap-3">
+                            <label class="flex items-center gap-3 border-2 border-black bg-black text-white cursor-pointer p-3 flex-1 transition-colors">
+                                <input type="radio" name="comic-mode" value="bw" checked class="accent-white" onchange="onComicModeChange()">
+                                <span>
+                                    <span class="block font-medium">黑白漫画</span>
+                                    <span class="block text-xs opacity-70">当前默认：黑白墨水线稿风格</span>
+                                </span>
+                            </label>
+                            <label class="flex items-center gap-3 border-2 border-gray-300 cursor-pointer p-3 flex-1 hover:border-black transition-colors">
+                                <input type="radio" name="comic-mode" value="color" class="accent-black" onchange="onComicModeChange()">
+                                <span>
+                                    <span class="block font-medium">彩色漫画</span>
+                                    <span class="block text-xs text-gray-500">全彩上色漫画风格</span>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-1">💡 选择后对分镜、角色人设图与整页生成均生效，可随时切换</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-2">气泡渲染方式</label>
+                        <div class="flex flex-col sm:flex-row gap-3">
+                            <label id="bubble-render-mode-pil-label" class="flex items-center gap-3 border-2 border-black bg-black text-white cursor-pointer p-3 flex-1 transition-colors">
+                                <input type="radio" name="bubble-render-mode" value="pil" checked class="accent-white" onchange="onBubbleRenderModeChange()">
+                                <span>
+                                    <span class="block font-medium">本地 PIL 叠加</span>
+                                    <span class="block text-xs opacity-70">图像API只画画面, 气泡由本地PIL绘制 (中文零乱码)</span>
+                                </span>
+                            </label>
+                            <label id="bubble-render-mode-api-label" class="flex items-center gap-3 border-2 border-gray-300 cursor-pointer p-3 flex-1 hover:border-black transition-colors">
+                                <input type="radio" name="bubble-render-mode" value="api" class="accent-black" onchange="onBubbleRenderModeChange()">
+                                <span>
+                                    <span class="block font-medium">由图像API绘制</span>
+                                    <span class="block text-xs text-gray-500">API端到端画气泡, 跳过PIL, 不可编辑位置</span>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-1">💡 PIL 模式可编辑气泡位置; API 模式速度快但气泡位置由模型决定</p>
+                    </div>
                     <div>
                         <label class="block text-sm font-medium mb-1">
                             每页分镜数 <span class="text-xs text-gray-400 font-normal">(0 = LLM 自由控制)</span>
@@ -666,7 +845,7 @@
 
     <!-- Image Preview Modal -->
     <div id="image-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden z-50 flex items-center justify-center p-2 md:p-4" onclick="closeModal()">
-        <div class="relative max-w-4xl max-h-full" onclick="event.stopPropagation()">
+        <div class="modal-card relative max-w-4xl max-h-full" onclick="event.stopPropagation()">
             <img id="modal-image" src="" alt="预览" class="max-w-full max-h-[85dvh] object-contain border-4 border-white">
             <button onclick="closeModal()" class="absolute -top-10 right-0 text-white text-2xl hover:text-gray-300">✕</button>
         </div>
@@ -674,8 +853,8 @@
 
     <!-- AI 润色对比预览 Modal -->
     <div id="polish-compare-modal" class="fixed inset-0 z-50 hidden">
-        <div class="absolute inset-0 bg-black bg-opacity-50" onclick="cancelPolishCompare()"></div>
-        <div class="relative modal-panel-compare max-w-6xl mx-auto mt-2 mb-2 md:mt-8 md:mb-8 bg-white manga-border panel-shadow" style="display: flex; flex-direction: column;">
+        <div class="modal-backdrop absolute inset-0 bg-black bg-opacity-50" onclick="cancelPolishCompare()"></div>
+        <div class="modal-card relative modal-panel-compare max-w-6xl mx-auto mt-2 mb-2 md:mt-8 md:mb-8 bg-white manga-border panel-shadow" style="display: flex; flex-direction: column;">
             <div class="flex items-center justify-between px-4 py-3 md:px-6 md:py-4 border-b-2 border-gray-200">
                 <h2 class="text-xl font-bold">✨ 润色对比预览</h2>
                 <button onclick="cancelPolishCompare()" class="w-9 h-9 flex items-center justify-center text-2xl text-gray-600 hover:text-black border border-gray-300 hover:border-black transition-colors">×</button>
@@ -698,7 +877,7 @@
     </div>
 
     <!-- Toast Notification -->
-    <div id="toast" class="fixed bottom-24 md:bottom-6 right-6 bg-black text-white px-6 py-3 rounded shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 z-50"></div>
+    <div id="toast" class="fixed bottom-24 md:bottom-6 right-6 bg-black text-white px-6 py-3 rounded shadow-lg transform translate-y-20 opacity-0 z-50"></div>
 
     <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>

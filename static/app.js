@@ -1,4 +1,4 @@
-let currentSegments = { pages: [] };
+﻿let currentSegments = { pages: [] };
 let generatedImages = {};
 let isGenerating = false;
 let characters = [];
@@ -11,12 +11,6 @@ let fullPageBubbles = {};  // 整页生成图的气泡坐标 (key: pageIdx → [
 let progressInterval = null;
 let currentWritingId = localStorage.getItem('writing_id') || null;  // 当前写作历史文档ID (跨刷新持久化)
 
-// WebSocket 实时进度
-let socket = null;
-let socketConnected = false;
-let activeTaskIds = new Set();  // 当前正在跟踪的 task_id 集合
-let taskProgressCallbacks = {};  // task_id -> { onProgress, onComplete, onError }
-
 // 漫画转小说相关状态
 let comicUploadedImages = [];  // {name, data: base64, pageIndex}
 let comicNovelResult = null;   // {novel_text, pages}
@@ -28,6 +22,7 @@ const MAX_RETRIES = 3;
 // 漫画风格预设Tag (按地区/类型分类)
 const STYLE_PRESETS = [
     // ===== 日漫 =====
+    { id: 'acg', label: '日式ACG', category: '日漫', tags: 'japanese anime style, ACG anime aesthetic, clean cel shading, smooth lineart, expressive anime eyes, bishounen and moe character design' },
     { id: 'shonen', label: '热血少年', category: '日漫', tags: 'shonen manga style, dynamic action lines, intense expressions, speed lines' },
     { id: 'shojo', label: '少女漫画', category: '日漫', tags: 'shojo manga style, soft lines, sparkles, romantic, delicate features' },
     { id: 'seinen', label: '青年向', category: '日漫', tags: 'seinen manga style, realistic proportions, detailed anatomy, mature' },
@@ -61,6 +56,9 @@ const STYLE_CATEGORIES = ['日漫', '美漫', '韩漫', '国漫', '其他'];
 
 let selectedPresetIds = new Set();
 let customStyleTags = [];
+// 漫画模式: 'bw' = 黑白漫画 (默认) / 'color' = 彩色漫画
+let comicMode = 'bw';
+let bubbleRenderMode = 'pil';  // 'pil' | 'api' — 气泡渲染方式, 'pil'=本地PIL叠加, 'api'=图像API自画
 
 /**
  * 带指数退避重试的 fetch
@@ -87,118 +85,28 @@ async function fetchWithRetry(url, options = {}, maxRetries = MAX_RETRIES) {
     throw lastError;
 }
 
-// ========== WebSocket 实时进度 ==========
+// ========== 任务进度 (后端不推送进度, 一律用 fake progress 显示) ==========
 
 /**
- * 初始化 WebSocket 连接, 接收后端推送的 task_progress 事件
- * 连接失败时静默降级到 fake progress (startFakeProgress 仍然可用)
+ * 为某个任务注册进度条并启动 fake progress
+ * 返回 { task_id, finish: () => void }
+ * task_id 随请求发给后端, 用于云函数 reportProgress 上报 (小程序侧使用)
  */
-function initWebSocket() {
-    try {
-        // 使用 socket.io 客户端 (从 CDN 加载, 见 index.html)
-        if (typeof io === 'undefined') {
-            console.warn('[WebSocket] socket.io client not loaded, fallback to fake progress');
-            return;
-        }
-        socket = io({
-            transports: ['websocket', 'polling'],
-            withCredentials: true
-        });
-
-        socket.on('connect', () => {
-            socketConnected = true;
-            console.log('[WebSocket] connected, sid=', socket.id);
-        });
-
-        socket.on('disconnect', () => {
-            socketConnected = false;
-            console.log('[WebSocket] disconnected');
-        });
-
-        socket.on('connect_error', (err) => {
-            socketConnected = false;
-            console.warn('[WebSocket] connect error:', err.message);
-        });
-
-        socket.on('task_progress', (data) => {
-            handleTaskProgress(data);
-        });
-    } catch (e) {
-        console.warn('[WebSocket] init failed:', e.message);
-    }
-}
-
-/**
- * 处理后端推送的进度事件, 按 task_id 分发到对应回调
- */
-function handleTaskProgress(data) {
-    const { task_id, progress, message, stage, extra } = data;
-    if (!task_id) return;
-
-    const cb = taskProgressCallbacks[task_id];
-    if (!cb) return;
-
-    // 更新进度条 UI
-    if (cb.progressBarId && cb.textId) {
-        const bar = document.getElementById(cb.progressBarId);
-        const text = document.getElementById(cb.textId);
-        if (bar) bar.style.width = `${progress}%`;
-        if (text) text.textContent = `${progress}% - ${message}`;
-    }
-
-    // 触发 onProgress 回调
-    if (cb.onProgress) {
-        try { cb.onProgress(progress, message, stage, extra); } catch (e) { console.warn(e); }
-    }
-
-    // 完成或出错时清理
-    if (stage === 'done' || stage === 'error' || progress >= 100) {
-        if (stage === 'error' && cb.onError) {
-            try { cb.onError(message); } catch (e) { console.warn(e); }
-        } else if (stage === 'done' && cb.onComplete) {
-            try { cb.onComplete(extra || {}); } catch (e) { console.warn(e); }
-        }
-        // 停止 fake progress (如果有)
-        clearInterval(progressInterval);
-        // 清理回调
-        delete taskProgressCallbacks[task_id];
-        activeTaskIds.delete(task_id);
-    }
-}
-
-/**
- * 为某个任务注册进度回调, 并生成唯一 task_id
- * 返回 { task_id, startFake: () => void } 用于在 WebSocket 不可用时降级
- */
-function registerTaskProgress(containerId, callbacks = {}) {
+function registerTaskProgress(containerId) {
     const task_id = 'task_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
     const progressBarId = `${containerId}-bar`;
     const textId = `${containerId}-text`;
 
     createProgressBar(containerId);
 
-    taskProgressCallbacks[task_id] = {
-        progressBarId,
-        textId,
-        onProgress: callbacks.onProgress,
-        onComplete: callbacks.onComplete,
-        onError: callbacks.onError
-    };
-    activeTaskIds.add(task_id);
-
     return {
         task_id,
-        // 降级方案: WebSocket 不可用时启动 fake progress
         startFallback: (minTime = 120000) => {
-            if (!socketConnected) {
-                startFakeProgress(progressBarId, textId, minTime);
-            }
+            startFakeProgress(progressBarId, textId, minTime);
         },
-        // 强制完成 (HTTP 请求返回时调用, 兜底)
+        // 强制完成 (HTTP 请求返回时调用)
         finish: () => {
             clearInterval(progressInterval);
-            delete taskProgressCallbacks[task_id];
-            activeTaskIds.delete(task_id);
             finishProgress(progressBarId, textId);
         }
     };
@@ -412,7 +320,7 @@ async function startComicToNovel() {
     btn.disabled = true;
     spinner.classList.remove('hidden');
 
-    // WebSocket 实时进度 (不可用时降级到 fake progress)
+    // 任务进度条 (后端不推送, fake progress 展示)
     const task = registerTaskProgress('comic2novel-progress');
     task.startFallback(120000);
 
@@ -561,7 +469,8 @@ function startFakeProgress(progressBarId, textId, minTime = 120000) {
 
         const bar = document.getElementById(progressBarId);
         const text = document.getElementById(textId);
-        if (bar) bar.style.width = `${progress}%`;
+        // transform 不触发布局, 比 width 更流畅
+        if (bar) bar.style.transform = `scaleX(${Math.min(1, Math.max(0, progress / 100))})`;
         if (text) text.textContent = `${Math.floor(progress)}%`;
     }, 200);
 }
@@ -570,7 +479,7 @@ function finishProgress(progressBarId, textId) {
     clearInterval(progressInterval);
     const bar = document.getElementById(progressBarId);
     const text = document.getElementById(textId);
-    if (bar) bar.style.width = '100%';
+    if (bar) bar.style.transform = 'scaleX(1)';
     if (text) text.textContent = '100% - 完成';
 }
 
@@ -742,16 +651,42 @@ function switchTab(tabName) {
         if (mtab) mtab.className = t === tabName ? 'mtab-active' : 'mtab-inactive';
         document.getElementById(`panel-${t}`).classList.add('hidden');
     });
-    document.getElementById(`panel-${tabName}`).classList.remove('hidden');
+    const panel = document.getElementById(`panel-${tabName}`);
+    panel.classList.remove('hidden');
+    // 重触发入场动画
+    panel.classList.remove('fade-in');
+    void panel.offsetWidth;
+    panel.classList.add('fade-in');
     if (tabName === 'history') refreshCurrentHistoryList();
 }
 
+// 模态框关闭动画: 先播放淡出过渡, 结束后再 display:none; 减少动效偏好时直接隐藏
+function animateCloseModal(modalId, onClose) {
+    const modal = document.getElementById(modalId);
+    if (!modal || modal.classList.contains('hidden')) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        modal.classList.add('hidden');
+        if (onClose) onClose();
+        return;
+    }
+    if (modal._closing) return;
+    modal._closing = true;
+    modal.classList.add('modal-closing');
+    setTimeout(() => {
+        modal.classList.add('hidden');
+        modal.classList.remove('modal-closing');
+        modal._closing = false;
+        if (onClose) onClose();
+    }, 150);
+}
+
 function openConfigModal() {
-    document.getElementById('config-modal').classList.remove('hidden');
+    const modal = document.getElementById('config-modal');
+    modal.classList.remove('modal-closing', 'hidden');
 }
 
 function closeConfigModal() {
-    document.getElementById('config-modal').classList.add('hidden');
+    animateCloseModal('config-modal');
 }
 
 // ESC 键关闭弹窗
@@ -1420,7 +1355,7 @@ function updateStyleSummary() {
     const customCount = customStyleTags.length;
     const total = presetCount + customCount;
     if (total === 0) {
-        summaryEl.textContent = '(未选择风格, 将使用默认黑白漫画风格)';
+        summaryEl.textContent = `(未选择风格, 将使用默认${comicMode === 'color' ? '彩色' : '黑白'}漫画风格)`;
     } else {
         const presetLabels = STYLE_PRESETS
             .filter(p => selectedPresetIds.has(p.id))
@@ -1443,6 +1378,74 @@ function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// ===== 漫画模式 (黑白/彩色) =====
+function getComicModeFromDom() {
+    const el = document.querySelector('input[name="comic-mode"]:checked');
+    return (el && el.value === 'color') ? 'color' : 'bw';
+}
+
+function applyComicModeToDom() {
+    document.querySelectorAll('input[name="comic-mode"]').forEach(radio => {
+        radio.checked = (radio.value === comicMode);
+        const label = radio.closest('label');
+        if (!label) return;
+        const selected = radio.checked;
+        label.classList.toggle('bg-black', selected);
+        label.classList.toggle('text-white', selected);
+        label.classList.toggle('border-black', selected);
+        label.classList.toggle('border-gray-300', !selected);
+        label.classList.toggle('hover:border-black', !selected);
+        const sub = label.querySelector('span.block.text-xs');
+        if (sub) {
+            sub.classList.toggle('text-gray-500', !selected);
+            sub.classList.toggle('opacity-70', selected);
+        }
+    });
+}
+
+function onComicModeChange() {
+    comicMode = getComicModeFromDom();
+    applyComicModeToDom();
+    updateStyleSummary();
+}
+
+// ===== 气泡渲染方式 (PIL / API) =====
+function getBubbleRenderModeFromDom() {
+    const el = document.querySelector('input[name="bubble-render-mode"]:checked');
+    return (el && el.value === 'api') ? 'api' : 'pil';
+}
+
+function applyBubbleRenderModeToDom() {
+    document.querySelectorAll('input[name="bubble-render-mode"]').forEach(radio => {
+        radio.checked = (radio.value === bubbleRenderMode);
+        const label = radio.closest('label');
+        if (!label) return;
+        const selected = radio.checked;
+        label.classList.toggle('bg-black', selected);
+        label.classList.toggle('text-white', selected);
+        label.classList.toggle('border-black', selected);
+        label.classList.toggle('border-gray-300', !selected);
+        label.classList.toggle('hover:border-black', !selected);
+        const sub = label.querySelector('span.block.text-xs');
+        if (sub) {
+            sub.classList.toggle('text-gray-500', !selected);
+            sub.classList.toggle('opacity-70', selected);
+        }
+    });
+    // 模式切换后, 画廊里"编辑气泡位置"按钮的可见性需要重新计算
+    if (typeof renderGallery === 'function') renderGallery();
+}
+
+function onBubbleRenderModeChange() {
+    bubbleRenderMode = getBubbleRenderModeFromDom();
+    applyBubbleRenderModeToDom();
+    if (bubbleRenderMode === 'api') {
+        showToast('已切换到"由图像API绘制气泡"模式, 跳过本地PIL, 不可编辑气泡位置', 'info');
+    } else {
+        showToast('已切换到"本地PIL叠加"模式', 'info');
+    }
+}
+
 async function saveConfig() {
     const config = {
         llm_api_url: document.getElementById('llm-api-url').value,
@@ -1461,7 +1464,9 @@ async function saveConfig() {
             return isNaN(v) ? 0.6 : Math.max(0, Math.min(1, v));
         })(),
         style_preset_ids: Array.from(selectedPresetIds),
-        custom_style_tags: customStyleTags.slice()
+        custom_style_tags: customStyleTags.slice(),
+        comic_mode: getComicModeFromDom(),
+        bubble_render_mode: getBubbleRenderModeFromDom()
     };
 
     localStorage.setItem('manga_config', JSON.stringify(config));
@@ -1517,8 +1522,16 @@ function applyConfigToForm(config) {
     }
 
     // 恢复风格Tag选择
-    selectedPresetIds = new Set(config.style_preset_ids || []);
+    // 日漫默认 日式ACG 画风: 配置里没存 style_preset_ids 时给 ['acg']
+    const presetIds = (config.style_preset_ids && config.style_preset_ids.length > 0)
+        ? config.style_preset_ids
+        : ['acg'];
+    selectedPresetIds = new Set(presetIds);
     customStyleTags = (config.custom_style_tags || []).slice();
+    comicMode = (config.comic_mode === 'color') ? 'color' : 'bw';
+    applyComicModeToDom();
+    bubbleRenderMode = (config.bubble_render_mode === 'api') ? 'api' : 'pil';
+    applyBubbleRenderModeToDom();
     renderStylePresets();
     renderCustomStyleTags();
     updateStyleSummary();
@@ -1864,7 +1877,7 @@ async function polishNovel(scope = 'aiwrite') {
     spinner.classList.remove('hidden');
     const unlock = lockButton(btn, labelEl, '⏳ 润色中…');
 
-    // 分块润色可能耗时较长, 用进度条 (WebSocket 不可用时降级到 fake progress)
+    // 分块润色可能耗时较长, 用进度条展示
     const task = registerTaskProgress(awId(scope, 'progress'));
     task.startFallback(240000);
 
@@ -1904,12 +1917,11 @@ function openPolishCompare() {
     if (!modal) return;
     document.getElementById('polish-original').textContent = _polishOriginal;
     document.getElementById('polish-result').textContent = _polishResult;
-    modal.classList.remove('hidden');
+    modal.classList.remove('modal-closing', 'hidden');
 }
 
 function cancelPolishCompare() {
-    const modal = document.getElementById('polish-compare-modal');
-    if (modal) modal.classList.add('hidden');
+    animateCloseModal('polish-compare-modal');
 }
 
 function confirmPolishReplace() {
@@ -1952,7 +1964,7 @@ async function startSegment() {
         '⏳ 分镜生成中…'
     );
 
-    // WebSocket 实时进度 (不可用时降级到 fake progress)
+    // 任务进度条 (后端不推送, fake progress 展示)
     const task = registerTaskProgress('segment-progress');
     task.startFallback(120000);
 
@@ -1967,6 +1979,7 @@ async function startSegment() {
                 api_key: config.llm_api_key,
                 model: config.llm_model,
                 segments_per_page: (config.segments_per_page !== undefined) ? config.segments_per_page : 0,
+                comic_mode: comicMode,
                 task_id: task.task_id
             })
         });
@@ -2241,7 +2254,7 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
         return ref;
     });
 
-    // WebSocket 实时进度 (单页生成, 仅在非批量模式下显示进度条)
+    // 任务进度条 (单页生成, 仅在非批量模式下显示)
     let task = null;
     if (!skipLock) {
         task = registerTaskProgress(`fullpage-progress-${pageIdx}`);
@@ -2261,6 +2274,8 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
                 model: config.img_model,
                 negative_prompt: config.negative_prompt,
                 style_tags: getStyleTagsString(),
+                comic_mode: comicMode,
+                bubble_render_mode: bubbleRenderMode,
                 character_references: characterReferences,
                 references: characterReferences,  // 兼容新字段名
                 reference_strength: (config.reference_strength ?? 0.6),
@@ -2393,16 +2408,8 @@ async function generateAllFullPages() {
         }
     }
 
-    // WebSocket 实时进度 (不可用时降级到 fake progress)
-    const task = registerTaskProgress('batch-progress', {
-        onProgress: (progress, message, stage, extra) => {
-            // 批量生成时, 进度条可以显示当前页/总页数
-            if (extra && extra.current !== undefined && extra.total !== undefined) {
-                const text = document.getElementById('batch-progress-text');
-                if (text) text.textContent = `${progress}% - ${message} (${extra.current}/${extra.total})`;
-            }
-        }
-    });
+    // 任务进度条 (后端不推送, fake progress 展示)
+    const task = registerTaskProgress('batch-progress');
     task.startFallback(120000);
 
     // 显示暂停/停止按钮
@@ -2554,7 +2561,10 @@ function renderGallery() {
                 ${currentSegments.pages.map((page, pageIdx) => {
                     const img = fullPageImages[pageIdx];
                     if (!img) return '';
-                    const canEdit = fullPageCleanImages[pageIdx] && fullPageBubbles[pageIdx] && fullPageBubbles[pageIdx].length > 0;
+                    const canEdit = bubbleRenderMode === 'pil'
+                        && fullPageCleanImages[pageIdx]
+                        && fullPageBubbles[pageIdx]
+                        && fullPageBubbles[pageIdx].length > 0;
                     return `
                     <div class="comic-page p-4">
                         <h3 class="text-lg font-bold mb-3 text-center border-b-2 border-black pb-2">第 ${page.page_number} 页</h3>
@@ -2577,12 +2587,13 @@ function renderGallery() {
 }
 
 function openModal(src) {
+    const modal = document.getElementById('image-modal');
     document.getElementById('modal-image').src = src;
-    document.getElementById('image-modal').classList.remove('hidden');
+    modal.classList.remove('modal-closing', 'hidden');
 }
 
 function closeModal() {
-    document.getElementById('image-modal').classList.add('hidden');
+    animateCloseModal('image-modal');
 }
 
 // ===== 对话气泡位置拖拽编辑 =====
@@ -2595,6 +2606,10 @@ window.addEventListener('resize', function() {
 });
 
 function openBubbleEditor(pageIdx) {
+    if (bubbleRenderMode !== 'pil') {
+        showToast('当前为"由图像API绘制气泡"模式, 没有气泡坐标可编辑', 'info');
+        return;
+    }
     const cleanUrl = fullPageCleanImages[pageIdx];
     const stored = fullPageBubbles[pageIdx];
     if (!cleanUrl || !stored || stored.length === 0) {
@@ -2612,8 +2627,8 @@ function openBubbleEditor(pageIdx) {
     modal.id = 'bubble-editor-modal';
     modal.className = 'fixed inset-0 z-50 flex flex-col';
     modal.innerHTML = `
-        <div class="absolute inset-0 bg-black bg-opacity-70"></div>
-        <div class="relative flex flex-col h-full max-w-6xl mx-auto w-full bg-white">
+        <div class="modal-backdrop absolute inset-0 bg-black bg-opacity-70"></div>
+        <div class="modal-card relative flex flex-col h-full max-w-6xl mx-auto w-full bg-white">
             <div class="flex items-center justify-between p-4 border-b-2 border-black">
                 <h2 class="text-lg font-bold">✏️ 拖动气泡调整位置</h2>
                 <div class="flex gap-2">
@@ -2644,6 +2659,7 @@ function openBubbleEditor(pageIdx) {
         wrapEl.querySelectorAll('.bubble-edit-item').forEach(el => el.remove());
         const scale = getScale();
         if (!scale.x || !scale.y) return;
+        const types = ['dialogue', 'thought', 'shout', 'whisper', 'burst', 'narration', 'box', 'caption'];
         editBubbles.forEach((bub, i) => {
             const div = document.createElement('div');
             div.className = 'bubble-edit-item absolute cursor-move select-none';
@@ -2651,9 +2667,6 @@ function openBubbleEditor(pageIdx) {
             div.style.top = (bub.y * scale.y) + 'px';
             div.style.width = (bub.w * scale.x) + 'px';
             div.style.height = (bub.h * scale.y) + 'px';
-            div.style.background = 'rgba(255,255,255,0.85)';
-            div.style.border = '2px solid #1a1a1a';
-            div.style.borderRadius = '8px';
             div.style.display = 'flex';
             div.style.alignItems = 'center';
             div.style.justifyContent = 'center';
@@ -2663,11 +2676,55 @@ function openBubbleEditor(pageIdx) {
             div.style.overflow = 'hidden';
             div.style.lineHeight = '1.2';
             div.style.fontWeight = '500';
-            div.textContent = bub.dialogue;
+            // 暴露 dialogue_type, CSS 按 [data-type] 上对应气泡样式
+            const dtype = (bub.dialogue_type || 'dialogue').toLowerCase();
+            div.dataset.type = dtype;
             div.dataset.idx = i;
+            // 类型下拉: 用户可在编辑器里直接切换 dialogue_type, 切换后立即生效样式
+            const sel = document.createElement('select');
+            sel.className = 'bubble-type-select';
+            sel.title = '切换气泡类型';
+            sel.addEventListener('mousedown', e => e.stopPropagation());
+            sel.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+            for (const t of types) {
+                const opt = document.createElement('option');
+                opt.value = t;
+                opt.textContent = _bubbleTypeLabel(t);
+                if (t === dtype) opt.selected = true;
+                sel.appendChild(opt);
+            }
+            sel.addEventListener('change', function() {
+                const newType = this.value;
+                bub.dialogue_type = newType;
+                div.dataset.type = newType;
+            });
+            div.appendChild(sel);
+            // 文字节点, 避免被 select 遮挡 (select 在右上, 给文字右侧更多内边距)
+            const txt = document.createElement('span');
+            txt.className = 'bubble-edit-text';
+            txt.style.position = 'relative';
+            txt.style.zIndex = '1';
+            txt.style.padding = '0 38px 0 4px';
+            txt.textContent = bub.dialogue;
+            div.appendChild(txt);
             wrapEl.appendChild(div);
             makeDraggable(div, imgEl, bub);
         });
+    }
+
+    function _bubbleTypeLabel(dtype) {
+        // 与 DIALOGUE_TYPE_CATALOG 的 label 对齐, 给用户在编辑器里一个直观识别
+        const labels = {
+            dialogue:  '💬 dialogue',
+            thought:   '💭 thought',
+            shout:     '💥 shout',
+            whisper:   '🤫 whisper',
+            burst:     '⚡ burst',
+            narration: '📜 narration',
+            box:       '▢ box',
+            caption:   '🔊 caption',
+        };
+        return labels[dtype] || ('💬 ' + dtype);
     }
 
     function makeDraggable(el, imgEl, bub) {
@@ -2719,7 +2776,12 @@ function openBubbleEditor(pageIdx) {
 
     function closeModalEditor() {
         _bubbleEditorReposition = null;
-        modal.remove();
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            modal.remove();
+            return;
+        }
+        modal.classList.add('modal-closing');
+        setTimeout(() => modal.remove(), 150);
     }
 
     // 图片加载后定位气泡 (处理缓存命中 onload 不触发的情况)
@@ -2883,7 +2945,7 @@ async function analyzeCharacters() {
     createProgressBar('analyze-progress');
     startFakeProgress('analyze-progress-bar', 'analyze-progress-text', 120000);
 
-    // WebSocket 实时进度 (不可用时降级到 fake progress)
+    // 任务进度条 (后端不推送, fake progress 展示)
     const task = registerTaskProgress('analyze-progress');
     task.startFallback(120000);
 
@@ -3157,6 +3219,7 @@ async function generateCharacterImage(idx, btn = null) {
                 api_url: config.img_api_url,
                 api_key: config.img_api_key,
                 model: config.img_model,
+                comic_mode: comicMode,
                 max_attempts: 3
             })
         });
@@ -3295,10 +3358,15 @@ window.addEventListener('DOMContentLoaded', () => {
 
     renderStylePresets();
     renderCustomStyleTags();
+    applyComicModeToDom();
+    // 日漫默认 日式ACG 画风 (无本地配置时)
+    if (!localStorage.getItem('manga_config')) {
+        selectedPresetIds = new Set(['acg']);
+    }
+    renderStylePresets();
     updateStyleSummary();
     loadConfig();
     updateCharCount();
     mirrorNovelText();
     recoverSession();  // 尝试恢复之前可能因内网穿透断开丢失的会话数据
-    initWebSocket();   // 初始化 WebSocket 实时进度连接
 });
