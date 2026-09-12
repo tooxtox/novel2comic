@@ -29,15 +29,66 @@
             color: #1a1a1a;
             text-decoration: underline;
             cursor: pointer;
+            transition: color 0.18s ease-out;
         }
         .switch-link:hover { color: #666; }
+
+        /* ===== 入场与反馈动效 ===== */
+        :root {
+            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+            --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        @keyframes cardRise {
+            from { opacity: 0; transform: translate3d(0, 18px, 0) scale(0.985); }
+            to { opacity: 1; transform: none; }
+        }
+        @keyframes fieldRise {
+            from { opacity: 0; transform: translate3d(0, 10px, 0); }
+            to { opacity: 1; transform: none; }
+        }
+        @keyframes shakeX {
+            10%, 90% { transform: translateX(-2px); }
+            20%, 80% { transform: translateX(3px); }
+            30%, 50%, 70% { transform: translateX(-5px); }
+            40%, 60% { transform: translateX(5px); }
+        }
+        @keyframes msgIn {
+            from { opacity: 0; transform: translateY(-6px); }
+            to { opacity: 1; transform: none; }
+        }
+        @keyframes logoPop {
+            0% { transform: rotate(-12deg) scale(0.82); opacity: 0; }
+            60% { transform: rotate(4deg) scale(1.06); }
+            100% { transform: none; opacity: 1; }
+        }
+        .login-card { animation: cardRise 0.5s var(--ease-out-expo) backwards; }
+        .login-card .logo-mark { animation: logoPop 0.6s var(--ease-spring) 0.1s backwards; }
+        /* 表单元素依次浮现 */
+        .login-card form > * {
+            animation: fieldRise 0.45s var(--ease-out-expo) backwards;
+            animation-delay: calc(90ms + var(--i, 0) * 70ms);
+        }
+        #error-message:not(.hidden), #success-message:not(.hidden) { animation: msgIn 0.28s var(--ease-out-expo); }
+        .btn-primary:active { transform: translate(0, 0) scale(0.985); box-shadow: 1px 1px 0 #666; }
+        .shake { animation: shakeX 0.5s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+        :focus-visible { outline: 2px solid #1a1a1a; outline-offset: 2px; }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                animation-delay: 0s !important;
+                transition-duration: 0.01ms !important;
+                transition-delay: 0s !important;
+            }
+        }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen flex items-center justify-center">
     <div class="max-w-md w-full mx-4">
-        <div class="bg-white p-8 manga-border panel-shadow">
+        <div class="bg-white p-8 manga-border panel-shadow login-card">
             <div class="flex items-center gap-3 mb-6 justify-center">
-                <div class="w-12 h-12 bg-black text-white flex items-center justify-center text-2xl font-bold manga-border">⇄</div>
+                <div class="logo-mark w-12 h-12 bg-black text-white flex items-center justify-center text-2xl font-bold manga-border">⇄</div>
                 <h1 class="text-2xl font-bold">小说⇄漫画 双向转换器</h1>
             </div>
 
@@ -100,6 +151,24 @@
     <script>
         let isRegisterMode = false;
 
+        // 表单字段依次浮现: --i 决定延迟顺序; 切表单时重播一次
+        function markFormFields(form) {
+            if (!form) return;
+            Array.from(form.children).forEach((el, i) => el.style.setProperty('--i', i));
+        }
+
+        function replayFormEntrance(form) {
+            markFormFields(form);
+            Array.from(form.children || []).forEach(el => {
+                el.style.animation = 'none';
+                void el.offsetWidth;
+                el.style.animation = '';
+            });
+        }
+
+        markFormFields(document.getElementById('login-form'));
+        markFormFields(document.getElementById('register-form'));
+
         function toggleMode() {
             isRegisterMode = !isRegisterMode;
             const loginForm = document.getElementById('login-form');
@@ -121,13 +190,17 @@
                 textLogin.classList.remove('hidden');
                 textRegister.classList.add('hidden');
             }
+            // 切过来的表单再浮现一次, 而不是"啪"地整块出现
+            replayFormEntrance(isRegisterMode ? registerForm : loginForm);
             hideMessages();
         }
 
         function showError(msg) {
             const div = document.getElementById('error-message');
             div.textContent = msg;
-            div.classList.remove('hidden');
+            div.classList.remove('hidden', 'shake');
+            void div.offsetWidth;
+            div.classList.add('shake');
             document.getElementById('success-message').classList.add('hidden');
         }
 
@@ -162,7 +235,7 @@
                 });
                 const result = await response.json();
                 if (result.success) {
-                    window.location.href = '/';
+                    window.location.href = '/app';
                 } else {
                     showError(result.error || '登录失败');
                 }

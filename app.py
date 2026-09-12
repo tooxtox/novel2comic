@@ -501,19 +501,25 @@ def cache_reference_image(url, name=""):
     """将参考图下载到缓存目录，返回本地URL路径"""
     if not url:
         return None
-    
+
     try:
+        # cloud:// fileID 没有配套的 resolve API — 直接放弃, 避免后续页面生成静默丢参考图
+        if url.startswith('cloud://'):
+            print(f"[cache-ref] skip cloud:// fileID for '{name}' (no resolve API); "
+                  f"前端应使用 /static/ 本地路径")
+            return None
+
         # 用URL的hash作为文件名，避免重复下载
         url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
-        
-        # 检查缓存是否已存在
-        for ext in ['.png', '.jpg', '.jpeg', '.webp']:
-            cache_path = os.path.join(CACHE_DIR, f"{url_hash}{ext}")
+
+        # 探测已有缓存 (PIL 能识别的常见格式, 包括 jpeg/png/webp/gif/bmp/tiff)
+        for probe_ext in _IMAGE_EXT_PROBE:
+            cache_path = os.path.join(CACHE_DIR, f"{url_hash}{probe_ext}")
             if os.path.exists(cache_path):
                 # 更新访问时间
                 os.utime(cache_path, None)
-                return f"/static/cache/{url_hash}{ext}"
-        
+                return f"/static/cache/{url_hash}{probe_ext}"
+
         # 下载图片
         img_data = None
         if url.startswith('http'):
@@ -532,37 +538,46 @@ def cache_reference_image(url, name=""):
             # base64格式
             parts = url.split(',')
             if len(parts) == 2:
-                # 检测格式
-                header = parts[0]
-                if 'png' in header:
-                    ext = '.png'
-                elif 'webp' in header:
-                    ext = '.webp'
-                else:
-                    ext = '.jpg'
                 img_data = base64.b64decode(parts[1])
-        
+        else:
+            print(f"[cache-ref] unsupported url scheme for '{name}': {url[:40]}…")
+            return None
+
         if img_data:
-            # 确定格式
-            try:
-                img = Image.open(BytesIO(img_data))
-                ext = '.' + (img.format or 'PNG').lower()
-                if ext == '.jpeg':
-                    ext = '.jpg'
-            except:
-                ext = '.png'
-            
+            # 用 PIL 实际字节探测格式 (mime 也按真实探测, 不靠 URL header)
+            ext, mime = _detect_image_format(img_data)
             cache_path = os.path.join(CACHE_DIR, f"{url_hash}{ext}")
             with open(cache_path, 'wb') as f:
                 f.write(img_data)
-            
-            print(f"Cached reference image for '{name}': /static/cache/{url_hash}{ext}")
+
+            print(f"Cached reference image for '{name}': /static/cache/{url_hash}{ext} ({mime})")
             return f"/static/cache/{url_hash}{ext}"
-        
+
     except Exception as e:
         print(f"Cache reference image error for '{name}': {e}")
-    
+
     return None
+
+
+# PIL 能识别的常见图片扩展, 用于缓存命中探测
+_IMAGE_EXT_PROBE = ('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff')
+
+
+def _detect_image_format(img_data):
+    """探测图片真实格式, 返回 (扩展名, mime). 探测失败时返回 ('.png', 'image/png')."""
+    try:
+        img = Image.open(BytesIO(img_data))
+        fmt = (img.format or 'PNG').lower()
+        if fmt == 'jpeg':
+            ext = '.jpg'
+        elif fmt in ('tif', 'tiff'):
+            ext = '.tif'
+        else:
+            ext = '.' + fmt
+        mime = Image.MIME.get(img.format) or 'image/png'
+        return ext, mime
+    except Exception:
+        return '.png', 'image/png'
 
 
 def get_cached_image_base64(cache_url):
@@ -574,16 +589,10 @@ def get_cached_image_base64(cache_url):
         if os.path.exists(local_path):
             with open(local_path, 'rb') as f:
                 img_data = f.read()
+            # mime 按 PIL 实际探测 — 不靠扩展名, 防止 .jpg 文件里实际是 png 字节被错送
+            _, detected_mime = _detect_image_format(img_data)
             img_b64 = base64.b64encode(img_data).decode('utf-8')
-            # 检测格式
-            ext = os.path.splitext(local_path)[1].lower()
-            if ext == '.png':
-                mime = 'image/png'
-            elif ext == '.webp':
-                mime = 'image/webp'
-            else:
-                mime = 'image/jpeg'
-            return f"data:{mime};base64,{img_b64}"
+            return f"data:{detected_mime};base64,{img_b64}"
     except Exception as e:
         print(f"Read cached image error: {e}")
     return None
@@ -788,6 +797,12 @@ def _is_host_machine_request():
 
 
 @app.route('/')
+def landing():
+    """宣传页: 未登录也能看, 展示核心功能, CTA 进入 /app"""
+    return render_template('landing.html')
+
+
+@app.route('/app')
 def index():
     if not session.get('logged_in'):
         return render_template('login.html')
@@ -895,10 +910,7 @@ def segment_novel():
     model = data.get('model', '')
     segments_per_page = data.get('segments_per_page', 0)  # 0 = LLM 自由控制
     task_id = data.get('task_id', '')
-    # 漫画模式: bw=黑白 (默认) / color=彩色
-    comic_mode = data.get('comic_mode', 'bw')
-    if comic_mode not in ('bw', 'color'):
-        comic_mode = 'bw'
+    comic_mode = _norm_comic_mode(data.get('comic_mode'))
 
     if not text or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
@@ -1215,6 +1227,12 @@ def call_image_api(api_url, api_key, payload):
     return image_url, result
 
 
+def _unique_filename(prefix, ext):
+    """生成唯一文件名: prefix_yyyymmdd_HHMMSS_mmmmmm_<uuid6>.ext — 防止同秒内两次保存互相覆盖"""
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    return f"{prefix}_{ts}_{uuid.uuid4().hex[:6]}{ext}"
+
+
 def save_image_result(image_url, prefix="manga", work_id=None, work_username=None):
     """将图片URL保存到本地，返回本地路径
 
@@ -1232,8 +1250,7 @@ def save_image_result(image_url, prefix="manga", work_id=None, work_username=Non
     if image_url.startswith('http'):
         # 内网穿透场景：主机先下载外部图片到本地，再返回本地路径给用户
         try:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"{prefix}_{timestamp}.png"
+            filename = _unique_filename(prefix, '.png')
             filepath = os.path.join(images_dir, filename)
 
             img_response = _api_request('GET', image_url, timeout=120)
@@ -1248,12 +1265,12 @@ def save_image_result(image_url, prefix="manga", work_id=None, work_username=Non
             return local_url, None
         except Exception as e:
             print(f"Failed to download external image: {e}")
-            return image_url, None
+            # 下载失败: 返回 (None, error) 让调用方走重试, 不要把过期 CDN URL 漏给前端
+            return None, {'error': f'下载外部图片失败: {e}'}
 
     # base64数据保存到本地
     if image_url.startswith('data:image') or len(image_url) > 1000:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"{prefix}_{timestamp}.png"
+        filename = _unique_filename(prefix, '.png')
         filepath = os.path.join(images_dir, filename)
 
         if image_url.startswith('data:image'):
@@ -1520,14 +1537,15 @@ def generate_character_image():
     except (TypeError, ValueError):
         max_attempts = 3
     max_attempts = max(1, min(5, max_attempts))
-    # 漫画模式: bw=黑白 (默认) / color=彩色
-    comic_mode = data.get('comic_mode', 'bw')
-    if comic_mode not in ('bw', 'color'):
-        comic_mode = 'bw'
+    comic_mode = _norm_comic_mode(data.get('comic_mode'))
     is_color = comic_mode == 'color'
 
     if not description or not api_url:
         return jsonify({'error': '缺少必要参数'}), 400
+
+    # 提升到 retry loop 外 — get_current_work_id() 内部读 request.get_json,
+    # 多次读取 Flask 会缓存, 但提到这里更清晰也避免极端 corner case 被消费
+    work_id, work_username = get_current_work_id()
 
     last_error = None
     for attempt in range(1, max_attempts + 1):
@@ -1581,11 +1599,14 @@ def generate_character_image():
                 local_url, error = save_image_result(image_url, "char", work_id, work_username)
 
                 if local_url:
-                    # 上传人设图到云存储, 返回 cloud:// fileID
+                    # 上传人设图到云存储 (可选), 返回 cloud:// fileID
+                    # 关键: image_url 永远是浏览器可加载的 /static/... 路径, 绝不返回 cloud://
+                    # cloud_file_id 仅供小程序/云存储消费者使用, <img src> 不能用它
                     file_id = upload_to_cloud_storage(local_url, work_id, "char")
                     return jsonify({
                         'success': True,
-                        'image_url': file_id or local_url,
+                        'image_url': local_url,
+                        'cloud_file_id': file_id,
                         'attempts': attempt,
                         'max_attempts': max_attempts
                     })
@@ -1988,6 +2009,15 @@ def draw_caption_bubble(draw, x, y, w, h, text, font, overflow=True, canvas_boun
     _draw_text_centered(draw, text, font, x + 4, y + 2, w - 8, h - 4, fill='white')
 
 
+# 漫画模式 / 气泡渲染方式 的白名单校验, 集中默认值, 避免三处重复守卫
+def _norm_comic_mode(raw):
+    return raw if raw in ('bw', 'color') else 'bw'
+
+
+def _norm_bubble_mode(raw):
+    return raw if raw in ('pil', 'api') else 'pil'
+
+
 # 气泡分发表 (分镜规划阶段可由 LLM 主动选, 也可由用户手动改, 还可由启发式推断)
 BUBBLE_DRAWERS = {
     'dialogue': draw_dialogue_bubble,    # 普通对话: 圆角矩形 (无尾)
@@ -2308,16 +2338,10 @@ def generate_page():
     previous_page_image = data.get('previous_page_image')
     page_idx = data.get('page_idx')
     task_id = data.get('task_id', '')
-    # 漫画模式: bw=黑白 (默认) / color=彩色
-    comic_mode = data.get('comic_mode', 'bw')
-    if comic_mode not in ('bw', 'color'):
-        comic_mode = 'bw'
+    comic_mode = _norm_comic_mode(data.get('comic_mode'))
     is_color = comic_mode == 'color'
 
-    # 气泡渲染方式: pil=本地PIL叠加 (默认, 中文零乱码) / api=让图像API自己画气泡
-    bubble_render_mode = data.get('bubble_render_mode', 'pil')
-    if bubble_render_mode not in ('pil', 'api'):
-        bubble_render_mode = 'pil'
+    bubble_render_mode = _norm_bubble_mode(data.get('bubble_render_mode'))
     api_draws_bubbles = (bubble_render_mode == 'api')
 
     if not page or not api_url:
@@ -2326,6 +2350,9 @@ def generate_page():
     segments = page.get('segments', [])
     if not segments or len(segments) == 0:
         return jsonify({'error': '该页没有分镜'}), 400
+
+    # 提升到 try 之前 — save_image_result 后续会用到, 避免多次 request.get_json 隐患
+    work_id, work_username = get_current_work_id()
 
     emit_progress(task_id, 10, f'正在构建第 {page_num} 页提示词...', 'preparing')
 
@@ -2374,20 +2401,27 @@ Panels:
 
 Art style: {style_art}"""
 
+        # 把 CHARACTER REFERENCE SHEET + REFERENCE IMAGE MAP 插到 page_header 之后、Panels 之前
+        # (取代之前追加到 prompt 末尾的做法 — 6 panel description 会严重稀释角色信息)
+        charsheet_in_head = locals().get('charsheet_in_head', '')
+        if charsheet_in_head:
+            page_prompt = page_header + charsheet_in_head + f"""
+
+Panels:
+{chr(10).join(segment_descriptions)}
+
+Art style: {style_art}"""
+
         # 气泡渲染方式分流: PIL 模式强制 API 不画任何文字/气泡, 由本地 PIL 叠加;
         # API 模式让图像 API 端到端绘制气泡 (按各 panel 的 dialogue_type 形状)
         if api_draws_bubbles:
             # 收集本页所有 panel 的 dialogue_type, 让模型按类型画对应气泡形状
-            dtype_hint_lines = []
-            for idx2, seg2 in enumerate(segments):
-                dt = (seg2.get('dialogue_type') or 'dialogue').lower()
-                dlg = (seg2.get('dialogue') or '').strip()
-                if not dlg:
-                    continue
-                dtype_hint_lines.append(
-                    f"- Panel {idx2+1}: dialogue_type={dt} → text=\"{dlg}\""
-                )
-            dtype_hint = "\n".join(dtype_hint_lines) if dtype_hint_lines else "(no dialogue in any panel)"
+            dtype_hint_lines = [
+                f'- Panel {i+1}: dialogue_type={(s.get("dialogue_type") or "dialogue").lower()} → text="{(s.get("dialogue") or "").strip()}"'
+                for i, s in enumerate(segments)
+                if (s.get('dialogue') or '').strip()
+            ]
+            dtype_hint = "\n".join(dtype_hint_lines) or "(no dialogue in any panel)"
             page_prompt += f"""
 
 IMPORTANT — Render dialogue as comic speech bubbles and captions INSIDE the panels.
@@ -2428,24 +2462,41 @@ NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text ov
                 has_image = bool((char.get('image_url') or '').strip())
                 desc = (char.get('description') or '').strip()
                 char_prompt = (char.get('char_prompt') or '').strip()
-                # 没有参考人设图的角色: 把人设prompt(自定义外观提示词)作为文字描述喂给图像模型,
-                # 让模型在无参考图时仍能按文字生成其外观; 有图角色仍走参考图通道, 描述仅作辅助.
-                # 两者皆无外观信息则跳过该角色.
-                if not has_image and char_prompt:
+                # appearance 优先级: char_prompt (用户精调) > description (LLM 抽取) > 跳过
+                # 修复: 之前 has_image=True 时只取 desc, 导致用户填的 char_prompt 被吞
+                # 现在 char_prompt + desc 同时进 appearance (char_prompt 在前, 是用户主要意图)
+                if char_prompt and desc:
+                    appearance = f"{char_prompt}\n(Supplemented: {desc})"
+                elif char_prompt:
                     appearance = char_prompt
-                    note = ' (text appearance prompt, no reference image — render EXACTLY per this appearance prompt)'
-                else:
+                elif desc:
                     appearance = desc
-                    note = ''
+                else:
+                    appearance = ''
+                # 标记: 是纯文字 (text-only) 还是图+文字 (image-anchored)
+                if not has_image:
+                    note = ' (text appearance prompt, NO reference image attached — render EXACTLY per this appearance prompt)'
+                else:
+                    note = ' (a reference image of THIS character is attached below — render this character EXACTLY from that reference image, use the text only as supporting detail)'
                 if not appearance:
+                    # 没有任何文字描述但有图: 仍然列出 (让模型知道"image[0] 是他")
+                    if has_image and name:
+                        char_sheet.append(
+                            f"[CHARACTER: {name}]\nAPPEARANCE: (no text description — rely entirely on attached reference image){note}"
+                        )
                     continue
                 char_sheet.append(
                     f"[CHARACTER: {name}]\nAPPEARANCE: {appearance}{note}\n"
                     f"This character MUST appear exactly as described throughout ALL panels."
                 )
             if char_sheet:
-                char_section = "\n\n=== CHARACTER REFERENCE SHEET ===\n" + "\n\n".join(char_sheet) + "\n\nCRITICAL: All characters' appearance MUST be identical across all panels. Maintain absolute consistency in facial features, body type, clothing, and hairstyle throughout the entire page."
-                page_prompt += char_section
+                # 关键: 把 CHARACTER REFERENCE SHEET 放在 PROMPT 头部 (紧接着 page_header),
+                # 之前被追加到末尾, 6 panel description 把它稀释, 模型注意力严重不足
+                char_section = "\n\n=== CHARACTER REFERENCE SHEET ===\n" + "\n\n".join(char_sheet) + "\n\nCRITICAL: All characters' appearance MUST be identical across all panels. Maintain absolute consistency in facial features, body type, clothing, and hairstyle throughout the entire page. The attached reference images are the source of truth — if any text above contradicts the reference image, the reference image wins."
+                # 标记: 这块要插到 prompt 前部 (替换下面 charsheet_in_head 逻辑)
+                charsheet_in_head = char_section
+            else:
+                charsheet_in_head = ''
 
         if previous_page_image:
             page_prompt += f"\n\n=== PREVIOUS PAGE REFERENCE ===\nA reference image of the previous page (Page {page_num-1}) is provided. This page MUST have exactly the same art style, line quality, shading technique, and visual tone as the reference. Characters should look identical to how they appear in the previous page."
@@ -2453,6 +2504,46 @@ NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text ov
         # 准备参考图片（缓存到本地后转base64）
         ref_images = prepare_ref_images(character_references, previous_page_image)
         print(f"Generating page {page_num} with {len(character_references)} character refs, previous page: {'yes' if previous_page_image else 'no'}, total {len(ref_images)} reference images")
+
+        # 关键: 显式声明"image[i] 是哪个角色", 因为 payload['image'] 是裸 base64 列表,
+        # 没有这个映射, 多角色时模型只能瞎猜, 角色脸互相串
+        if ref_images and character_references:
+            mapping_lines = []
+            ref_idx = 0
+            for char in character_references:
+                if not (char.get('image_url') or '').strip():
+                    continue
+                if ref_idx >= len(ref_images):
+                    break
+                name = (char.get('name') or '').strip() or f'Character{ref_idx+1}'
+                mapping_lines.append(
+                    f"  - REFERENCE IMAGE #{ref_idx+1} = {name} — their face, hair, outfit, body type"
+                )
+                ref_idx += 1
+            if previous_page_image and ref_idx < len(ref_images):
+                mapping_lines.append(
+                    f"  - REFERENCE IMAGE #{ref_idx+1} = PREVIOUS PAGE — drawing style, line quality, visual tone"
+                )
+            if mapping_lines:
+                ref_map = (
+                    "\n\n=== ATTACHED REFERENCE IMAGE MAP ===\n"
+                    "The attached reference images are sent in this EXACT order. "
+                    "You MUST use them as follows:\n"
+                    + "\n".join(mapping_lines)
+                )
+                # 放在 charsheet_in_head 后面 (紧随角色表, 紧接着 panel descriptions 之前)
+                charsheet_in_head = (charsheet_in_head or '') + ref_map
+
+        # 参考强度滑块 (前端可调) — Doubao seedream 没有原生 strength 字段,
+        # 翻译为 prompt 语言, 让模型在文字层面遵守参考图
+        if ref_images and reference_strength is not None:
+            if reference_strength >= 0.75:
+                adherence = "Render every character EXACTLY as shown in the reference images — same face, same hair, same outfit, same body type. Do NOT deviate from the reference."
+            elif reference_strength >= 0.4:
+                adherence = "Render each character following the reference images closely — keep their faces, hairstyles, and outfits recognizable, but minor variations are acceptable."
+            else:
+                adherence = "Use the reference images as loose inspiration only — feel free to vary appearance for dramatic effect."
+            page_prompt += f"\n\nREFERENCE ADHERENCE (strength={reference_strength:.2f}): {adherence}"
         payload = {
             'model': model or 'doubao-seedream-4-5-251128',
             'prompt': page_prompt,
@@ -2473,7 +2564,6 @@ NO text, NO speech bubble, NO caption, NO dialogue, NO narration box, no text ov
         emit_progress(task_id, 30, f'正在调用图像 API 生成第 {page_num} 页 (可能需要 15-90 秒)...', 'calling_image_api')
 
         image_url, result = call_image_api(api_url, api_key, payload)
-        work_id, work_username = get_current_work_id()
 
         emit_progress(task_id, 80, '页面生成完成, 正在下载保存...', 'downloading')
 
@@ -2831,16 +2921,22 @@ def history_detail(work_id):
         state['full_page_images'] = full_page_images_rebuilt
 
     # 重建角色人设图 image_url:
-    # 1. 如果 state.characters[].image_url 已存在且对应文件存在, 保留
-    # 2. 否则按多种命名约定匹配 (兼容 char_0, char_20260616_090739 等)
-    # 3. 最后按 images_dir 中 char_*.png 顺序分配给没图片的角色
+    # 1. data: / http(s) URL: 直接保留 (用户上传或外链, 文件不在本地 images_dir 也无需重建)
+    # 2. /static/... 路径且对应文件存在: 保留
+    # 3. /static/... 路径但文件丢失: 清空, 后续从磁盘 char_*.png 重新分配
+    # 4. 完全没 image_url 的角色, 按 images_dir 中 char_*.png 顺序补齐
     chars = state.get('characters', [])
+    image_file_basenames = {os.path.basename(u) for u in image_files}
     for char in chars:
-        url = char.get('image_url', '')
-        # 如果已有 image_url 且能在当前 work_dir 的 images/ 中找到, 才算有效
-        if url and url.startswith('/') and 'images/' + os.path.basename(url) in [os.path.join('images', os.path.basename(u)) for u in image_files]:
-            continue
-        # 否则清空, 后面会重新分配
+        url = char.get('image_url', '') or ''
+        if not url:
+            continue  # 后面重新分配
+        if url.startswith('data:') or url.startswith('http'):
+            continue  # 用户上传 / 外链, 不动
+        if url.startswith('/static/'):
+            if os.path.basename(url) in image_file_basenames:
+                continue
+            # 文件丢失, 清空, 后面重新分配
         char['image_url'] = ''
 
     # 按顺序把 char_images 分配给没图片的角色

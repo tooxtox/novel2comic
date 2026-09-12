@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>小说⇄漫画 双向转换器</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;800&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Noto Sans SC', sans-serif; }
 
@@ -15,6 +15,8 @@
             --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
             --anim-fast: 0.18s;
             --anim-base: 0.28s;
+            --anim-slow: 0.45s;
+            --stagger: 55ms;
         }
 
         .manga-border { border: 2px solid #1a1a1a; }
@@ -83,20 +85,6 @@
 
         /* ===== 气泡编辑器: 按 dialogue_type 可视化 ===== */
         /* 编辑器内每个气泡显示成接近最终成图的样子, 避免编辑前/后"类型变了"的误判 */
-        .bubble-edit-item .bubble-type-badge {
-            position: absolute;
-            top: 2px;
-            right: 2px;
-            font-size: 9px;
-            line-height: 1;
-            padding: 2px 4px;
-            border-radius: 3px;
-            background: rgba(0,0,0,0.78);
-            color: #fff;
-            pointer-events: none;
-            white-space: nowrap;
-            opacity: 0.92;
-        }
         /* 类型徽标改成可点击下拉, 让用户在编辑器里直接换 dialogue_type */
         .bubble-edit-item .bubble-type-select {
             position: absolute;
@@ -173,13 +161,118 @@
         }
         .segment-box:hover { border-color: #1a1a1a; box-shadow: 3px 3px 0px #1a1a1a; transform: translateY(-2px); }
         .segment-box:active { transform: translateY(0) scale(0.995); }
-        .tab-active { border-bottom: 3px solid #1a1a1a; font-weight: 700; }
+        .tab-active { border-bottom: 3px solid transparent; font-weight: 700; }
         .tab-inactive { border-bottom: 3px solid transparent; color: #666; }
         .tab-inactive:hover { border-bottom: 3px solid #ccc; }
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: #f1f1f1; }
         ::-webkit-scrollbar-thumb { background: #888; border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: #555; }
+
+        /* ===== 动效系统 2.0: 转场 / 级联 / 显影 / 加载节奏 ===== */
+
+        /* 1) 标签页转场: 由 JS 按点击方向打 .panel-in-left / .panel-in-right */
+        @keyframes panelInRight { from { opacity: 0; transform: translate3d(28px, 0, 0); } to { opacity: 1; transform: none; } }
+        @keyframes panelInLeft  { from { opacity: 0; transform: translate3d(-28px, 0, 0); } to { opacity: 1; transform: none; } }
+        .panel-in-right { animation: panelInRight var(--anim-base) var(--ease-out-expo); }
+        .panel-in-left  { animation: panelInLeft  var(--anim-base) var(--ease-out-expo); }
+
+        /* 2) 顶部标签: 当前项从中心展开下划线 + 轻微弹起 */
+        #main-tabs button { position: relative; }
+        #main-tabs button::after {
+            content: '';
+            position: absolute;
+            left: 0; right: 0; bottom: -3px; height: 3px;
+            background: #1a1a1a;
+            border-radius: 2px;
+            transform: scaleX(0);
+            transform-origin: center;
+            transition: transform var(--anim-base) var(--ease-out-expo), background-color var(--anim-fast);
+        }
+        #main-tabs button.tab-inactive:hover::after { transform: scaleX(1); background: #ccc; }
+        /* 当前项的下划线交给滑动的 .ink-indicator, 这里不再画静态线 */
+        @keyframes tabPop { 0% { transform: translateY(3px); } 60% { transform: translateY(-1px); } 100% { transform: none; } }
+        #main-tabs button.tab-active { animation: tabPop var(--anim-base) var(--ease-spring); }
+
+        /* 3) 移动端底部导航: 选中项弹跳 */
+        @keyframes mtabPop { 0% { transform: translateY(4px) scale(0.92); } 55% { transform: translateY(-2px) scale(1.06); } 100% { transform: none; } }
+        .mtab-active { animation: mtabPop 0.4s var(--ease-spring); }
+
+        /* 4) 列表级联入场: JS playStagger() 按可视批次设置 --i */
+        .stagger-ready { opacity: 0; }
+        @keyframes cardRise { from { opacity: 0; transform: translate3d(0, 16px, 0) scale(0.985); } to { opacity: 1; transform: none; } }
+        .stagger-item {
+            animation: cardRise var(--anim-slow) var(--ease-out-expo) backwards;
+            animation-delay: calc(var(--i, 0) * var(--stagger));
+        }
+
+        /* 5) 图片显影: 生成结果不再"啪"地出现 (模糊只保留在入场前半段, 避免大图长时间走滤镜) */
+        @keyframes imgReveal {
+            from { opacity: 0; transform: scale(1.02); filter: blur(4px); }
+            45%  { opacity: 1; filter: blur(0); }
+            to   { opacity: 1; transform: none; filter: none; }
+        }
+        #characters-container img,
+        #segments-container img,
+        #gallery-container img,
+        #history-list img,
+        #history-writing-list img {
+            animation: imgReveal 0.5s var(--ease-out-expo) backwards;
+        }
+        #modal-image.zoom-in { animation: zoomIn var(--anim-base) var(--ease-out-expo); }
+        @keyframes zoomIn { from { opacity: 0; transform: scale(0.94); } to { opacity: 1; transform: none; } }
+
+        /* 6) 卡片 hover 抬起 (保持"笔触偏移阴影"的漫画感) */
+        .comic-page { transition: transform var(--anim-base) var(--ease-out-expo), box-shadow var(--anim-base) var(--ease-out-expo); }
+        .comic-page:hover { transform: translate(-2px, -2px); box-shadow: 12px 12px 0 rgba(0, 0, 0, 0.18); }
+        #characters-container > div.manga-border {
+            transition: transform var(--anim-fast) var(--ease-out-expo), box-shadow var(--anim-fast) var(--ease-out-expo);
+        }
+        #characters-container > div.manga-border:hover { transform: translate(-2px, -2px); box-shadow: 7px 7px 0 #1a1a1a; }
+
+        /* 7) 加载骨架屏 (列表/预览图加载中的占位) */
+        .skeleton { position: relative; overflow: hidden; background: #e5e5e5; }
+        .skeleton::after {
+            content: '';
+            position: absolute; inset: 0;
+            transform: translateX(-100%);
+            background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.75) 50%, rgba(255,255,255,0) 100%);
+            animation: shimmer 1.3s ease-in-out infinite;
+        }
+        @keyframes shimmer { to { transform: translateX(100%); } }
+
+        /* 8) 进度条: 条纹表示"正在跑", 完成时亮度闪一下 + 弹性到位 */
+        .progress-bar.is-active {
+            background-image: repeating-linear-gradient(115deg, rgba(255,255,255,0.28) 0 10px, rgba(255,255,255,0) 10px 22px);
+            animation: inkStripe 0.9s linear infinite;
+        }
+        @keyframes inkStripe { from { background-position: 0 0; } to { background-position: -44px 0; } }
+        .progress-bar.is-done {
+            transition: transform var(--anim-base) var(--ease-spring);
+            animation: barDone 0.7s var(--ease-out-expo);
+        }
+        @keyframes barDone { 0% { filter: brightness(1); } 30% { filter: brightness(2.1); } 100% { filter: brightness(1); } }
+
+        /* 9) Toast: 弹入 / 长任务呼吸光晕 / 错误抖动 */
+        @keyframes toastPop { from { transform: translateY(24px) scale(0.96); opacity: 0; } to { transform: translateY(0) scale(1); opacity: 1; } }
+        #toast.toast-pop { animation: toastPop var(--anim-base) var(--ease-spring); }
+        @keyframes toastPulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(26, 26, 26, 0.45); }
+            50% { box-shadow: 0 0 0 10px rgba(26, 26, 26, 0); }
+        }
+        #toast.toast-loading { animation: toastPop var(--anim-base) var(--ease-spring), toastPulse 1.6s ease-out 0.3s infinite; }
+        @keyframes shakeX {
+            10%, 90% { transform: translateX(-2px); }
+            20%, 80% { transform: translateX(3px); }
+            30%, 50%, 70% { transform: translateX(-5px); }
+            40%, 60% { transform: translateX(5px); }
+        }
+        .shake { animation: shakeX 0.5s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+        /* 错误 toast: 先弹入再抖一下 (放在 .toast-pop 之后以覆盖 animation 简写) */
+        #toast.shake { animation: toastPop var(--anim-base) var(--ease-spring), shakeX 0.5s cubic-bezier(0.36, 0.07, 0.19, 0.97) 0.26s; }
+
+        /* 10) 键盘焦点可见 */
+        :focus-visible { outline: 2px solid #1a1a1a; outline-offset: 2px; }
 
         /* ===== 移动端适配 ===== */
         body { min-height: 100vh; min-height: 100dvh; }
@@ -205,12 +298,251 @@
         /* 触屏设备：点击按钮时不选中文字、不呼出长按菜单 */
         body.touch-device button { user-select: none; -webkit-touch-callout: none; }
 
+        /* ===== 工作台 3.0: 状态条 / 步骤条 / 滑动指示器 / 空状态 / 涟漪 ===== */
+
+        /* 1) 顶部状态条: 滚过首屏后从上方滑出, 随时能看到"我在哪一步" */
+        #workspace-bar {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 30;
+            background: #fff;
+            border-bottom: 2px solid #1a1a1a;
+            transform: translateY(-105%);
+            /* 收起后同时摘掉命中与 Tab 焦点; visibility 延到滑出动画结束再切 */
+            visibility: hidden;
+            transition: transform var(--anim-base) var(--ease-spring), visibility 0s var(--anim-base);
+            will-change: transform;
+        }
+        #workspace-bar.is-visible {
+            transform: translateY(0);
+            visibility: visible;
+            transition: transform var(--anim-base) var(--ease-spring), visibility 0s 0s;
+        }
+        .wb-dot {
+            width: 8px; height: 8px; background: #d1d5db; flex: none;
+            transition: background-color var(--anim-fast) linear, transform var(--anim-fast) var(--ease-spring);
+        }
+        .wb-dot.is-done { background: #1a1a1a; }
+        .wb-dot.is-current { background: #1a1a1a; transform: scale(1.5); }
+        .wb-dot.is-busy { animation: wbBusy 1.1s ease-in-out infinite; background: #1a1a1a; }
+        @keyframes wbBusy {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.7); opacity: .45; }
+        }
+        .wb-connector { width: 14px; height: 2px; background: #e5e7eb; flex: none; }
+        .wb-connector.is-done { background: #1a1a1a; }
+
+        /* 2) 统计磁贴 */
+        .stat-tile {
+            position: relative;
+            border: 2px solid #1a1a1a;
+            background: #fff;
+            padding: 10px 12px;
+            overflow: hidden;
+            transition: transform var(--anim-fast) var(--ease-out-expo), box-shadow var(--anim-fast) var(--ease-out-expo);
+        }
+        .stat-tile:hover { transform: translate(-2px, -2px); box-shadow: 4px 4px 0 #1a1a1a; }
+        .stat-num {
+            font-weight: 800;
+            font-size: 1.45rem;
+            line-height: 1.1;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: -.02em;
+        }
+        .stat-num.is-bump { animation: numBump .44s var(--ease-spring); }
+        @keyframes numBump {
+            0% { transform: none; }
+            40% { transform: translateY(-3px) scale(1.16); }
+            100% { transform: none; }
+        }
+        .stat-label { font-size: .72rem; color: #6b7280; margin-top: 2px; }
+        .stat-chip {
+            display: inline-flex; align-items: center; gap: 6px;
+            border: 1px solid #d1d5db; padding: 3px 9px;
+            font-size: .72rem; color: #4b5563; white-space: nowrap;
+        }
+        .stat-chip .chip-dot {
+            width: 7px; height: 7px; background: #9ca3af; flex: none;
+            transition: background-color var(--anim-fast) linear;
+        }
+        .stat-chip.is-ok { border-color: #86efac; color: #15803d; }
+        .stat-chip.is-ok .chip-dot { background: #16a34a; }
+        .stat-chip.is-bad { border-color: #fca5a5; color: #b91c1c; }
+        .stat-chip.is-bad .chip-dot { background: #dc2626; }
+        .stat-chip.is-busy .chip-dot { background: #1a1a1a; animation: chipBusy 1.1s ease-in-out infinite; }
+        @keyframes chipBusy {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.8); opacity: .4; }
+        }
+
+        /* 3) 四步流程条 */
+        .stepper {
+            --dot-size: 32px;
+            position: relative;
+            border: 2px solid #1a1a1a;
+            background: #fff;
+            padding: 14px 16px 12px;
+            box-shadow: 4px 4px 0 #1a1a1a;
+        }
+        .steps { position: relative; display: grid; grid-template-columns: repeat(4, 1fr); }
+        /* 连线画在 .steps 内部, 纵向永远对齐圆点中心 */
+        .stepper-track, .stepper-fill {
+            position: absolute; left: 12.5%; width: 75%;
+            top: calc(var(--dot-size) / 2 - 1px); height: 2px;
+        }
+        .stepper-track { background: #e5e7eb; }
+        .stepper-fill {
+            background: #1a1a1a;
+            transform: scaleX(var(--p, 0));
+            transform-origin: left center;
+            transition: transform .7s var(--ease-out-expo);
+        }
+        .step { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; background: none; border: 0; }
+        .step-dot {
+            width: var(--dot-size); height: var(--dot-size);
+            border: 2px solid #1a1a1a;
+            background: #fff;
+            display: flex; align-items: center; justify-content: center;
+            font-size: .82rem; font-weight: 700;
+            transition: background-color var(--anim-base) linear, color var(--anim-base) linear, transform var(--anim-base) var(--ease-spring);
+        }
+        .step:hover .step-dot { transform: translateY(-2px); }
+        .step.is-done .step-dot, .step.is-active .step-dot { background: #1a1a1a; color: #fff; }
+        .step.is-active .step-dot { animation: stepPulse 2s ease-out infinite; }
+        @keyframes stepPulse {
+            0% { box-shadow: 0 0 0 0 rgba(26, 26, 26, .4); }
+            70% { box-shadow: 0 0 0 12px rgba(26, 26, 26, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(26, 26, 26, 0); }
+        }
+        .step-label { font-size: .78rem; color: #6b7280; line-height: 1.3; text-align: center; }
+        .step.is-done .step-label, .step.is-active .step-label { color: #111; font-weight: 600; }
+        .step-hint { font-size: .68rem; color: #9ca3af; }
+        @media (max-width: 767px) {
+            .stepper { --dot-size: 26px; padding: 10px 8px; }
+            .step-dot { font-size: .72rem; }
+            .step-label { font-size: .68rem; }
+            .step-hint { display: none; }
+        }
+
+        /* 4) 滑动指示器 (标签下划线 / 移动端高亮块 / 历史子页签) */
+        .ink-indicator {
+            position: absolute; left: 0; bottom: -1px; height: 3px; width: 0;
+            background: #1a1a1a;
+            opacity: 0;
+            transition: transform .4s var(--ease-out-expo), width .4s var(--ease-out-expo), opacity .25s linear;
+            pointer-events: none;
+        }
+        .ink-indicator.is-ready { opacity: 1; }
+        .mtab-pill {
+            position: absolute; top: 5px; height: calc(100% - 10px); left: 0; width: 0;
+            border: 2px solid #1a1a1a;
+            background: #f3f4f6;
+            z-index: -1;
+            opacity: 0;
+            transition: transform .42s var(--ease-spring), width .42s var(--ease-spring), opacity .25s linear;
+            pointer-events: none;
+        }
+        .mtab-pill.is-ready { opacity: 1; }
+
+        /* 5) 空状态 (虚线画框 + 网点 + 一句提示 + 一个动作) */
+        .empty-state {
+            position: relative;
+            border: 2px dashed #d1d5db;
+            background: #fafafa;
+            padding: 38px 20px;
+            text-align: center;
+            overflow: hidden;
+        }
+        .empty-state .es-halftone {
+            position: absolute; inset: 0; pointer-events: none;
+            background-image: radial-gradient(#1a1a1a 1px, transparent 1.2px);
+            background-size: 8px 8px;
+            opacity: .05;
+        }
+        .empty-state .es-emoji {
+            display: inline-block; font-size: 2.4rem; line-height: 1; margin-bottom: 10px;
+            animation: esIn .5s var(--ease-spring) both;
+        }
+        .empty-state .es-title { font-weight: 700; margin-bottom: 6px; }
+        .empty-state .es-hint { font-size: .84rem; color: #6b7280; line-height: 1.75; max-width: 36ch; margin: 0 auto 14px; }
+        @keyframes esIn {
+            from { opacity: 0; transform: translateY(10px) scale(.88); }
+            to { opacity: 1; transform: none; }
+        }
+
+        /* 6) 墨点涟漪 (主按钮点击反馈) */
+        .btn-primary { position: relative; overflow: hidden; }
+        .ink-ripple {
+            position: absolute; width: 12px; height: 12px; border-radius: 50%;
+            background: rgba(255, 255, 255, .4);
+            transform: translate(-50%, -50%) scale(0);
+            pointer-events: none;
+            animation: inkRipple .62s ease-out forwards;
+        }
+        @keyframes inkRipple {
+            60% { opacity: .55; }
+            to { transform: translate(-50%, -50%) scale(26); opacity: 0; }
+        }
+
+        /* 7) Toast: 图标 + 文本 + 自动关闭进度线 */
+        #toast { position: fixed; overflow: hidden; }
+        .toast-inner { display: flex; align-items: center; gap: 9px; }
+        .toast-icon { font-size: 1rem; line-height: 1; }
+        .toast-timer {
+            position: absolute; left: 0; bottom: 0; height: 3px; width: 100%;
+            background: rgba(255, 255, 255, .5);
+            transform-origin: left center;
+            transform: scaleX(0);
+        }
+        #toast.is-counting .toast-timer { animation: toastTimer 3s linear forwards; }
+        @keyframes toastTimer {
+            from { transform: scaleX(1); }
+            to { transform: scaleX(0); }
+        }
+
+        /* 8) 面板头部补充信息 */
+        .ph-hint { font-size: .78rem; color: #6b7280; margin-top: 3px; line-height: 1.6; }
+        .count-chip {
+            border: 2px solid #1a1a1a; background: #fff;
+            padding: 2px 8px; font-size: .72rem; font-weight: 700; white-space: nowrap;
+            transition: background-color var(--anim-fast) linear, color var(--anim-fast) linear;
+        }
+        .count-chip.is-zero { border-color: #d1d5db; color: #9ca3af; }
+        .count-chip.is-bump { animation: numBump .44s var(--ease-spring); }
+
+        /* 9) 分镜卡里的气泡形状迷你预览 */
+        .bubble-mini {
+            width: 40px; height: 26px; flex: none;
+            border: 1px solid #1a1a1a; background: #fff;
+            display: inline-block;
+            transition: border-radius var(--anim-base) var(--ease-spring), background-color var(--anim-base) linear, transform var(--anim-base) var(--ease-spring);
+        }
+        .bubble-mini[data-type="dialogue"] { border-radius: 7px; }
+        .bubble-mini[data-type="thought"] { border-radius: 13px; background: #fafcff; }
+        .bubble-mini[data-type="shout"] { border-radius: 2px; border-width: 2px; background: #fff7e6; }
+        .bubble-mini[data-type="whisper"] { border-radius: 9px; border-style: dashed; background: #f6f6f0; }
+        .bubble-mini[data-type="burst"] { border-radius: 50%; border-style: dashed; background: #fff8d6; }
+        .bubble-mini[data-type="narration"] { border-radius: 0; background: #f5f5dc; }
+        .bubble-mini[data-type="box"] { border-radius: 0; }
+        .bubble-mini[data-type="caption"] { border-radius: 0; background: #1a1a1a; }
+        .bubble-mini.is-changed { transform: scale(1.18); }
+        select:focus + .bubble-mini, select:hover + .bubble-mini { transform: scale(1.08); }
+
+        /* 10) 启动入场: 由 JS 打 boot-armed, 无 JS 时不会隐藏任何内容 */
+        [data-boot] { transition: opacity .5s var(--ease-out-expo), transform .5s var(--ease-out-expo); }
+        html.boot-armed [data-boot] { opacity: 0; transform: translateY(10px); }
+        html.boot-armed [data-boot].is-in { opacity: 1; transform: none; }
+
+        /* 11) 模态遮罩轻微虚化, 让弹窗更"浮" */
+        .modal-backdrop { backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
+
         /* 无障碍: 用户偏好减少动效时, 所有动画/过渡坍缩为瞬时 */
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after {
                 animation-duration: 0.01ms !important;
                 animation-iteration-count: 1 !important;
+                /* 级联延迟也要清零, 否则元素会在延迟期间保持动画起始态(不可见) */
+                animation-delay: 0s !important;
                 transition-duration: 0.01ms !important;
+                transition-delay: 0s !important;
                 scroll-behavior: auto !important;
             }
         }
@@ -229,6 +561,36 @@
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
+    <script>
+        // 启动入场: 只在脚本可用的前提下预隐藏; 2.5s 兜底显示, 任何情况下内容都不会被藏住
+        (function () {
+            var el = document.documentElement;
+            if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+            el.classList.add('boot-armed');
+            window.setTimeout(function () { if (!window.__appBooted) el.classList.remove('boot-armed'); }, 2500);
+        })();
+    </script>
+
+    <!-- 顶部状态条: 滚过首屏后从上方滑出, 显示当前作品 / 流程进度 / 主操作 -->
+    <div id="workspace-bar" style="padding-top: env(safe-area-inset-top);">
+        <div class="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3 md:gap-5">
+            <div class="flex items-center gap-2 min-w-0">
+                <span class="w-7 h-7 shrink-0 bg-black text-white flex items-center justify-center text-sm font-bold">⇄</span>
+                <div class="min-w-0">
+                    <div id="wb-title" class="text-sm font-bold truncate">未命名作品</div>
+                    <div id="wb-save" class="text-[11px] text-gray-500 truncate">尚未保存</div>
+                </div>
+            </div>
+            <div id="wb-steps" class="hidden md:flex items-center gap-1.5 ml-2"></div>
+            <div class="flex-1 min-w-0"></div>
+            <div id="wb-counts" class="hidden lg:block text-xs text-gray-500 truncate">0 字 / 0 角色 / 0 分镜 / 0 整页</div>
+            <button onclick="runPrimaryAction()" class="btn-primary px-3 md:px-4 py-2 text-xs md:text-sm font-medium flex items-center gap-2 whitespace-nowrap">
+                <span id="wb-action-label">开始使用</span>
+                <span class="text-[10px] opacity-70 hidden md:inline">⌘↵</span>
+            </button>
+        </div>
+    </div>
+
     <div class="max-w-7xl mx-auto px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-28 md:pb-4">
         <!-- 微信/QQ 内打开时提示用浏览器打开 (由 app.js 的 maybeShowInAppBanner 控制显示) -->
         <div id="inapp-browser-banner" class="hidden bg-amber-100 border-2 border-amber-500 mb-4 px-3 md:px-4 py-2.5 flex items-center justify-between gap-3">
@@ -255,6 +617,32 @@
                 </div>
             </div>
             <p class="text-gray-600 text-xs md:text-sm">两大功能：使用LLM将小说转为漫画分镜 | 上传漫画图片，使用视觉模型转为小说文本</p>
+
+            <!-- 工作台状态: 全部来自真实数据, 数字变化时滚动计数 -->
+            <div class="mt-4 grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-3" data-boot>
+                <div class="stat-tile">
+                    <div class="stat-num" id="stat-chars">0</div>
+                    <div class="stat-label">小说字数</div>
+                </div>
+                <div class="stat-tile">
+                    <div class="stat-num" id="stat-chars-count">0</div>
+                    <div class="stat-label">角色</div>
+                </div>
+                <div class="stat-tile">
+                    <div class="stat-num" id="stat-segments">0</div>
+                    <div class="stat-label">分镜格数</div>
+                </div>
+                <div class="stat-tile">
+                    <div class="stat-num" id="stat-pages">0</div>
+                    <div class="stat-label">整页成图</div>
+                </div>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-2" data-boot>
+                <span class="stat-chip" id="chip-llm"><span class="chip-dot"></span><span id="chip-llm-text">文本接口未配置</span></span>
+                <span class="stat-chip" id="chip-img"><span class="chip-dot"></span><span id="chip-img-text">图像接口未配置</span></span>
+                <span class="stat-chip" id="chip-work"><span class="chip-dot"></span><span id="chip-work-text">未绑定作品</span></span>
+                <span class="stat-chip" id="chip-mode"><span id="chip-mode-text">黑白 · 本地气泡</span></span>
+            </div>
         </header>
 
         <!-- 漫画风格设置 (主页常驻, 可折叠) -->
@@ -287,7 +675,8 @@
         </div>
 
         <!-- Tabs (移动端隐藏, 改用底部导航) -->
-        <div class="hidden md:flex gap-6 mb-6 border-b border-gray-300 items-center">
+        <div id="main-tabs" class="relative hidden md:flex gap-6 mb-4 border-b border-gray-300 items-center">
+            <span class="ink-indicator" id="tab-ink" aria-hidden="true"></span>
             <!-- 小说→漫画 功能组 -->
             <button onclick="switchTab('input')" id="tab-input" class="tab-active pb-2 px-1 text-lg transition-all">小说输入</button>
             <button onclick="switchTab('aiwrite')" id="tab-aiwrite" class="tab-inactive pb-2 px-1 text-lg transition-all">AI 写作</button>
@@ -300,9 +689,42 @@
             <button onclick="switchTab('comic2novel')" id="tab-comic2novel" class="tab-inactive pb-2 px-1 text-lg transition-all">漫画转小说</button>
         </div>
 
+        <!-- 四步流程: 每一步都可点击跳转, 进度来自真实数据 -->
+        <section id="workflow" class="stepper mb-4" data-boot aria-label="制作流程">
+            <div class="flex items-center justify-between gap-3 mb-3">
+                <h2 class="text-sm font-bold flex items-center gap-2"><span>🧭</span>制作流程</h2>
+                <span class="text-xs text-gray-500 truncate" id="step-summary">粘贴小说正文开始</span>
+            </div>
+            <div class="steps" id="steps">
+                <span class="stepper-track" aria-hidden="true"></span>
+                <span class="stepper-fill" id="step-fill" aria-hidden="true"></span>
+                <button type="button" class="step" data-step="input" onclick="goStep('input')">
+                    <span class="step-dot" id="step-dot-input">1</span>
+                    <span class="step-label">输入小说</span>
+                    <span class="step-hint" id="step-hint-input">粘贴正文</span>
+                </button>
+                <button type="button" class="step" data-step="characters" onclick="goStep('characters')">
+                    <span class="step-dot" id="step-dot-characters">2</span>
+                    <span class="step-label">分析角色</span>
+                    <span class="step-hint" id="step-hint-characters">出人设图</span>
+                </button>
+                <button type="button" class="step" data-step="segments" onclick="goStep('segments')">
+                    <span class="step-dot" id="step-dot-segments">3</span>
+                    <span class="step-label">生成分镜</span>
+                    <span class="step-hint" id="step-hint-segments">切页分格</span>
+                </button>
+                <button type="button" class="step" data-step="gallery" onclick="goStep('gallery')">
+                    <span class="step-dot" id="step-dot-gallery">4</span>
+                    <span class="step-label">整页成图</span>
+                    <span class="step-hint" id="step-hint-gallery">叠气泡</span>
+                </button>
+            </div>
+        </section>
+
         <!-- 移动端底部导航栏 (md 以下显示) -->
         <nav id="mobile-bottom-nav" class="fixed bottom-0 left-0 right-0 z-40 md:hidden bg-white border-t-2 border-gray-800" style="padding-bottom: env(safe-area-inset-bottom);">
-            <div class="grid grid-cols-7 max-w-7xl mx-auto">
+            <div class="relative grid grid-cols-7 max-w-7xl mx-auto" id="mtab-grid">
+                <span class="mtab-pill" id="mtab-pill" aria-hidden="true"></span>
                 <button onclick="switchTab('input')" id="mtab-input" class="mtab-active">
                     <span class="text-lg leading-none">📖</span>
                     <span class="text-[10px] leading-tight">小说输入</span>
@@ -531,7 +953,13 @@
         <!-- Input Tab -->
         <div id="panel-input" class="fade-in">
             <div class="bg-white p-6 manga-border panel-shadow">
-                <h2 class="text-xl font-bold mb-4">输入小说内容</h2>
+                <div class="flex items-start justify-between gap-3 mb-4">
+                    <div>
+                        <h2 class="text-xl font-bold">输入小说内容</h2>
+                        <p class="ph-hint">整章粘贴即可，建议 3000-8000 字；生成分镜前可以先用下面的 AI 写作润色或续写。</p>
+                    </div>
+                    <span class="count-chip is-zero" id="input-count-chip">0 字</span>
+                </div>
                 <textarea id="novel-text" rows="16" placeholder="请在此处粘贴小说内容...&#10;&#10;支持粘贴整章或整篇小说，系统会自动分页分段。&#10;&#10;建议每次处理3000-8000字，以获得最佳分镜效果。" class="w-full p-4 border-2 border-gray-300 focus:border-black outline-none transition-colors resize-none font-mono text-sm leading-relaxed"></textarea>
                 <p class="mt-2 text-xs text-gray-400">✍️ AI 续写 / 润色可在此直接使用（生成分镜前建议先润色），也可到顶部「AI 写作」标签页，两处实时同步</p>
 
@@ -677,7 +1105,13 @@
         <!-- Characters Tab -->
         <div id="panel-characters" class="hidden fade-in">
             <div class="bg-white p-6 manga-border panel-shadow mb-6">
-                <h2 class="text-xl font-bold mb-4">角色分析</h2>
+                <div class="flex items-start justify-between gap-3 mb-4">
+                    <div>
+                        <h2 class="text-xl font-bold">角色分析</h2>
+                        <p class="ph-hint">先让模型挑出主要角色，再逐个生成人设图。之后每一页都会拿人设图当参考，保证角色前后长得一样。</p>
+                    </div>
+                    <span class="count-chip is-zero" id="chars-count-chip">0 个角色</span>
+                </div>
                 <div class="flex gap-2 flex-wrap">
                     <button id="analyze-characters-btn" onclick="analyzeCharacters()" class="btn-primary px-6 py-2 font-medium flex items-center gap-2">
                         <span id="analyze-characters-label">从小说分析角色</span>
@@ -689,9 +1123,12 @@
             </div>
 
             <div id="characters-container" class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <div class="text-center py-20 text-gray-400 col-span-full">
-                    <div class="text-6xl mb-4">🎭</div>
-                    <p>请先点击"从小说分析角色"或手动添加角色</p>
+                <div class="empty-state col-span-full">
+                    <span class="es-halftone" aria-hidden="true"></span>
+                    <div class="es-emoji">🎭</div>
+                    <p class="es-title">还没有角色</p>
+                    <p class="es-hint">点下面的按钮，模型会从小说的前 8000 字里挑出主要出场角色，并给出外貌与性格描述。</p>
+                    <button onclick="analyzeCharacters()" class="btn-primary px-5 py-2 text-sm font-medium">从小说分析角色</button>
                 </div>
             </div>
         </div>
@@ -699,7 +1136,13 @@
         <!-- Segments Tab -->
         <div id="panel-segments" class="hidden fade-in">
             <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3 mb-4">
-                <h2 class="text-xl font-bold">分镜管理</h2>
+                <div>
+                    <h2 class="text-xl font-bold flex flex-wrap items-center gap-2">
+                        分镜管理
+                        <span class="count-chip is-zero" id="seg-count-chip">0 页 / 0 格</span>
+                    </h2>
+                    <p class="ph-hint">每格都能改场景、对白和气泡类型。改完点「整页生成」，气泡会按坐标叠到画面上。</p>
+                </div>
                 <div class="flex flex-wrap gap-2">
                     <button id="batch-full-btn" onclick="generateAllFullPages()" class="btn-primary px-3 md:px-4 py-2 text-xs md:text-sm font-medium flex items-center gap-2">
                         <span id="batch-full-label">批量整页生成</span>
@@ -720,9 +1163,12 @@
             </div>
             <div id="batch-progress" class="mt-4 mb-4"></div>
             <div id="segments-container" class="space-y-6">
-                <div class="text-center py-20 text-gray-400">
-                    <div class="text-6xl mb-4">📝</div>
-                    <p>请先输入小说内容并点击"开始智能分镜"</p>
+                <div class="empty-state">
+                    <span class="es-halftone" aria-hidden="true"></span>
+                    <div class="es-emoji">📝</div>
+                    <p class="es-title">还没有分镜</p>
+                    <p class="es-hint">回到「小说输入」粘贴正文，点「开始智能分镜」，模型会按情节切页分格，并给每句对白挑一种语气。</p>
+                    <button onclick="switchTab('input')" class="btn-primary px-5 py-2 text-sm font-medium">去输入小说</button>
                 </div>
             </div>
         </div>
@@ -730,15 +1176,24 @@
         <!-- Gallery Tab -->
         <div id="panel-gallery" class="hidden fade-in">
             <div class="flex flex-wrap justify-between items-center mb-4 gap-4">
-                <h2 class="text-xl font-bold">漫画预览</h2>
+                <div>
+                    <h2 class="text-xl font-bold flex flex-wrap items-center gap-2">
+                        漫画预览
+                        <span class="count-chip is-zero" id="gallery-count-chip">0 张</span>
+                    </h2>
+                    <p class="ph-hint">整页图按故事顺序排列，点图放大。PIL 模式下还能拖拽调整气泡位置，改完自动重新叠加。</p>
+                </div>
                 <div class="flex gap-2">
                     <button onclick="downloadAll()" class="bg-white border-2 border-black px-4 py-2 font-medium hover:bg-gray-50 transition-colors">下载全部</button>
                 </div>
             </div>
             <div id="gallery-container" class="space-y-8">
-                <div class="text-center py-20 text-gray-400">
-                    <div class="text-6xl mb-4">🎨</div>
-                    <p>请先生成漫画图片</p>
+                <div class="empty-state">
+                    <span class="es-halftone" aria-hidden="true"></span>
+                    <div class="es-emoji">🎨</div>
+                    <p class="es-title">还没有成品图</p>
+                    <p class="es-hint">在「分镜管理」里对某一页点「整页生成」，或直接「批量整页生成」把所有页一次跑完。</p>
+                    <button onclick="switchTab('segments')" class="btn-primary px-5 py-2 text-sm font-medium">去生成整页</button>
                 </div>
             </div>
         </div>
@@ -762,7 +1217,8 @@
                 </div>
             </div>
             <!-- 子切换: 漫画作品 / AI 写作 -->
-            <div class="flex gap-4 border-b-2 border-gray-200 mb-4">
+            <div id="hist-subtabs" class="relative flex gap-4 border-b-2 border-gray-200 mb-4">
+                <span class="ink-indicator" id="hist-ink" aria-hidden="true"></span>
                 <button id="hist-sub-comic" onclick="switchHistorySub('comic')" class="pb-2 px-1 text-base font-bold border-b-[3px] border-black">📖 漫画作品</button>
                 <button id="hist-sub-writing" onclick="switchHistorySub('writing')" class="pb-2 px-1 text-base text-gray-500 border-b-[3px] border-transparent hover:border-gray-300">✍️ AI 写作</button>
             </div>
@@ -841,6 +1297,20 @@
                 <div id="comic2novel-text" class="p-4 bg-gray-50 border-2 border-gray-200 text-sm leading-relaxed whitespace-pre-wrap font-sans max-h-[70vh] overflow-y-auto"></div>
             </div>
         </div>
+
+        <!-- 底部状态条: 数据位置 / 快捷键 -->
+        <footer class="mt-10 mb-2 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs text-gray-500" data-boot>
+            <p class="leading-relaxed">
+                作品与图片保存在本机
+                <code class="font-mono text-gray-600 bg-white border border-gray-200 px-1">static/users/&lt;账号&gt;/works/</code>
+                ，整个目录可直接备份或搬到别的机器。
+            </p>
+            <p class="flex flex-wrap items-center gap-x-3 gap-y-1.5 shrink-0">
+                <span class="text-gray-400">快捷键</span>
+                <kbd class="font-mono bg-white border border-gray-300 px-1.5 py-0.5 text-gray-600">Ctrl/⌘ + ↵</kbd><span>执行当前步骤</span>
+                <kbd class="font-mono bg-white border border-gray-300 px-1.5 py-0.5 text-gray-600">Ctrl/⌘ + S</kbd><span>保存当前进度</span>
+            </p>
+        </footer>
     </div>
 
     <!-- Image Preview Modal -->

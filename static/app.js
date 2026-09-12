@@ -1,4 +1,4 @@
-﻿let currentSegments = { pages: [] };
+let currentSegments = { pages: [] };
 let generatedImages = {};
 let isGenerating = false;
 let characters = [];
@@ -16,6 +16,7 @@ let comicUploadedImages = [];  // {name, data: base64, pageIndex}
 let comicNovelResult = null;   // {novel_text, pages}
 
 const tabs = ['input', 'aiwrite', 'characters', 'segments', 'gallery', 'history', 'comic2novel'];
+let currentTab = 'input';  // 当前标签页, 用于决定切换时的滑入方向
 const CONCURRENT_LIMIT = 3;
 const MAX_RETRIES = 3;
 
@@ -60,6 +61,19 @@ let customStyleTags = [];
 let comicMode = 'bw';
 let bubbleRenderMode = 'pil';  // 'pil' | 'api' — 气泡渲染方式, 'pil'=本地PIL叠加, 'api'=图像API自画
 
+// 气泡类型枚举 + 编辑器下拉显示标签 (与 app.py 的 BUBBLE_DRAWERS / DIALOGUE_TYPE_CATALOG 对齐)
+const BUBBLE_TYPES = ['dialogue', 'thought', 'shout', 'whisper', 'burst', 'narration', 'box', 'caption'];
+const BUBBLE_TYPE_LABELS = {
+    dialogue:  '💬 dialogue',
+    thought:   '💭 thought',
+    shout:     '💥 shout',
+    whisper:   '🤫 whisper',
+    burst:     '⚡ burst',
+    narration: '📜 narration',
+    box:       '▢ box',
+    caption:   '🔊 caption',
+};
+
 /**
  * 带指数退避重试的 fetch
  * 内网穿透场景下，网络波动可能导致请求失败，自动重试提高成功率
@@ -83,6 +97,385 @@ async function fetchWithRetry(url, options = {}, maxRetries = MAX_RETRIES) {
         }
     }
     throw lastError;
+}
+
+// ========== 动效工具 ==========
+
+function motionReduced() {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+/**
+ * 容器内元素的可视级联入场: 元素进入视口时才播放, 同批进入的按顺序依次延迟.
+ * 依赖 CSS 的 .stagger-ready (入场前隐藏) 与 .stagger-item (播放动画, 延迟 = --i * --stagger).
+ * 减少动效偏好 / 不支持 IntersectionObserver 时不加任何 class → 内容直接可见.
+ */
+function playStagger(container, selector) {
+    if (!container) return;
+    const nodes = selector ? container.querySelectorAll(selector) : container.children;
+    if (!nodes || nodes.length === 0) return;
+    if (motionReduced() || typeof IntersectionObserver === 'undefined') return;
+    // 同一容器只做一次级联: 勾选角色等交互会整块重渲染, 每次都重新入场会闪
+    if (container._staggerDone) return;
+    container._staggerDone = true;
+
+    const io = new IntersectionObserver((entries, obs) => {
+        let batch = 0;
+        entries.forEach(entry => {
+            if (!entry.isIntersecting) return;
+            obs.unobserve(entry.target);
+            entry.target.style.setProperty('--i', batch++);
+            entry.target.classList.remove('stagger-ready');
+            entry.target.classList.add('stagger-item');
+        });
+    }, { rootMargin: '0px 0px -8% 0px', threshold: 0.01 });
+
+    Array.from(nodes).forEach(el => {
+        if (el.classList.contains('stagger-item')) return;  // 已播放过的不重播
+        el.classList.add('stagger-ready');
+        io.observe(el);
+    });
+
+    // 兜底: 3s 后仍在视口内却没播放的元素直接显示 (防止内容被"藏"住)
+    setTimeout(() => {
+        Array.from(nodes).forEach(el => {
+            if (!el.classList.contains('stagger-ready')) return;
+            const r = el.getBoundingClientRect();
+            if (r.top < window.innerHeight && r.bottom > 0) {
+                el.classList.remove('stagger-ready');
+                el.classList.add('stagger-item');
+            }
+        });
+    }, 3000);
+}
+
+/** 单个元素立刻入场 (用于逐条追加的列表, 每张卡片到达时各自播放) */
+function popIn(el) {
+    if (!el || motionReduced()) return;
+    el.classList.add('stagger-item');
+}
+
+// ========== 工作台: 状态条 / 步骤条 / 滑动指示器 / 快捷键 ==========
+
+// 每个标签页的"主操作": 状态条按钮与 Ctrl+Enter 都走同一份定义
+const PRIMARY_ACTIONS = {
+    input:       { label: '开始智能分镜', run: () => startSegment() },
+    aiwrite:     { label: '生成剧情选项', run: () => genPlotOptions() },
+    characters:  { label: '从小说分析角色', run: () => analyzeCharacters() },
+    segments:    { label: '批量整页生成', run: () => generateAllFullPages() },
+    gallery:     { label: '下载全部图片', run: () => downloadAll() },
+    history:     { label: '保存当前进度', run: () => quickSave() },
+    comic2novel: { label: '选择漫画图片', run: () => { const el = document.getElementById('comic-file-input'); if (el) el.click(); } },
+};
+
+// 作品元信息: 标题与保存时间只存在本地 (后端只返回 success)
+const workMeta = { title: '', savedAt: '', dirty: false };
+try {
+    workMeta.title = localStorage.getItem('manga_work_title') || '';
+    workMeta.savedAt = localStorage.getItem('manga_work_saved_at') || '';
+} catch (e) { /* 无痕模式忽略 */ }
+
+function renderWorkMeta() {
+    const titleEl = document.getElementById('wb-title');
+    const saveEl = document.getElementById('wb-save');
+    if (titleEl) titleEl.textContent = workMeta.title || '未命名作品';
+    if (saveEl) {
+        saveEl.textContent = workMeta.dirty
+            ? '有改动未保存'
+            : (workMeta.savedAt ? `已保存 ${workMeta.savedAt}` : '尚未保存');
+        saveEl.style.color = workMeta.dirty ? '#b45309' : '';
+    }
+}
+
+function markDirty() {
+    if (workMeta.dirty) return;
+    workMeta.dirty = true;
+    renderWorkMeta();
+}
+
+function markSaved(title) {
+    workMeta.dirty = false;
+    if (title) workMeta.title = title;
+    workMeta.savedAt = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+    try {
+        localStorage.setItem('manga_work_title', workMeta.title || '');
+        localStorage.setItem('manga_work_saved_at', workMeta.savedAt);
+    } catch (e) { /* 忽略 */ }
+    renderWorkMeta();
+}
+
+/** 静默保存当前进度 (不弹标题输入框) */
+async function quickSave() {
+    try {
+        await saveCurrentState();
+        markSaved();
+        updateWorkspaceUI();
+        showToast('已保存当前进度', 'success');
+    } catch (e) {
+        showToast('保存失败: ' + (e.message || e), 'error');
+    }
+}
+
+/** 数字滚动: 逐字输入这类小改动直接更新, 粘贴/生成这类大改动滚动到位 */
+function countUp(el, value) {
+    if (!el) return;
+    const from = parseInt(el.dataset.value || '0', 10) || 0;
+    if (from === value) return;
+    el.dataset.value = String(value);
+    if (motionReduced() || Math.abs(value - from) < 8) {
+        el.textContent = String(value);
+        return;
+    }
+    const start = performance.now();
+    const dur = 520;
+    const tick = (now) => {
+        const p = Math.min(1, (now - start) / dur);
+        const eased = 1 - Math.pow(1 - p, 3);
+        el.textContent = String(Math.round(from + (value - from) * eased));
+        if (p < 1) requestAnimationFrame(tick); else el.textContent = String(value);
+    };
+    requestAnimationFrame(tick);
+    el.classList.remove('is-bump');
+    void el.offsetWidth;
+    el.classList.add('is-bump');
+}
+
+function _setCountChip(id, text, positive) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (el.textContent !== text) {
+        el.textContent = text;
+        el.classList.remove('is-bump');
+        void el.offsetWidth;
+        el.classList.add('is-bump');
+    }
+    el.classList.toggle('is-zero', !positive);
+}
+
+function _setStatusChip(id, textId, ok, label) {
+    const chip = document.getElementById(id);
+    const text = document.getElementById(textId);
+    if (!chip) return;
+    chip.classList.toggle('is-ok', !!ok);
+    chip.classList.toggle('is-bad', !ok);
+    if (text) text.textContent = ok ? `${label}已就绪` : `${label}未配置`;
+}
+
+function scheduleWorkspaceUI() {
+    if (scheduleWorkspaceUI._pending) return;
+    scheduleWorkspaceUI._pending = true;
+    requestAnimationFrame(() => {
+        scheduleWorkspaceUI._pending = false;
+        updateWorkspaceUI();
+    });
+}
+
+/** 汇总真实状态: 统计数字 / 接口状态 / 四步进度 / 状态条主操作 */
+function updateWorkspaceUI() {
+    const textEl = document.getElementById('novel-text');
+    const chars = textEl ? (textEl.value || '').length : 0;
+    const charCount = characters.length;
+    const pages = (currentSegments.pages || []).length;
+    const segCount = (currentSegments.pages || []).reduce((n, p) => n + (p.segments || []).length, 0);
+    const fullPages = Object.keys(fullPageImages).length;
+
+    countUp(document.getElementById('stat-chars'), chars);
+    countUp(document.getElementById('stat-chars-count'), charCount);
+    countUp(document.getElementById('stat-segments'), segCount);
+    countUp(document.getElementById('stat-pages'), fullPages);
+
+    _setCountChip('input-count-chip', `${chars} 字`, chars > 0);
+    _setCountChip('chars-count-chip', `${charCount} 个角色`, charCount > 0);
+    _setCountChip('seg-count-chip', `${pages} 页 / ${segCount} 格`, segCount > 0);
+    _setCountChip('gallery-count-chip', `${fullPages} 张`, fullPages > 0);
+
+    // 接口状态
+    let cfg = {};
+    try { cfg = JSON.parse(localStorage.getItem('manga_config') || '{}'); } catch (e) { cfg = {}; }
+    _setStatusChip('chip-llm', 'chip-llm-text', !!(cfg.llm_api_url && cfg.llm_api_key), '文本接口');
+    _setStatusChip('chip-img', 'chip-img-text', !!(cfg.img_api_url && cfg.img_api_key), '图像接口');
+    const workChip = document.getElementById('chip-work');
+    if (workChip) {
+        workChip.classList.toggle('is-ok', !!workMeta.title);
+        workChip.classList.toggle('is-bad', !workMeta.title);
+        const t = document.getElementById('chip-work-text');
+        if (t) t.textContent = workMeta.title ? `作品：${workMeta.title}` : '尚未命名作品';
+    }
+    const modeText = document.getElementById('chip-mode-text');
+    if (modeText) {
+        modeText.textContent = `${comicMode === 'color' ? '彩色' : '黑白'} · ${bubbleRenderMode === 'pil' ? '本地气泡' : '模型画气泡'}`;
+    }
+    // 生成中: 让状态点跟着呼吸
+    ['chip-llm', 'chip-img'].forEach((id) => {
+        const chip = document.getElementById(id);
+        if (chip) chip.classList.toggle('is-busy', !!isGenerating);
+    });
+
+    // 四步流程
+    const steps = [
+        { key: 'input', done: chars > 0, hint: chars ? `${chars} 字` : '粘贴正文' },
+        { key: 'characters', done: charCount > 0, hint: charCount ? `${charCount} 个角色` : '出人设图' },
+        { key: 'segments', done: pages > 0, hint: pages ? `${pages} 页 / ${segCount} 格` : '切页分格' },
+        { key: 'gallery', done: fullPages > 0, hint: fullPages ? `${fullPages} 张整页` : '叠气泡' },
+    ];
+    let activeIdx = steps.findIndex((s) => !s.done);
+    const allDone = activeIdx === -1;
+    if (allDone) activeIdx = steps.length - 1;
+    steps.forEach((s, i) => {
+        const stepEl = document.querySelector(`.step[data-step="${s.key}"]`);
+        if (stepEl) {
+            stepEl.classList.toggle('is-done', s.done);
+            stepEl.classList.toggle('is-active', i === activeIdx && !allDone);
+        }
+        const dot = document.getElementById(`step-dot-${s.key}`);
+        if (dot) dot.textContent = s.done ? '✓' : String(i + 1);
+        const hint = document.getElementById(`step-hint-${s.key}`);
+        if (hint) hint.textContent = s.hint;
+    });
+    const fill = document.getElementById('step-fill');
+    if (fill) fill.style.setProperty('--p', String(steps.filter((s) => s.done).length / steps.length));
+
+    const summary = document.getElementById('step-summary');
+    if (summary) {
+        if (allDone) summary.textContent = '流程已走完，可以继续加页或导出';
+        else if (chars === 0) summary.textContent = '粘贴小说正文开始';
+        else if (charCount === 0) summary.textContent = '下一步：分析角色（也可跳过）';
+        else if (pages === 0) summary.textContent = '下一步：生成分镜';
+        else summary.textContent = '下一步：整页生成';
+    }
+
+    // 状态条里的迷你进度点
+    const wbSteps = document.getElementById('wb-steps');
+    if (wbSteps) {
+        if (!wbSteps.dataset.ready) {
+            wbSteps.innerHTML = steps.map((s, i) =>
+                (i ? '<span class="wb-connector"></span>' : '') + '<span class="wb-dot"></span>'
+            ).join('');
+            wbSteps.dataset.ready = '1';
+        }
+        const dots = wbSteps.querySelectorAll('.wb-dot');
+        const connectors = wbSteps.querySelectorAll('.wb-connector');
+        dots.forEach((dot, i) => {
+            dot.classList.toggle('is-done', steps[i].done);
+            dot.classList.toggle('is-current', i === activeIdx && !allDone);
+            dot.classList.toggle('is-busy', i === activeIdx && !!isGenerating);
+        });
+        connectors.forEach((c, i) => {
+            c.classList.toggle('is-done', steps[i].done && steps[i + 1].done);
+        });
+    }
+
+    // 状态条主操作跟随当前标签页
+    const action = PRIMARY_ACTIONS[currentTab];
+    const actionLabel = document.getElementById('wb-action-label');
+    if (action && actionLabel) actionLabel.textContent = action.label;
+    renderWorkMeta();
+}
+
+/** 状态条 / 快捷键共用的主操作 */
+function runPrimaryAction() {
+    const action = PRIMARY_ACTIONS[currentTab];
+    if (!action) return;
+    try {
+        action.run();
+    } catch (e) {
+        showToast('操作失败: ' + (e.message || e), 'error');
+    }
+}
+
+/** 流程条点击: 跳到对应标签页 */
+function goStep(tab) {
+    switchTab(tab);
+}
+
+/** 滑动指示器: 把一个绝对定位的墨条移到当前项下面 */
+function moveInk(boxId, activeEl, inkId) {
+    const box = document.getElementById(boxId);
+    const ink = document.getElementById(inkId);
+    if (!box || !ink || !activeEl) return;
+    const boxRect = box.getBoundingClientRect();
+    const itemRect = activeEl.getBoundingClientRect();
+    if (!itemRect.width) return;
+    ink.style.width = itemRect.width + 'px';
+    ink.style.transform = `translateX(${itemRect.left - boxRect.left}px)`;
+    ink.classList.add('is-ready');
+}
+
+function refreshInks() {
+    moveInk('main-tabs', document.getElementById(`tab-${currentTab}`), 'tab-ink');
+    moveInk('mtab-grid', document.getElementById(`mtab-${currentTab}`), 'mtab-pill');
+    const subId = (typeof _historySub !== 'undefined' && _historySub === 'writing') ? 'hist-sub-writing' : 'hist-sub-comic';
+    moveInk('hist-subtabs', document.getElementById(subId), 'hist-ink');
+}
+
+/** 切换标签页时, 让面板第一层内容依次落位 */
+function staggerPanel(panel) {
+    if (!panel || motionReduced()) return;
+    Array.from(panel.children).forEach((el, i) => {
+        const delay = Math.min(i * 35, 210);
+        el.style.transition = 'opacity .38s var(--ease-out-expo), transform .38s var(--ease-out-expo)';
+        el.style.transitionDelay = delay + 'ms';
+        el.style.opacity = '0';
+        el.style.transform = 'translateY(10px)';
+        requestAnimationFrame(() => {
+            el.style.opacity = '1';
+            el.style.transform = 'none';
+        });
+        setTimeout(() => {
+            el.style.transition = '';
+            el.style.transitionDelay = '';
+            el.style.opacity = '';
+            el.style.transform = '';
+        }, 760 + delay);
+    });
+}
+
+/** 启动入场: 头部/统计/流程条依次浮现 (2.5s 兜底由模板里的内联脚本负责) */
+function bootIntro() {
+    const items = document.querySelectorAll('[data-boot]');
+    if (motionReduced() || !items.length) {
+        document.documentElement.classList.remove('boot-armed');
+        window.__appBooted = true;
+        return;
+    }
+    items.forEach((el, i) => {
+        el.style.transitionDelay = Math.min(i * 60, 360) + 'ms';
+        el.classList.add('is-in');
+    });
+    setTimeout(() => {
+        document.documentElement.classList.remove('boot-armed');
+        items.forEach((el) => { el.style.transitionDelay = ''; });
+    }, 1000);
+    // 首屏那个面板的内容也跟着落位
+    staggerPanel(document.getElementById(`panel-${currentTab}`));
+    // 标记放在最后: 中途抛错时不设标记, 让 2.5s 兜底把内容放出来
+    window.__appBooted = true;
+}
+
+/** 气泡类型迷你预览: 改下拉时形状跟着变 */
+function syncBubbleMini(selectEl) {
+    const mini = selectEl && selectEl.parentElement ? selectEl.parentElement.querySelector('.bubble-mini') : null;
+    if (!mini) return;
+    mini.dataset.type = selectEl.value;
+    mini.classList.remove('is-changed');
+    void mini.offsetWidth;
+    mini.classList.add('is-changed');
+    setTimeout(() => mini.classList.remove('is-changed'), 340);
+}
+
+/** 统一的空状态: 虚线画框 + 网点 + 一句说明 + 一个下一步动作 */
+function emptyState(emoji, title, hint, action) {
+    const fullSpan = !action || action.fullSpan ? ' col-span-full' : '';
+    const btn = action
+        ? `<button onclick="${action.onclick}" class="btn-primary px-5 py-2 text-sm font-medium">${action.label}</button>`
+        : '';
+    return `<div class="empty-state${fullSpan}">
+        <span class="es-halftone" aria-hidden="true"></span>
+        <div class="es-emoji">${emoji}</div>
+        <p class="es-title">${title}</p>
+        <p class="es-hint">${hint}</p>
+        ${btn}
+    </div>`;
 }
 
 // ========== 任务进度 (后端不推送进度, 一律用 fake progress 显示) ==========
@@ -415,9 +808,9 @@ function downloadNovelText() {
 async function handleLogout() {
     try {
         await fetch('/api/logout', { method: 'POST', credentials: 'include' });
-        window.location.href = '/';
+        window.location.href = '/app';
     } catch (e) {
-        window.location.href = '/';
+        window.location.href = '/app';
     }
 }
 
@@ -426,10 +819,10 @@ async function checkAuth() {
         const response = await fetch('/api/check-auth', { credentials: 'include' });
         const result = await response.json();
         if (!result.logged_in) {
-            window.location.href = '/';
+            window.location.href = '/app';
         }
     } catch (e) {
-        window.location.href = '/';
+        window.location.href = '/app';
     }
 }
 
@@ -457,6 +850,10 @@ function startFakeProgress(progressBarId, textId, minTime = 120000) {
     // 当elapsed=minTime时，progress ≈ 90 * 0.95 → "两分钟走到90%"
     const k = 3.0; // 增长系数 (调到3后, 在minTime处约走完 90% 的95%)
 
+    // 条纹动效表示"任务在跑" (纯 CSS, 不增加定时器负担)
+    const activeBar = document.getElementById(progressBarId);
+    if (activeBar) activeBar.classList.add('is-active');
+
     progressInterval = setInterval(() => {
         const elapsed = Date.now() - startTime;
         const t = elapsed / minTime;
@@ -479,7 +876,13 @@ function finishProgress(progressBarId, textId) {
     clearInterval(progressInterval);
     const bar = document.getElementById(progressBarId);
     const text = document.getElementById(textId);
-    if (bar) bar.style.transform = 'scaleX(1)';
+    if (bar) {
+        bar.style.transform = 'scaleX(1)';
+        // 结束时去掉条纹, 亮度闪一下 (重播需要先移除 class 再强制回流)
+        bar.classList.remove('is-active', 'is-done');
+        void bar.offsetWidth;
+        bar.classList.add('is-done');
+    }
     if (text) text.textContent = '100% - 完成';
 }
 
@@ -644,6 +1047,8 @@ async function testImage() {
 }
 
 function switchTab(tabName) {
+    // 入场方向跟随点击方向: 往右边的 tab 点 → 新面板从右侧滑入
+    const dir = tabs.indexOf(tabName) >= tabs.indexOf(currentTab) ? 'right' : 'left';
     tabs.forEach(t => {
         const topTab = document.getElementById(`tab-${t}`);
         if (topTab) topTab.className = t === tabName ? 'tab-active pb-2 px-1 text-lg transition-all' : 'tab-inactive pb-2 px-1 text-lg transition-all';
@@ -653,10 +1058,14 @@ function switchTab(tabName) {
     });
     const panel = document.getElementById(`panel-${tabName}`);
     panel.classList.remove('hidden');
-    // 重触发入场动画
-    panel.classList.remove('fade-in');
+    // 重触发入场动画 (remove → 强制回流 → add)
+    panel.classList.remove('fade-in', 'panel-in-left', 'panel-in-right');
     void panel.offsetWidth;
-    panel.classList.add('fade-in');
+    panel.classList.add(dir === 'right' ? 'panel-in-right' : 'panel-in-left');
+    currentTab = tabName;
+    staggerPanel(panel);
+    refreshInks();
+    updateWorkspaceUI();
     if (tabName === 'history') refreshCurrentHistoryList();
 }
 
@@ -704,7 +1113,7 @@ async function loadHistoryList() {
     const usernameEl = document.getElementById('history-username');
     if (!container) return;
 
-    container.innerHTML = '<div class="col-span-full text-center text-gray-400 py-12">加载中...</div>';
+    container.innerHTML = '<div class="col-span-full text-center text-gray-400 py-12"><span class="loading-spinner inline-block align-middle mr-2" style="width:14px;height:14px;border-width:2px;"></span>加载中...</div>';
 
     try {
         const response = await fetchWithRetry('/api/history', { credentials: 'include' });
@@ -715,7 +1124,12 @@ async function loadHistoryList() {
         countEl.textContent = (result.works || []).length;
 
         if (!result.works || result.works.length === 0) {
-            container.innerHTML = '<div class="col-span-full text-center text-gray-400 py-12">还没有历史作品，<br>生成漫画后点击「保存当前」即可永久保存</div>';
+            container.innerHTML = emptyState(
+                '📚',
+                '还没有历史作品',
+                '生成漫画后点「保存当前」，作品会永久留在本机；换电脑时整个 static/users 目录拷走即可。',
+                { onclick: 'saveCurrentToHistory()', label: '保存当前作品', fullSpan: true }
+            );
             return;
         }
 
@@ -724,8 +1138,9 @@ async function loadHistoryList() {
         for (const work of result.works) {
             const card = document.createElement('div');
             card.className = 'manga-border bg-gray-50 p-4 flex flex-col';
-            card.innerHTML = `<div class="aspect-video bg-gray-200 mb-3 flex items-center justify-center text-gray-400 text-sm">加载中...</div>`;
+            card.innerHTML = `<div class="aspect-video skeleton mb-3 flex items-center justify-center text-gray-400 text-sm">加载中...</div>`;
             container.appendChild(card);
+            popIn(card);  // 每张卡片拿到数据时各自浮现
 
             try {
                 const detailResp = await fetchWithRetry(`/api/history/${work.work_id}`, { credentials: 'include' });
@@ -807,6 +1222,7 @@ async function saveCurrentState() {
         });
         const result = await response.json();
         if (!result.success) throw new Error(result.error || '保存失败');
+        markSaved();
     } catch (e) {
         console.error('saveCurrentState:', e);
         throw e;
@@ -817,8 +1233,9 @@ async function saveCurrentToHistory() {
     const title = prompt('为这部作品起个名字:', `作品 ${new Date().toLocaleString()}`);
     if (title === null) return;
     try {
-        await startNewWork(title.trim() || undefined);
+        const created = await startNewWork(title.trim() || undefined);
         await saveCurrentState();
+        markSaved((created && created.title) || title.trim() || '未命名作品');
         showToast('已保存到历史记录', 'success');
         loadHistoryList();
     } catch (e) {
@@ -967,7 +1384,7 @@ function switchHistorySub(sub) {
     const writingWrap = document.getElementById('history-writing-wrap');
     const saveBtn = document.getElementById('history-save-current-btn');
     const countLabel = document.getElementById('history-count-label');
-    const activeCls = 'pb-2 px-1 text-base font-bold border-b-[3px] border-black';
+    const activeCls = 'pb-2 px-1 text-base font-bold border-b-[3px] border-transparent';
     const inactiveCls = 'pb-2 px-1 text-base text-gray-500 border-b-[3px] border-transparent hover:border-gray-300';
     if (sub === 'writing') {
         comicBtn.className = inactiveCls;
@@ -986,6 +1403,7 @@ function switchHistorySub(sub) {
         if (countLabel) countLabel.textContent = '部漫画';
         loadHistoryList();
     }
+    refreshInks();
 }
 
 function refreshCurrentHistoryList() {
@@ -997,7 +1415,7 @@ async function loadWritingHistoryList() {
     const container = document.getElementById('history-writing-list');
     const countEl = document.getElementById('history-count');
     if (!container) return;
-    container.innerHTML = '<div class="col-span-full text-center text-gray-400 py-12">加载中...</div>';
+    container.innerHTML = '<div class="col-span-full text-center text-gray-400 py-12"><span class="loading-spinner inline-block align-middle mr-2" style="width:14px;height:14px;border-width:2px;"></span>加载中...</div>';
     try {
         const response = await fetchWithRetry('/api/writings', { credentials: 'include' });
         const result = await response.json();
@@ -1005,7 +1423,12 @@ async function loadWritingHistoryList() {
         const works = result.works || [];
         if (countEl) countEl.textContent = works.length;
         if (works.length === 0) {
-            container.innerHTML = '<div class="col-span-full text-center text-gray-400 py-12">还没有写作记录，<br>在「小说输入」或「AI 写作」里续写 / 润色后会自动保存到这里</div>';
+            container.innerHTML = emptyState(
+                '✍️',
+                '还没有写作记录',
+                '在「小说输入」或「AI 写作」里续写、润色之后会自动存到这里，可以随时翻回来接着改。',
+                { onclick: "switchTab('aiwrite')", label: '去写一段', fullSpan: true }
+            );
             return;
         }
         container.innerHTML = '';
@@ -1029,6 +1452,7 @@ async function loadWritingHistoryList() {
                 </div>
             `;
             container.appendChild(card);
+            popIn(card);  // 写作卡片依次浮现
         }
     } catch (e) {
         container.innerHTML = `<div class="col-span-full text-center text-red-400 py-12">加载失败: ${escapeHtml(String(e.message || e))}</div>`;
@@ -1149,10 +1573,17 @@ async function saveCurrentWriting() {
 
 function showToast(message, type = 'info') {
     const toast = document.getElementById('toast');
-    toast.textContent = message;
+    const icons = { success: '✅', error: '⚠️', info: '💡' };
+    toast.innerHTML = '<div class="toast-inner"><span class="toast-icon"></span><span class="toast-text"></span></div><span class="toast-timer"></span>';
+    toast.querySelector('.toast-icon').textContent = icons[type] || icons.info;
+    toast.querySelector('.toast-text').textContent = message;
     toast.style.background = type === 'error' ? '#dc2626' : type === 'success' ? '#16a34a' : '#1a1a1a';
     toast.style.transform = 'translateY(0)';
     toast.style.opacity = '1';
+    // 入场: 普通/成功弹入, 错误先弹入再抖一下
+    toast.classList.remove('toast-pop', 'shake', 'toast-loading');
+    void toast.offsetWidth;
+    toast.classList.add(type === 'error' ? 'shake' : 'toast-pop');
     // 清除之前可能存在的计时器
     if (toast._hideTimer) {
         clearTimeout(toast._hideTimer);
@@ -1160,7 +1591,12 @@ function showToast(message, type = 'info') {
     }
     // 若为持久 toast, 不自动隐藏
     if (toast.dataset.persistent === '1') return;
+    // 底部进度线跟着 3s 倒计时走完
+    toast.classList.remove('is-counting');
+    void toast.offsetWidth;
+    toast.classList.add('is-counting');
     toast._hideTimer = setTimeout(() => {
+        toast.classList.remove('is-counting');
         toast.style.transform = 'translateY(20px)';
         toast.style.opacity = '0';
         toast._hideTimer = null;
@@ -1170,10 +1606,15 @@ function showToast(message, type = 'info') {
 // 长时间显示的"加载中"提示, 返回 id 用于 dismiss
 function showLoadingToast(message) {
     const toast = document.getElementById('toast');
-    toast.textContent = message;
+    toast.innerHTML = '<div class="toast-inner"><span class="toast-icon">⏳</span><span class="toast-text"></span></div>';
+    toast.querySelector('.toast-text').textContent = message;
     toast.style.background = '#1a1a1a';
     toast.style.transform = 'translateY(0)';
     toast.style.opacity = '1';
+    // 弹入 + 持续呼吸光晕, 表示"还在跑"
+    toast.classList.remove('toast-pop', 'shake', 'is-counting');
+    void toast.offsetWidth;
+    toast.classList.add('toast-loading');
     // 显式标记为"持久toast", 阻止 showToast 默认3秒后自动隐藏
     toast.dataset.persistent = '1';
     return 'toast';
@@ -1187,6 +1628,7 @@ function dismissLoadingToast(id) {
         toast._hideTimer = null;
     }
     toast.dataset.persistent = '';
+    toast.classList.remove('toast-loading');
     toast.style.transform = 'translateY(20px)';
     toast.style.opacity = '0';
 }
@@ -1194,6 +1636,8 @@ function dismissLoadingToast(id) {
 function updateCharCount() {
     const text = document.getElementById('novel-text').value;
     document.getElementById('char-count').textContent = text.length;
+    markDirty();
+    scheduleWorkspaceUI();
 }
 
 function updateAiwriteCharCount() {
@@ -1280,6 +1724,9 @@ function renderStylePresets() {
         groupDiv.appendChild(btnGroup);
         container.appendChild(groupDiv);
     });
+
+    // 风格分组依次浮现
+    playStagger(container);
 }
 
 function renderCustomStyleTags() {
@@ -1378,15 +1825,11 @@ function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-// ===== 漫画模式 (黑白/彩色) =====
-function getComicModeFromDom() {
-    const el = document.querySelector('input[name="comic-mode"]:checked');
-    return (el && el.value === 'color') ? 'color' : 'bw';
-}
-
-function applyComicModeToDom() {
-    document.querySelectorAll('input[name="comic-mode"]').forEach(radio => {
-        radio.checked = (radio.value === comicMode);
+// ===== 单选组 (radio group) 通用渲染 =====
+// 两组单选 (comic-mode / bubble-render-mode) 共享同一份 Tailwind 样式切换
+function applyRadioGroupToDom(groupName, currentValue) {
+    document.querySelectorAll(`input[name="${groupName}"]`).forEach(radio => {
+        radio.checked = (radio.value === currentValue);
         const label = radio.closest('label');
         if (!label) return;
         const selected = radio.checked;
@@ -1403,10 +1846,21 @@ function applyComicModeToDom() {
     });
 }
 
+// ===== 漫画模式 (黑白/彩色) =====
+function getComicModeFromDom() {
+    const el = document.querySelector('input[name="comic-mode"]:checked');
+    return (el && el.value === 'color') ? 'color' : 'bw';
+}
+
+function applyComicModeToDom() {
+    applyRadioGroupToDom('comic-mode', comicMode);
+}
+
 function onComicModeChange() {
     comicMode = getComicModeFromDom();
     applyComicModeToDom();
     updateStyleSummary();
+    scheduleWorkspaceUI();
 }
 
 // ===== 气泡渲染方式 (PIL / API) =====
@@ -1415,30 +1869,28 @@ function getBubbleRenderModeFromDom() {
     return (el && el.value === 'api') ? 'api' : 'pil';
 }
 
-function applyBubbleRenderModeToDom() {
-    document.querySelectorAll('input[name="bubble-render-mode"]').forEach(radio => {
-        radio.checked = (radio.value === bubbleRenderMode);
-        const label = radio.closest('label');
-        if (!label) return;
-        const selected = radio.checked;
-        label.classList.toggle('bg-black', selected);
-        label.classList.toggle('text-white', selected);
-        label.classList.toggle('border-black', selected);
-        label.classList.toggle('border-gray-300', !selected);
-        label.classList.toggle('hover:border-black', !selected);
-        const sub = label.querySelector('span.block.text-xs');
-        if (sub) {
-            sub.classList.toggle('text-gray-500', !selected);
-            sub.classList.toggle('opacity-70', selected);
-        }
+// 画廊中所有 .edit-bubble-btn 的可见性由 bubbleRenderMode 决定, 模式切换时
+// 只翻转按钮, 不重建画廊 (避免每张图、每个 tooltip 全部重渲)
+function _refreshBubbleEditButtons() {
+    document.querySelectorAll('.edit-bubble-btn').forEach(btn => {
+        const idx = +btn.dataset.pageIdx;
+        const visible = bubbleRenderMode === 'pil'
+            && fullPageCleanImages[idx]
+            && fullPageBubbles[idx]
+            && fullPageBubbles[idx].length > 0;
+        btn.classList.toggle('hidden', !visible);
     });
-    // 模式切换后, 画廊里"编辑气泡位置"按钮的可见性需要重新计算
-    if (typeof renderGallery === 'function') renderGallery();
+}
+
+function applyBubbleRenderModeToDom() {
+    applyRadioGroupToDom('bubble-render-mode', bubbleRenderMode);
+    _refreshBubbleEditButtons();
 }
 
 function onBubbleRenderModeChange() {
     bubbleRenderMode = getBubbleRenderModeFromDom();
     applyBubbleRenderModeToDom();
+    scheduleWorkspaceUI();
     if (bubbleRenderMode === 'api') {
         showToast('已切换到"由图像API绘制气泡"模式, 跳过本地PIL, 不可编辑气泡位置', 'info');
     } else {
@@ -1682,6 +2134,9 @@ function renderPlotOptions(scope = 'aiwrite') {
         card.onclick = () => selectPlotOption(idx, scope);
         container.appendChild(card);
     });
+
+    // 3 个剧情方向依次浮现
+    playStagger(container);
 }
 
 function selectPlotOption(idx, scope = 'aiwrite') {
@@ -1833,6 +2288,9 @@ function renderPolishStyles(scope = 'aiwrite') {
         card.onclick = () => selectPolishStyle(idx, scope);
         container.appendChild(card);
     });
+
+    // 润色风格卡片依次浮现
+    playStagger(container);
 }
 
 function selectPolishStyle(idx, scope = 'aiwrite') {
@@ -2045,11 +2503,12 @@ async function startSegment() {
 function renderSegments() {
     const container = document.getElementById('segments-container');
     if (!currentSegments.pages || currentSegments.pages.length === 0) {
-        container.innerHTML = `
-            <div class="text-center py-20 text-gray-400">
-                <div class="text-6xl mb-4">📝</div>
-                <p>请先输入小说内容并点击"开始智能分镜"</p>
-            </div>`;
+        container.innerHTML = emptyState(
+            '📝',
+            '还没有分镜',
+            '回到「小说输入」粘贴正文，点「开始智能分镜」，模型会按情节切页分格，并给每句对白挑一种语气。',
+            { onclick: "switchTab('input')", label: '去输入小说' }
+        );
         return;
     }
 
@@ -2109,16 +2568,27 @@ function renderSegments() {
                             <div class="flex flex-wrap gap-2 mt-1">
                                 ${characters.length === 0 ? `
                                     <span class="text-xs text-gray-400">请先到"角色管理"生成角色</span>
-                                ` : characters.map((char, charIdx) => `
-                                    <label class="flex items-center gap-1 text-xs bg-gray-100 px-2 py-1 rounded cursor-pointer hover:bg-gray-200 ${!char.image_url ? 'opacity-50' : ''}" title="${char.image_url ? '该角色已生成人设图，将作为参考' : '该角色尚未生成人设图，无法作为参考'}">
+                                ` : characters.map((char, charIdx) => {
+                                    const hasImage = !!(char.image_url || '').trim();
+                                    const hasText = !!(char.char_prompt || '').trim() || !!(char.description || '').trim();
+                                    // 三档: 有图(强参考) / 有文字描述(弱参考) / 都没(不能作为参考)
+                                    const refState = hasImage ? 'image' : hasText ? 'text' : 'none';
+                                    const dimClass = refState === 'none' ? 'opacity-40' : '';
+                                    const title = refState === 'image'
+                                        ? '已上传人设图, 角色将以图为准生成'
+                                        : refState === 'text'
+                                            ? '无图但有文字描述, 将按文字提示词生成 (效果较弱)'
+                                            : '既无图也无描述, 不能作为参考';
+                                    return `
+                                    <label class="flex items-center gap-1 text-xs bg-gray-100 px-2 py-1 rounded cursor-pointer hover:bg-gray-200 ${dimClass}" title="${title}">
                                         <input type="checkbox"
                                             ${selectedChars.includes(charIdx) ? 'checked' : ''}
-                                            ${!char.image_url ? 'disabled' : ''}
+                                            ${refState === 'none' ? 'disabled' : ''}
                                             onchange="toggleCharacter(${pageIdx}, ${segIdx}, ${charIdx})"
                                             class="mr-1">
-                                        ${char.name}${!char.image_url ? ' (无图)' : ''}
+                                        ${char.name}${refState === 'image' ? ' 🖼' : refState === 'text' ? ' 📝' : ' (无)'}
                                     </label>
-                                `).join('')}
+                                `;}).join('')}
                             </div>
                         </div>
                         <div class="mb-2">
@@ -2134,18 +2604,22 @@ function renderSegments() {
                                 onchange="updateSegment(${pageIdx}, ${segIdx}, 'dialogue', this.value)"
                                 class="w-full p-2 border border-gray-300 text-sm mt-1 resize-none focus:border-black outline-none"
                                 rows="1">${seg.dialogue || ''}</textarea>
-                            <select onchange="updateSegment(${pageIdx}, ${segIdx}, 'dialogue_type', this.value)"
-                                class="mt-1 text-xs border border-gray-300 focus:border-black outline-none p-1 bg-white"
-                                title="气泡形状(LLM 分镜规划时会主动选, 可手动覆盖)">
-                                <option value="dialogue" ${(!seg.dialogue_type || seg.dialogue_type==='dialogue')?'selected':''}>💬 对话气泡 (圆角矩形)</option>
-                                <option value="thought" ${seg.dialogue_type==='thought'?'selected':''}>💭 心理活动 (云形)</option>
-                                <option value="shout" ${seg.dialogue_type==='shout'?'selected':''}>💥 大喊 (锯齿/爆炸)</option>
-                                <option value="whisper" ${seg.dialogue_type==='whisper'?'selected':''}>🤫 耳语 (虚线圆角)</option>
-                                <option value="burst" ${seg.dialogue_type==='burst'?'selected':''}>⚡ 爆发 (辐射射线)</option>
-                                <option value="narration" ${seg.dialogue_type==='narration'?'selected':''}>📜 旁白叙述 (矩形)</option>
-                                <option value="box" ${seg.dialogue_type==='box'?'selected':''}>▢ 方框 (无尾矩形)</option>
-                                <option value="caption" ${seg.dialogue_type==='caption'?'selected':''}>🔊 拟声词 (黑底白字)</option>
-                            </select>
+                            <div class="mt-1 flex items-center gap-2">
+                                <select onchange="updateSegment(${pageIdx}, ${segIdx}, 'dialogue_type', this.value); syncBubbleMini(this)"
+                                    class="text-xs border border-gray-300 focus:border-black outline-none p-1 bg-white"
+                                    title="气泡形状(LLM 分镜规划时会主动选, 可手动覆盖)">
+                                    <option value="dialogue" ${(!seg.dialogue_type || seg.dialogue_type==='dialogue')?'selected':''}>💬 对话气泡 (圆角矩形)</option>
+                                    <option value="thought" ${seg.dialogue_type==='thought'?'selected':''}>💭 心理活动 (云形)</option>
+                                    <option value="shout" ${seg.dialogue_type==='shout'?'selected':''}>💥 大喊 (锯齿/爆炸)</option>
+                                    <option value="whisper" ${seg.dialogue_type==='whisper'?'selected':''}>🤫 耳语 (虚线圆角)</option>
+                                    <option value="burst" ${seg.dialogue_type==='burst'?'selected':''}>⚡ 爆发 (辐射射线)</option>
+                                    <option value="narration" ${seg.dialogue_type==='narration'?'selected':''}>📜 旁白叙述 (矩形)</option>
+                                    <option value="box" ${seg.dialogue_type==='box'?'selected':''}>▢ 方框 (无尾矩形)</option>
+                                    <option value="caption" ${seg.dialogue_type==='caption'?'selected':''}>🔊 拟声词 (黑底白字)</option>
+                                </select>
+                                <span class="bubble-mini" data-type="${(seg.dialogue_type || 'dialogue').toLowerCase()}" title="气泡形状预览"></span>
+                                <span class="text-[10px] text-gray-400">形状预览</span>
+                            </div>
                         </div>
                         <details class="mb-2" ${seg.camera_angle || seg.composition || seg.mood || seg.shot_scale || seg.lighting || seg.of_type ? 'open' : ''}>
                             <summary class="text-xs text-gray-500 font-medium cursor-pointer select-none">镜头语言 (任务2) ${(seg.camera_angle || seg.composition || seg.mood || seg.shot_scale || seg.lighting || seg.of_type) ? '<span class="text-green-600">●</span>' : ''}</summary>
@@ -2189,6 +2663,10 @@ function renderSegments() {
             </div>
         </div>
     `}).join('');
+
+    // 每页卡片进入视口时级联入场
+    playStagger(container, '.comic-page');
+    scheduleWorkspaceUI();
 }
 
 function updateSegment(pageIdx, segIdx, field, value) {
@@ -2223,6 +2701,7 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
     }
 
     if (!skipLock) isGenerating = true;
+    scheduleWorkspaceUI();
     const spinner = document.getElementById(`full-page-spinner-${pageIdx}`);
     if (spinner) spinner.classList.remove('hidden');
     // 动态按钮, 用 lockButton 锁住避免连点
@@ -2241,10 +2720,19 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
         }
     }
 
-    // 参考角色: 有参考人设图的角色作为参考图发给图像API;
-    // 没有参考人设图的角色, 把其"人设prompt"(char_prompt)作为文字描述一起传上去,
-    // 由后端拼进生成提示词, 让图像模型仍知道该角色长什么样
-    const characterReferences = characters.map(char => {
+    // 参考角色: 优先用本页每个 segment 用户勾选的角色 union (per-panel 角色白名单);
+    // 没勾选过任何角色时, 回退到全角色 (保持向后兼容)。
+    // 这样未勾选的角色就不会污染 prompt 和 reference 列表, 也能省 base64 payload。
+    const pageSel = new Set();
+    (page.segments || []).forEach(seg => {
+        (seg.selected_characters || []).forEach(i => {
+            if (Number.isInteger(i)) pageSel.add(i);
+        });
+    });
+    const idxList = pageSel.size > 0 ? [...pageSel] : characters.map((_, i) => i);
+    const characterReferences = idxList.map(i => {
+        const char = characters[i];
+        if (!char) return null;
         const ref = {
             name: char.name,
             description: char.description,
@@ -2252,7 +2740,7 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
         };
         if (char.image_url) ref.image_url = char.image_url;
         return ref;
-    });
+    }).filter(Boolean);
 
     // 任务进度条 (单页生成, 仅在非批量模式下显示)
     let task = null;
@@ -2304,6 +2792,7 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
         showToast('请求失败: ' + e.message, 'error');
     } finally {
         if (!skipLock) isGenerating = false;
+        scheduleWorkspaceUI();
         if (spinner) spinner.classList.add('hidden');
         unlock();
     }
@@ -2394,6 +2883,7 @@ async function generateAllFullPages() {
     const spinner = document.getElementById('batch-full-spinner');
     spinner.classList.remove('hidden');
     isGenerating = true;
+    scheduleWorkspaceUI();
     batchStopRequested = false;  // 重置停止标志
     const unlock = lockButton(
         document.getElementById('batch-full-btn'),
@@ -2448,6 +2938,7 @@ async function generateAllFullPages() {
     task.finish();
 
     isGenerating = false;
+    scheduleWorkspaceUI();
     spinner.classList.add('hidden');
     unlock();
 
@@ -2541,11 +3032,12 @@ function renderGallery() {
     const hasFullPages = Object.keys(fullPageImages).length > 0;
 
     if (!hasFullPages) {
-        container.innerHTML = `
-            <div class="text-center py-20 text-gray-400">
-                <div class="text-6xl mb-4">🎨</div>
-                <p>请先生成漫画图片</p>
-            </div>`;
+        container.innerHTML = emptyState(
+            '🎨',
+            '还没有成品图',
+            '在「分镜管理」里对某一页点「整页生成」，或直接「批量整页生成」把所有页一次跑完。',
+            { onclick: "switchTab('segments')", label: '去生成整页' }
+        );
         return;
     }
 
@@ -2573,7 +3065,7 @@ function renderGallery() {
                         </div>
                         ${canEdit ? `
                         <div class="mt-3 flex justify-end">
-                            <button onclick="openBubbleEditor(${pageIdx})" class="border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">✏️ 编辑气泡位置</button>
+                            <button data-page-idx="${pageIdx}" onclick="openBubbleEditor(${pageIdx})" class="edit-bubble-btn border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">✏️ 编辑气泡位置</button>
                         </div>
                         ` : ''}
                     </div>
@@ -2584,11 +3076,21 @@ function renderGallery() {
     }
 
     container.innerHTML = html;
+
+    // 整页漫画卡片进入视口时级联入场 (图片本身走 CSS imgReveal 显影)
+    playStagger(container, '.comic-page');
+    markDirty();
+    scheduleWorkspaceUI();
 }
 
 function openModal(src) {
     const modal = document.getElementById('image-modal');
-    document.getElementById('modal-image').src = src;
+    const img = document.getElementById('modal-image');
+    img.src = src;
+    // 大图每次打开都从微缩淡入 (同一 class 不会自动重播, 先移除再强制回流)
+    img.classList.remove('zoom-in');
+    void img.offsetWidth;
+    img.classList.add('zoom-in');
     modal.classList.remove('modal-closing', 'hidden');
 }
 
@@ -2659,7 +3161,6 @@ function openBubbleEditor(pageIdx) {
         wrapEl.querySelectorAll('.bubble-edit-item').forEach(el => el.remove());
         const scale = getScale();
         if (!scale.x || !scale.y) return;
-        const types = ['dialogue', 'thought', 'shout', 'whisper', 'burst', 'narration', 'box', 'caption'];
         editBubbles.forEach((bub, i) => {
             const div = document.createElement('div');
             div.className = 'bubble-edit-item absolute cursor-move select-none';
@@ -2686,7 +3187,7 @@ function openBubbleEditor(pageIdx) {
             sel.title = '切换气泡类型';
             sel.addEventListener('mousedown', e => e.stopPropagation());
             sel.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
-            for (const t of types) {
+            for (const t of BUBBLE_TYPES) {
                 const opt = document.createElement('option');
                 opt.value = t;
                 opt.textContent = _bubbleTypeLabel(t);
@@ -2713,18 +3214,7 @@ function openBubbleEditor(pageIdx) {
     }
 
     function _bubbleTypeLabel(dtype) {
-        // 与 DIALOGUE_TYPE_CATALOG 的 label 对齐, 给用户在编辑器里一个直观识别
-        const labels = {
-            dialogue:  '💬 dialogue',
-            thought:   '💭 thought',
-            shout:     '💥 shout',
-            whisper:   '🤫 whisper',
-            burst:     '⚡ burst',
-            narration: '📜 narration',
-            box:       '▢ box',
-            caption:   '🔊 caption',
-        };
-        return labels[dtype] || ('💬 ' + dtype);
+        return BUBBLE_TYPE_LABELS[dtype] || ('💬 ' + dtype);
     }
 
     function makeDraggable(el, imgEl, bub) {
@@ -3043,16 +3533,18 @@ function clearCharacters() {
 function renderCharacters() {
     const container = document.getElementById('characters-container');
     if (characters.length === 0) {
-        container.innerHTML = `
-            <div class="text-center py-20 text-gray-400 col-span-full">
-                <div class="text-6xl mb-4">🎭</div>
-                <p>请先点击"从小说分析角色"或手动添加角色</p>
-            </div>
-        `;
+        container.innerHTML = emptyState(
+            '🎭',
+            '还没有角色',
+            '点下面的按钮，模型会从小说的前 8000 字里挑出主要出场角色，并给出外貌与性格描述。',
+            { onclick: 'analyzeCharacters()', label: '从小说分析角色', fullSpan: true }
+        );
         return;
     }
 
-    container.innerHTML = characters.map((char, idx) => `
+    container.innerHTML = characters.map((char, idx) => {
+        const safeImageUrl = escapeHtml(char.image_url || '');
+        return `
         <div class="bg-white p-4 manga-border panel-shadow">
             <div class="flex justify-between items-start mb-2">
                 <h3 class="text-lg font-bold">${escapeHtml(char.name)}</h3>
@@ -3061,7 +3553,7 @@ function renderCharacters() {
             <p class="text-sm text-gray-600 mb-3">${escapeHtml(char.description)}</p>
             ${char.image_url ? `
             <div class="mb-3 border-2 border-gray-300 relative group">
-                <img src="${char.image_url}" class="w-full h-48 object-cover cursor-pointer" onclick="openModal('${char.image_url}')">
+                <img src="${safeImageUrl}" class="w-full h-48 object-cover cursor-pointer" onclick="openModal('${safeImageUrl}')">
                 <div class="absolute top-1 right-1 hidden group-hover:flex gap-1">
                     <button onclick="event.stopPropagation(); uploadCharacterImage(${idx})" class="bg-white border-2 border-black text-xs px-2 py-1 hover:bg-yellow-200" title="手动上传/更换图片">📁 换图</button>
                 </div>
@@ -3085,7 +3577,12 @@ function renderCharacters() {
             </div>
             <input type="file" id="char-upload-${idx}" accept="image/*" class="hidden" onchange="handleCharacterImageFile(${idx}, this)">
         </div>
-    `).join('');
+    `;}).join('');
+
+    // 角色卡片级联入场
+    playStagger(container);
+    markDirty();
+    scheduleWorkspaceUI();
 }
 
 function escapeHtml(str) {
@@ -3122,65 +3619,90 @@ function uploadCharacterImage(idx) {
 function handleCharacterImageFile(idx, input) {
     const file = input.files && input.files[0];
     if (!file) return;
+    // 清空 input, 允许再次选同一张图 (放在前面, 失败路径也能再次选择)
+    input.value = '';
     if (!file.type.startsWith('image/')) {
         showToast('请选择图片文件', 'error');
-        input.value = '';
         return;
     }
     // 限制 5MB, 避免 dataURL 太大撑爆 storage
     if (file.size > 5 * 1024 * 1024) {
         showToast('图片超过 5MB, 请压缩后再上传', 'error');
-        input.value = '';
         return;
     }
     const reader = new FileReader();
     reader.onload = (e) => {
         const dataUrl = e.target.result;
-        // 缩放到最长边 1024px, 避免前端 dataURL 占用过多内存
+        // 缩放到最长边 1024px, 保留原格式 (PNG 透明 / EXIF 旋转)
         compressImage(dataUrl, 1024).then((compressed) => {
-            characters[idx].image_url = compressed;
-            renderCharacters();
-            syncResults();
-            showToast(`「${characters[idx].name}」人设图已更新`, 'success');
+            applyCharacterImage(idx, compressed, false);
         }).catch((err) => {
-            // 缩放失败时直接用原图
-            characters[idx].image_url = dataUrl;
-            renderCharacters();
-            syncResults();
-            showToast(`「${characters[idx].name}」人设图已更新 (未压缩)`, 'success');
+            // 缩放失败时直接用原图, 但要再做一次格式判断避免 5MB dataURL 持久化
+            applyCharacterImage(idx, dataUrl, true);
         });
     };
     reader.onerror = () => {
         showToast('读取图片失败', 'error');
     };
     reader.readAsDataURL(file);
-    // 清空 input, 允许再次选同一张图
-    input.value = '';
+}
+
+function applyCharacterImage(idx, dataUrl, isUncompressedFallback) {
+    // idx 在异步 FileReader / compressImage 期间可能 stale (角色被删/重排), 守一道
+    if (!characters[idx]) {
+        showToast('角色已不存在，请重新选择', 'error');
+        return;
+    }
+    // 原图 fallback 时, 若 >500KB 也放弃, 防止 state.json 被撑爆
+    const approxBytes = Math.round(dataUrl.length * 3 / 4);
+    if (isUncompressedFallback && approxBytes > 500 * 1024) {
+        showToast(`「${characters[idx].name}」图片格式不支持，已跳过`, 'error');
+        return;
+    }
+    characters[idx].image_url = dataUrl;
+    renderCharacters();
+    // 关键: 分镜页"出场角色"复选框也依赖 image_url 决定 disabled 状态,
+    // 上传/AI 生成后必须刷新, 否则用户看到 checkbox 仍 disabled
+    if (typeof renderSegments === 'function') renderSegments();
+    syncResults();
+    // 关键: 同步保存到当前作品 state.json, 否则刷新/历史加载就丢失
+    if (typeof saveCurrentState === 'function') {
+        saveCurrentState().catch(e => console.error('save character image failed:', e));
+    }
+    const tail = isUncompressedFallback ? ' (未压缩)' : '';
+    showToast(`「${characters[idx].name}」人设图已更新${tail}`, 'success');
 }
 
 function compressImage(dataUrl, maxSide) {
     return new Promise((resolve, reject) => {
+        // 检测源格式 — PNG 带 alpha 必须保留, JPEG/HEIC 等可直接压 JPEG
+        const srcMatch = (dataUrl.match(/^data:image\/(\w+);/) || [])[1] || '';
+        const srcType = srcMatch.toLowerCase();
+        // 目标格式: png/webp/gif 透明格式 → png; 其它 → jpeg
+        const keepAlpha = (srcType === 'png' || srcType === 'webp' || srcType === 'gif');
+        const outMime = keepAlpha ? 'image/png' : 'image/jpeg';
+        const quality = keepAlpha ? undefined : 0.85;
+
         const img = new Image();
         img.onload = () => {
             try {
-                const w0 = img.naturalWidth, h0 = img.naturalHeight;
-                let w = w0, h = h0;
-                if (Math.max(w, h) > maxSide) {
-                    if (w >= h) {
-                        h = Math.round(h * maxSide / w);
-                        w = maxSide;
-                    } else {
-                        w = Math.round(w * maxSide / h);
-                        h = maxSide;
-                    }
+                // 处理 EXIF 方向: HTMLImageElement 不解析 EXIF, 用 createImageBitmap('from-image')
+                let drawW = img.naturalWidth, drawH = img.naturalHeight;
+                if (typeof createImageBitmap === 'function') {
+                    // fetch blob → bitmap (EXIF 友好); 走 image.src 拿不到 EXIF
+                    fetch(dataUrl).then(r => r.blob()).then(blob => {
+                        createImageBitmap(blob, { imageOrientation: 'from-image' }).then(bmp => {
+                            drawW = bmp.width; drawH = bmp.height;
+                            _drawToDataUrl(bmp, drawW, drawH, maxSide, outMime, quality, resolve, reject);
+                        }).catch(() => {
+                            _drawToDataUrl(img, img.naturalWidth, img.naturalHeight, maxSide, outMime, quality, resolve, reject);
+                        });
+                    }).catch(() => {
+                        _drawToDataUrl(img, img.naturalWidth, img.naturalHeight, maxSide, outMime, quality, resolve, reject);
+                    });
+                } else {
+                    _drawToDataUrl(img, img.naturalWidth, img.naturalHeight, maxSide, outMime, quality, resolve, reject);
                 }
-                const canvas = document.createElement('canvas');
-                canvas.width = w;
-                canvas.height = h;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(img, 0, 0, w, h);
-                // JPEG 质量 0.85, 体积比 PNG 小很多
-                resolve(canvas.toDataURL('image/jpeg', 0.85));
             } catch (e) {
                 reject(e);
             }
@@ -3188,6 +3710,34 @@ function compressImage(dataUrl, maxSide) {
         img.onerror = (e) => reject(new Error('image load failed'));
         img.src = dataUrl;
     });
+}
+
+function _drawToDataUrl(src, w0, h0, maxSide, outMime, quality, resolve, reject) {
+    try {
+        let w = w0, h = h0;
+        if (Math.max(w, h) > maxSide) {
+            if (w >= h) {
+                h = Math.round(h * maxSide / w);
+                w = maxSide;
+            } else {
+                w = Math.round(w * maxSide / h);
+                h = maxSide;
+            }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        // PNG 透明格式用白色背景填底 (避免 toDataURL('image/png') 在某些浏览器把 alpha 变成黑)
+        if (outMime === 'image/jpeg') {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+        }
+        ctx.drawImage(src, 0, 0, w, h);
+        resolve(canvas.toDataURL(outMime, quality));
+    } catch (e) {
+        reject(e);
+    }
 }
 
 async function generateCharacterImage(idx, btn = null) {
@@ -3202,6 +3752,14 @@ async function generateCharacterImage(idx, btn = null) {
         showToast('请先配置图像生成API', 'error');
         openConfigModal();
         return;
+    }
+
+    // 防重入: 同一个按钮在请求进行中点击, 直接放弃
+    if (btn && btn.dataset.busy === '1') return;
+    if (btn) {
+        btn.dataset.busy = '1';
+        btn.disabled = true;
+        btn.classList.add('opacity-60', 'cursor-not-allowed');
     }
 
     // 显示"基线图生成中"提示
@@ -3228,7 +3786,13 @@ async function generateCharacterImage(idx, btn = null) {
         if (result.success) {
             characters[idx].image_url = result.image_url;
             renderCharacters();
+            // 关键: 分镜页复选框也需刷新, 否则上传后仍是 disabled
+            if (typeof renderSegments === 'function') renderSegments();
             syncResults();
+            // 关键: 同步保存到当前作品 state.json, 否则刷新/历史加载就丢失
+            if (typeof saveCurrentState === 'function') {
+                saveCurrentState().catch(e => console.error('save AI char image failed:', e));
+            }
             const attemptInfo = result.attempts > 1
                 ? ` (尝试 ${result.attempts}/${result.max_attempts || 3} 次拿到合格基线图)`
                 : '';
@@ -3243,6 +3807,7 @@ async function generateCharacterImage(idx, btn = null) {
         showToast('请求失败: ' + e.message, 'error');
     } finally {
         if (btn) {
+            btn.dataset.busy = '';
             btn.disabled = false;
             btn.classList.remove('opacity-60', 'cursor-not-allowed');
             // 重新渲染以恢复原 label (生成人设图 / 重新生成人设图)
@@ -3365,8 +3930,63 @@ window.addEventListener('DOMContentLoaded', () => {
     }
     renderStylePresets();
     updateStyleSummary();
-    loadConfig();
+    // 配置从服务端回来后, 接口状态与模式 chip 再算一次
+    Promise.resolve(loadConfig()).then(scheduleWorkspaceUI, scheduleWorkspaceUI);
     updateCharCount();
     mirrorNovelText();
     recoverSession();  // 尝试恢复之前可能因内网穿透断开丢失的会话数据
+
+    // ===== 工作台外壳: 状态条 / 流程条 / 滑动指示器 / 快捷键 =====
+    updateWorkspaceUI();
+    renderWorkMeta();
+    refreshInks();
+    bootIntro();
+
+    // 指示器要在字体加载完、以及每次改变窗口尺寸后重新量一次
+    if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(refreshInks).catch(() => {});
+    }
+    let _inkResizeTimer = null;
+    window.addEventListener('resize', () => {
+        clearTimeout(_inkResizeTimer);
+        _inkResizeTimer = setTimeout(refreshInks, 120);
+    });
+
+    // 状态条: 滚过首屏后滑出 (IntersectionObserver, 不用 scroll 监听)
+    const sentinel = document.getElementById('workflow');
+    const bar = document.getElementById('workspace-bar');
+    if (sentinel && bar && typeof IntersectionObserver !== 'undefined') {
+        const io = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+                const show = !entry.isIntersecting && entry.boundingClientRect.top < 0;
+                bar.classList.toggle('is-visible', show);
+            });
+        }, { threshold: 0 });
+        io.observe(sentinel);
+    }
+
+    // 主按钮墨点涟漪
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest ? e.target.closest('.btn-primary') : null;
+        if (!btn || motionReduced()) return;
+        const rect = btn.getBoundingClientRect();
+        const ripple = document.createElement('span');
+        ripple.className = 'ink-ripple';
+        ripple.style.left = (e.clientX - rect.left) + 'px';
+        ripple.style.top = (e.clientY - rect.top) + 'px';
+        btn.appendChild(ripple);
+        setTimeout(() => ripple.remove(), 700);
+    });
+
+    // 快捷键: Ctrl/⌘ + Enter 执行当前步骤, Ctrl/⌘ + S 保存当前进度
+    document.addEventListener('keydown', (e) => {
+        if (!(e.ctrlKey || e.metaKey)) return;
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            runPrimaryAction();
+        } else if (e.key === 's' || e.key === 'S') {
+            e.preventDefault();
+            quickSave();
+        }
+    });
 });
