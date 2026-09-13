@@ -5,26 +5,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>登录 - 小说⇄漫画 双向转换器</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='design-system.css') }}">
     <style>
-        body { font-family: 'Noto Sans SC', sans-serif; }
-        .manga-border { border: 2px solid #1a1a1a; }
-        .panel-shadow { box-shadow: 4px 4px 0px #1a1a1a; }
-        .btn-primary {
-            background: #1a1a1a;
-            color: white;
-            transition: all 0.2s;
+        /* ============================================================================
+           login.html · 页面专属样式 (大部分令牌与动效已在 design-system.css)
+           ============================================================================ */
+
+        body {
+            font-family: 'Noto Sans SC', sans-serif;
+            background-color: #f3f4f6;
+            /* 极淡的网点纹理, 呼应漫画印刷主题 */
+            background-image: radial-gradient(rgba(26,26,26,0.06) 1px, transparent 1.2px);
+            background-size: 14px 14px;
+            background-position: 0 0;
         }
-        .btn-primary:hover {
-            transform: translate(-2px, -2px);
-            box-shadow: 4px 4px 0px #666;
+
+        /* 登录卡片专用入场 (比 cardRise 更明显的"抬升") */
+        @keyframes loginCardRise {
+            from { opacity: 0; transform: translate3d(0, 24px, 0) scale(0.97); }
+            to   { opacity: 1; transform: none; }
         }
-        .btn-primary:disabled {
-            transform: none;
-            box-shadow: none;
-            opacity: 0.6;
-            cursor: not-allowed;
-        }
+        .login-card { animation: loginCardRise 0.55s var(--ease-out-expo) backwards; }
+
+        /* 消息条滑入 */
+        @keyframes msgIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+        #error-message:not(.hidden), #success-message:not(.hidden) { animation: msgIn 0.28s var(--ease-out-expo); }
+
+        /* 切换链接 */
         .switch-link {
             color: #1a1a1a;
             text-decoration: underline;
@@ -33,54 +41,19 @@
         }
         .switch-link:hover { color: #666; }
 
-        /* ===== 入场与反馈动效 ===== */
-        :root {
-            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-            --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+        /* 提示行 (页面底部小字) */
+        .footnote {
+            color: #6b7280;
+            font-size: .82rem;
+            text-align: center;
+            margin-top: 1rem;
+            letter-spacing: .02em;
         }
-        @keyframes cardRise {
-            from { opacity: 0; transform: translate3d(0, 18px, 0) scale(0.985); }
-            to { opacity: 1; transform: none; }
-        }
-        @keyframes fieldRise {
-            from { opacity: 0; transform: translate3d(0, 10px, 0); }
-            to { opacity: 1; transform: none; }
-        }
-        @keyframes shakeX {
-            10%, 90% { transform: translateX(-2px); }
-            20%, 80% { transform: translateX(3px); }
-            30%, 50%, 70% { transform: translateX(-5px); }
-            40%, 60% { transform: translateX(5px); }
-        }
-        @keyframes msgIn {
-            from { opacity: 0; transform: translateY(-6px); }
-            to { opacity: 1; transform: none; }
-        }
-        @keyframes logoPop {
-            0% { transform: rotate(-12deg) scale(0.82); opacity: 0; }
-            60% { transform: rotate(4deg) scale(1.06); }
-            100% { transform: none; opacity: 1; }
-        }
-        .login-card { animation: cardRise 0.5s var(--ease-out-expo) backwards; }
-        .login-card .logo-mark { animation: logoPop 0.6s var(--ease-spring) 0.1s backwards; }
-        /* 表单元素依次浮现 */
+
+        /* 表单字段依次浮现 (沿用 JS 设的 --i) */
         .login-card form > * {
             animation: fieldRise 0.45s var(--ease-out-expo) backwards;
             animation-delay: calc(90ms + var(--i, 0) * 70ms);
-        }
-        #error-message:not(.hidden), #success-message:not(.hidden) { animation: msgIn 0.28s var(--ease-out-expo); }
-        .btn-primary:active { transform: translate(0, 0) scale(0.985); box-shadow: 1px 1px 0 #666; }
-        .shake { animation: shakeX 0.5s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
-        :focus-visible { outline: 2px solid #1a1a1a; outline-offset: 2px; }
-
-        @media (prefers-reduced-motion: reduce) {
-            *, *::before, *::after {
-                animation-duration: 0.01ms !important;
-                animation-iteration-count: 1 !important;
-                animation-delay: 0s !important;
-                transition-duration: 0.01ms !important;
-                transition-delay: 0s !important;
-            }
         }
     </style>
 </head>
@@ -88,7 +61,7 @@
     <div class="max-w-md w-full mx-4">
         <div class="bg-white p-8 manga-border panel-shadow login-card">
             <div class="flex items-center gap-3 mb-6 justify-center">
-                <div class="logo-mark w-12 h-12 bg-black text-white flex items-center justify-center text-2xl font-bold manga-border">⇄</div>
+                <div class="logo-mark logo-pop w-12 h-12 bg-black text-white flex items-center justify-center text-2xl font-bold manga-border">⇄</div>
                 <h1 class="text-2xl font-bold">小说⇄漫画 双向转换器</h1>
             </div>
 
@@ -285,5 +258,6 @@
             }
         }
     </script>
+    <script src="{{ url_for('static', filename='transitions.js') }}"></script>
 </body>
 </html>

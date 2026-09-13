@@ -62,16 +62,17 @@ let comicMode = 'bw';
 let bubbleRenderMode = 'pil';  // 'pil' | 'api' — 气泡渲染方式, 'pil'=本地PIL叠加, 'api'=图像API自画
 
 // 气泡类型枚举 + 编辑器下拉显示标签 (与 app.py 的 BUBBLE_DRAWERS / DIALOGUE_TYPE_CATALOG 对齐)
+// 注: <option> 不支持内联 SVG, 用纯几何 Unicode 替代 emoji, 跨平台一致
 const BUBBLE_TYPES = ['dialogue', 'thought', 'shout', 'whisper', 'burst', 'narration', 'box', 'caption'];
 const BUBBLE_TYPE_LABELS = {
-    dialogue:  '💬 dialogue',
-    thought:   '💭 thought',
-    shout:     '💥 shout',
-    whisper:   '🤫 whisper',
+    dialogue:  '○ dialogue',
+    thought:   '◌ thought',
+    shout:     '※ shout',
+    whisper:   '· whisper',
     burst:     '⚡ burst',
-    narration: '📜 narration',
+    narration: '▭ narration',
     box:       '▢ box',
-    caption:   '🔊 caption',
+    caption:   '▲ caption',
 };
 
 /**
@@ -202,6 +203,13 @@ function markSaved(title) {
         localStorage.setItem('manga_work_saved_at', workMeta.savedAt);
     } catch (e) { /* 忽略 */ }
     renderWorkMeta();
+    // 保存成功时给"已保存"那一行来一下弹性反馈
+    const wbSave = document.getElementById('wb-save');
+    if (wbSave && window.__t2cTransitions) {
+        wbSave.style.color = '#15803d';  // 短暂变绿
+        window.__t2cTransitions.celebrateSave(wbSave);
+        setTimeout(() => { wbSave.style.color = ''; }, 1100);
+    }
 }
 
 /** 静默保存当前进度 (不弹标题输入框) */
@@ -463,15 +471,17 @@ function syncBubbleMini(selectEl) {
     setTimeout(() => mini.classList.remove('is-changed'), 340);
 }
 
-/** 统一的空状态: 虚线画框 + 网点 + 一句说明 + 一个下一步动作 */
-function emptyState(emoji, title, hint, action) {
+/** 统一的空状态: 虚线画框 + 网点 + 一句说明 + 一个下一步动作
+ * 第二参 icon 接受 data-icon 名字 (参见 icons.js), 由 hydrateIcons 渲染 SVG
+ */
+function emptyState(icon, title, hint, action) {
     const fullSpan = !action || action.fullSpan ? ' col-span-full' : '';
     const btn = action
         ? `<button onclick="${action.onclick}" class="btn-primary px-5 py-2 text-sm font-medium">${action.label}</button>`
         : '';
     return `<div class="empty-state${fullSpan}">
         <span class="es-halftone" aria-hidden="true"></span>
-        <div class="es-emoji">${emoji}</div>
+        <div class="es-icon" data-icon="${icon}"></div>
         <p class="es-title">${title}</p>
         <p class="es-hint">${hint}</p>
         ${btn}
@@ -987,15 +997,15 @@ async function testLLM() {
         const result = await response.json();
         finishProgress('test-llm-progress-bar', 'test-llm-progress-text');
         if (result.success) {
-            resultDiv.innerHTML = `<div class="p-3 bg-green-50 border border-green-200 text-green-700 rounded">✅ ${result.message}</div>`;
+            resultDiv.innerHTML = `<div class="p-3 bg-green-50 border border-green-200 text-green-700 rounded"><span data-icon="check-circle" class="inline-block align-middle mr-1" style="color:#16a34a;width:14px;height:14px;"></span> ${result.message}</div>`;
             showToast('LLM API测试成功！', 'success');
         } else {
-            resultDiv.innerHTML = `<div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded">❌ ${result.error}</div>`;
+            resultDiv.innerHTML = `<div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded"><span data-icon="x-circle" class="inline-block align-middle mr-1" style="color:#dc2626;width:14px;height:14px;"></span> ${result.error}</div>`;
             showToast('LLM API测试失败', 'error');
         }
     } catch (e) {
         finishProgress('test-llm-progress-bar', 'test-llm-progress-text');
-        resultDiv.innerHTML = `<div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded">❌ 请求失败：${e.message}</div>`;
+        resultDiv.innerHTML = `<div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded"><span data-icon="x-circle" class="inline-block align-middle mr-1" style="color:#dc2626;width:14px;height:14px;"></span> 请求失败：${e.message}</div>`;
         showToast('LLM API测试失败', 'error');
     } finally {
         btn.disabled = false;
@@ -1030,15 +1040,15 @@ async function testImage() {
         const result = await response.json();
         finishProgress('test-image-progress-bar', 'test-image-progress-text');
         if (result.success) {
-            resultDiv.innerHTML = `<div class="p-3 bg-green-50 border border-green-200 text-green-700 rounded">✅ ${result.message}</div>`;
+            resultDiv.innerHTML = `<div class="p-3 bg-green-50 border border-green-200 text-green-700 rounded"><span data-icon="check-circle" class="inline-block align-middle mr-1" style="color:#16a34a;width:14px;height:14px;"></span> ${result.message}</div>`;
             showToast('Image API测试成功！', 'success');
         } else {
-            resultDiv.innerHTML = `<div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded">❌ ${result.error}</div>`;
+            resultDiv.innerHTML = `<div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded"><span data-icon="x-circle" class="inline-block align-middle mr-1" style="color:#dc2626;width:14px;height:14px;"></span> ${result.error}</div>`;
             showToast('Image API测试失败', 'error');
         }
     } catch (e) {
         finishProgress('test-image-progress-bar', 'test-image-progress-text');
-        resultDiv.innerHTML = `<div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded">❌ 请求失败：${e.message}</div>`;
+        resultDiv.innerHTML = `<div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded"><span data-icon="x-circle" class="inline-block align-middle mr-1" style="color:#dc2626;width:14px;height:14px;"></span> 请求失败：${e.message}</div>`;
         showToast('Image API测试失败', 'error');
     } finally {
         btn.disabled = false;
@@ -1047,26 +1057,45 @@ async function testImage() {
 }
 
 function switchTab(tabName) {
+    if (tabName === currentTab) return;
     // 入场方向跟随点击方向: 往右边的 tab 点 → 新面板从右侧滑入
     const dir = tabs.indexOf(tabName) >= tabs.indexOf(currentTab) ? 'right' : 'left';
+    const fromTab = currentTab;
+    // 顶部 tab / 移动 tab 样式立即切换 (独立于面板退场动画)
     tabs.forEach(t => {
         const topTab = document.getElementById(`tab-${t}`);
         if (topTab) topTab.className = t === tabName ? 'tab-active pb-2 px-1 text-lg transition-all' : 'tab-inactive pb-2 px-1 text-lg transition-all';
         const mtab = document.getElementById(`mtab-${t}`);
-        if (mtab) mtab.className = t === tabName ? 'mtab-active' : 'mtab-inactive';
-        document.getElementById(`panel-${t}`).classList.add('hidden');
+        if (mtab) mTabClass(mtab, t === tabName);
     });
-    const panel = document.getElementById(`panel-${tabName}`);
-    panel.classList.remove('hidden');
-    // 重触发入场动画 (remove → 强制回流 → add)
-    panel.classList.remove('fade-in', 'panel-in-left', 'panel-in-right');
-    void panel.offsetWidth;
-    panel.classList.add(dir === 'right' ? 'panel-in-right' : 'panel-in-left');
-    currentTab = tabName;
-    staggerPanel(panel);
-    refreshInks();
-    updateWorkspaceUI();
-    if (tabName === 'history') refreshCurrentHistoryList();
+    // 走 __t2cTransitions.swapPanel 编排: 旧面板退出 → 新面板进入 → 首屏子级联
+    if (window.__t2cTransitions) {
+        window.__t2cTransitions.swapPanel(`panel-${fromTab}`, `panel-${tabName}`, dir).then(() => {
+            currentTab = tabName;
+            staggerPanel(document.getElementById(`panel-${tabName}`));
+            refreshInks();
+            updateWorkspaceUI();
+            if (tabName === 'history') refreshCurrentHistoryList();
+        });
+    } else {
+        // 兜底 (transitions.js 加载失败时)
+        document.getElementById(`panel-${fromTab}`).classList.add('hidden');
+        const panel = document.getElementById(`panel-${tabName}`);
+        panel.classList.remove('hidden');
+        panel.classList.remove('fade-in', 'panel-in-left', 'panel-in-right');
+        void panel.offsetWidth;
+        panel.classList.add(dir === 'right' ? 'panel-in-right' : 'panel-in-left');
+        currentTab = tabName;
+        staggerPanel(panel);
+        refreshInks();
+        updateWorkspaceUI();
+        if (tabName === 'history') refreshCurrentHistoryList();
+    }
+}
+
+// 移动端 tab className 切换 (抽出来便于复用, 同时应用 mtab-spring 弹跳)
+function mTabClass(el, isActive) {
+    el.className = isActive ? 'mtab-active mtab-spring' : 'mtab-inactive';
 }
 
 // 模态框关闭动画: 先播放淡出过渡, 结束后再 display:none; 减少动效偏好时直接隐藏
@@ -1090,8 +1119,12 @@ function animateCloseModal(modalId, onClose) {
 }
 
 function openConfigModal() {
-    const modal = document.getElementById('config-modal');
-    modal.classList.remove('modal-closing', 'hidden');
+    if (window.__t2cTransitions) {
+        window.__t2cTransitions.openModal('config-modal');
+    } else {
+        const modal = document.getElementById('config-modal');
+        modal.classList.remove('modal-closing', 'hidden');
+    }
 }
 
 function closeConfigModal() {
@@ -1125,7 +1158,7 @@ async function loadHistoryList() {
 
         if (!result.works || result.works.length === 0) {
             container.innerHTML = emptyState(
-                '📚',
+                'books',
                 '还没有历史作品',
                 '生成漫画后点「保存当前」，作品会永久留在本机；换电脑时整个 static/users 目录拷走即可。',
                 { onclick: 'saveCurrentToHistory()', label: '保存当前作品', fullSpan: true }
@@ -1156,15 +1189,23 @@ async function loadHistoryList() {
                             ${firstImg ? `<img src="${firstImg}" class="w-full h-full object-cover" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'text-gray-400 text-sm\\'>无预览</div>'">` : '<div class="text-gray-400 text-sm">无图片</div>'}
                         </div>
                         <h3 class="font-bold text-base mb-1 truncate" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
-                        <p class="text-xs text-gray-500 mb-1">🕐 创建: ${created}</p>
-                        <p class="text-xs text-gray-500 mb-3">📝 更新: ${updated}</p>
-                        <p class="text-xs text-gray-500 mb-3">🖼 ${imgCount} 张图片</p>
+                        <p class="text-xs text-gray-500 mb-1"><span data-icon="clock" class="inline-block align-[-2px] mr-1" style="width:11px;height:11px;"></span>创建: ${created}</p>
+                        <p class="text-xs text-gray-500 mb-3"><span data-icon="note" class="inline-block align-[-2px] mr-1" style="width:11px;height:11px;"></span>更新: ${updated}</p>
+                        <p class="text-xs text-gray-500 mb-3"><span data-icon="image" class="inline-block align-[-2px] mr-1" style="width:11px;height:11px;"></span>${imgCount} 张图片</p>
+                        <div class="aspect-video bg-gray-200 mb-3 flex items-center justify-center overflow-hidden">
+                            ${firstImg ? `<img src="${firstImg}" class="w-full h-full object-cover" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'text-gray-400 text-sm\\'>无预览</div>'">` : '<div class="text-gray-400 text-sm">无图片</div>'}
+                        </div>
+                        <h3 class="font-bold text-base mb-1 truncate" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
+                        <p class="text-xs text-gray-500 mb-1"><span data-icon="clock" class="inline-block align-[-2px] mr-1" style="width:11px;height:11px;"></span>创建: ${created}</p>
+                        <p class="text-xs text-gray-500 mb-3"><span data-icon="note" class="inline-block align-[-2px] mr-1" style="width:11px;height:11px;"></span>更新: ${updated}</p>
+                        <p class="text-xs text-gray-500 mb-3"><span data-icon="image" class="inline-block align-[-2px] mr-1" style="width:11px;height:11px;"></span>${imgCount} 张图片</p>
                         <div class="flex gap-2 mt-auto">
-                            <button onclick="loadHistoryWork('${work.work_id}')" class="flex-1 border-2 border-black bg-black text-white px-2 py-1.5 text-xs font-medium hover:bg-gray-800 transition-colors">📂 加载</button>
-                            <button onclick="renameHistoryWork('${work.work_id}','${escapeHtml(title)}')" class="border-2 border-gray-300 hover:border-black px-2 py-1.5 text-xs transition-colors">✏</button>
-                            <button onclick="deleteHistoryWork('${work.work_id}')" class="border-2 border-gray-300 hover:border-red-500 hover:text-red-500 px-2 py-1.5 text-xs transition-colors">🗑</button>
+                            <button onclick="loadHistoryWork('${work.work_id}')" class="flex-1 border-2 border-black bg-black text-white px-2 py-1.5 text-xs font-medium hover:bg-gray-800 transition-colors flex items-center justify-center gap-1"><span data-icon="folder-open" style="width:12px;height:12px;"></span>加载</button>
+                            <button onclick="renameHistoryWork('${work.work_id}','${escapeHtml(title)}')" class="border-2 border-gray-300 hover:border-black px-2 py-1.5 text-xs transition-colors" title="重命名"><span data-icon="pencil" style="width:12px;height:12px;"></span></button>
+                            <button onclick="deleteHistoryWork('${work.work_id}')" class="border-2 border-gray-300 hover:border-red-500 hover:text-red-500 px-2 py-1.5 text-xs transition-colors" title="删除"><span data-icon="trash" style="width:12px;height:12px;"></span></button>
                         </div>
                     `;
+                    hydrateIcons(card);  // 渲染动态插入的 data-icon 为 SVG
                 } else {
                     card.innerHTML = '<div class="text-red-500 text-sm p-4">加载失败</div>';
                 }
@@ -1172,6 +1213,7 @@ async function loadHistoryList() {
                 card.innerHTML = `<div class="text-red-500 text-sm p-4">${escapeHtml(String(e.message || e))}</div>`;
             }
         }
+        hydrateIcons(container);  // 兜底: 任何上面漏的也补上
     } catch (e) {
         container.innerHTML = `<div class="col-span-full text-center text-red-400 py-12">加载失败: ${escapeHtml(String(e.message || e))}</div>`;
     }
@@ -1424,7 +1466,7 @@ async function loadWritingHistoryList() {
         if (countEl) countEl.textContent = works.length;
         if (works.length === 0) {
             container.innerHTML = emptyState(
-                '✍️',
+                'pen',
                 '还没有写作记录',
                 '在「小说输入」或「AI 写作」里续写、润色之后会自动存到这里，可以随时翻回来接着改。',
                 { onclick: "switchTab('aiwrite')", label: '去写一段', fullSpan: true }
@@ -1440,20 +1482,22 @@ async function loadWritingHistoryList() {
             const updated = formatDateTime(w.updated_at);
             const chars = w.content_len || 0;
             card.innerHTML = `
-                <div class="mb-2 w-10 h-10 bg-black text-white flex items-center justify-center text-xl">✍️</div>
+                <div class="mb-2 w-10 h-10 bg-black text-white flex items-center justify-center" data-icon="pen" style="width:40px;height:40px;"></div>
                 <h3 class="font-bold text-base mb-1 truncate" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
-                <p class="text-xs text-gray-500 mb-1">🕐 创建: ${created}</p>
-                <p class="text-xs text-gray-500 mb-1">📝 更新: ${updated}</p>
-                <p class="text-xs text-gray-500 mb-3">📄 ${chars} 字</p>
+                <p class="text-xs text-gray-500 mb-1"><span data-icon="clock" class="inline-block align-[-2px] mr-1" style="width:11px;height:11px;"></span>创建: ${created}</p>
+                <p class="text-xs text-gray-500 mb-1"><span data-icon="note" class="inline-block align-[-2px] mr-1" style="width:11px;height:11px;"></span>更新: ${updated}</p>
+                <p class="text-xs text-gray-500 mb-3"><span data-icon="document" class="inline-block align-[-2px] mr-1" style="width:11px;height:11px;"></span>${chars} 字</p>
                 <div class="flex gap-2 mt-auto">
-                    <button onclick="loadWritingWork('${w.writing_id}')" class="flex-1 border-2 border-black bg-black text-white px-2 py-1.5 text-xs font-medium hover:bg-gray-800 transition-colors">📂 加载</button>
-                    <button onclick="renameWritingWork('${w.writing_id}','${escapeHtml(title)}')" class="border-2 border-gray-300 hover:border-black px-2 py-1.5 text-xs transition-colors">✏</button>
-                    <button onclick="deleteWritingWork('${w.writing_id}')" class="border-2 border-gray-300 hover:border-red-500 hover:text-red-500 px-2 py-1.5 text-xs transition-colors">🗑</button>
+                    <button onclick="loadWritingWork('${w.writing_id}')" class="flex-1 border-2 border-black bg-black text-white px-2 py-1.5 text-xs font-medium hover:bg-gray-800 transition-colors flex items-center justify-center gap-1"><span data-icon="folder-open" style="width:12px;height:12px;"></span>加载</button>
+                    <button onclick="renameWritingWork('${w.writing_id}','${escapeHtml(title)}')" class="border-2 border-gray-300 hover:border-black px-2 py-1.5 text-xs transition-colors" title="重命名"><span data-icon="pencil" style="width:12px;height:12px;"></span></button>
+                    <button onclick="deleteWritingWork('${w.writing_id}')" class="border-2 border-gray-300 hover:border-red-500 hover:text-red-500 px-2 py-1.5 text-xs transition-colors" title="删除"><span data-icon="trash" style="width:12px;height:12px;"></span></button>
                 </div>
             `;
             container.appendChild(card);
+            hydrateIcons(card);  // 渲染动态插入的 data-icon 为 SVG
             popIn(card);  // 写作卡片依次浮现
         }
+        hydrateIcons(container);  // 兜底
     } catch (e) {
         container.innerHTML = `<div class="col-span-full text-center text-red-400 py-12">加载失败: ${escapeHtml(String(e.message || e))}</div>`;
     }
@@ -1573,9 +1617,11 @@ async function saveCurrentWriting() {
 
 function showToast(message, type = 'info') {
     const toast = document.getElementById('toast');
-    const icons = { success: '✅', error: '⚠️', info: '💡' };
-    toast.innerHTML = '<div class="toast-inner"><span class="toast-icon"></span><span class="toast-text"></span></div><span class="toast-timer"></span>';
-    toast.querySelector('.toast-icon').textContent = icons[type] || icons.info;
+    const icons = { success: 'check-circle', error: 'warning', info: 'lightbulb' };
+    const iconName = icons[type] || icons.info;
+    toast.innerHTML = `<div class="toast-inner"><span class="toast-icon" data-icon="${iconName}"></span><span class="toast-text"></span></div><span class="toast-timer"></span>`;
+    // 触发 hydrateIcons 渲染 SVG
+    if (window.hydrateIcons) hydrateIcons(toast);
     toast.querySelector('.toast-text').textContent = message;
     toast.style.background = type === 'error' ? '#dc2626' : type === 'success' ? '#16a34a' : '#1a1a1a';
     toast.style.transform = 'translateY(0)';
@@ -1699,7 +1745,7 @@ function renderStylePresets() {
         const title = document.createElement('div');
         title.className = 'text-xs font-bold text-gray-700 mb-2 flex items-center gap-1';
         const categoryEmoji = {
-            '日漫': '🇯🇵', '美漫': '🇺🇸', '韩漫': '🇰🇷', '国漫': '🇨🇳', '其他': '🎨'
+            '日漫': 'A', '美漫': 'B', '韩漫': 'C', '国漫': 'D', '其他': 'E'
         }[category] || '🎨';
         title.innerHTML = `<span>${categoryEmoji}</span><span>${category}</span>`;
         groupDiv.appendChild(title);
@@ -2089,7 +2135,7 @@ async function genPlotOptions(scope = 'aiwrite') {
     const labelEl = awEl(scope, 'genOptionsLabel');
     const spinner = awEl(scope, 'genOptionsSpinner');
     spinner.classList.remove('hidden');
-    const unlock = lockButton(btn, labelEl, '⏳ 构思中…');
+    const unlock = lockButton(btn, labelEl, '构思中…');
     const toastId = showLoadingToast('正在构思剧情发展方向…');
 
     try {
@@ -2173,7 +2219,7 @@ async function continueNovel(scope = 'aiwrite') {
     const labelEl = awEl(scope, 'continueLabel');
     const spinner = awEl(scope, 'continueSpinner');
     spinner.classList.remove('hidden');
-    const unlock = lockButton(btn, labelEl, '⏳ 续写中…');
+    const unlock = lockButton(btn, labelEl, '续写中…');
     const toastId = showLoadingToast('AI 续写中，约需 30-60 秒…');
 
     try {
@@ -2243,7 +2289,7 @@ async function genPolishStyles(scope = 'aiwrite') {
     const labelEl = awEl(scope, 'genStylesLabel');
     const spinner = awEl(scope, 'genStylesSpinner');
     spinner.classList.remove('hidden');
-    const unlock = lockButton(btn, labelEl, '⏳ 构思中…');
+    const unlock = lockButton(btn, labelEl, '构思中…');
     const toastId = showLoadingToast('正在构思润色风格…');
 
     try {
@@ -2333,7 +2379,7 @@ async function polishNovel(scope = 'aiwrite') {
     const labelEl = awEl(scope, 'polishLabel');
     const spinner = awEl(scope, 'polishSpinner');
     spinner.classList.remove('hidden');
-    const unlock = lockButton(btn, labelEl, '⏳ 润色中…');
+    const unlock = lockButton(btn, labelEl, '润色中…');
 
     // 分块润色可能耗时较长, 用进度条展示
     const task = registerTaskProgress(awId(scope, 'progress'));
@@ -2375,7 +2421,11 @@ function openPolishCompare() {
     if (!modal) return;
     document.getElementById('polish-original').textContent = _polishOriginal;
     document.getElementById('polish-result').textContent = _polishResult;
-    modal.classList.remove('modal-closing', 'hidden');
+    if (window.__t2cTransitions) {
+        window.__t2cTransitions.openModal('polish-compare-modal');
+    } else {
+        modal.classList.remove('modal-closing', 'hidden');
+    }
 }
 
 function cancelPolishCompare() {
@@ -2419,7 +2469,7 @@ async function startSegment() {
     const unlock = lockButton(
         document.getElementById('start-segment-btn'),
         document.getElementById('start-segment-label'),
-        '⏳ 分镜生成中…'
+        '分镜生成中…'
     );
 
     // 任务进度条 (后端不推送, fake progress 展示)
@@ -2502,9 +2552,11 @@ async function startSegment() {
 
 function renderSegments() {
     const container = document.getElementById('segments-container');
+    // 重新渲染前清掉 stagger 标记, 让下次 playStagger 能再触发级联
+    if (window.__t2cTransitions) window.__t2cTransitions.resetStagger(container);
     if (!currentSegments.pages || currentSegments.pages.length === 0) {
         container.innerHTML = emptyState(
-            '📝',
+            'note',
             '还没有分镜',
             '回到「小说输入」粘贴正文，点「开始智能分镜」，模型会按情节切页分格，并给每句对白挑一种语气。',
             { onclick: "switchTab('input')", label: '去输入小说' }
@@ -2538,7 +2590,7 @@ function renderSegments() {
             </div>
             ${hasFullPageImage ? `
             <div class="mb-6 border-2 border-black p-1">
-                <div class="text-sm text-gray-600 mb-2">✅ 整页漫画</div>
+                <div class="text-sm text-gray-600 mb-2 flex items-center gap-1"><span data-icon="check-circle" style="width:14px;height:14px;color:#16a34a;"></span>整页漫画</div>
                 <img src="${hasFullPageImage}" class="w-full cursor-pointer" onclick="openModal('${hasFullPageImage}')">
             </div>
             ` : ''}
@@ -2586,7 +2638,7 @@ function renderSegments() {
                                             ${refState === 'none' ? 'disabled' : ''}
                                             onchange="toggleCharacter(${pageIdx}, ${segIdx}, ${charIdx})"
                                             class="mr-1">
-                                        ${char.name}${refState === 'image' ? ' 🖼' : refState === 'text' ? ' 📝' : ' (无)'}
+                                        ${char.name}${refState === 'image' ? ' ▣' : refState === 'text' ? ' 📝' : ' (无)'}
                                     </label>
                                 `;}).join('')}
                             </div>
@@ -2608,14 +2660,14 @@ function renderSegments() {
                                 <select onchange="updateSegment(${pageIdx}, ${segIdx}, 'dialogue_type', this.value); syncBubbleMini(this)"
                                     class="text-xs border border-gray-300 focus:border-black outline-none p-1 bg-white"
                                     title="气泡形状(LLM 分镜规划时会主动选, 可手动覆盖)">
-                                    <option value="dialogue" ${(!seg.dialogue_type || seg.dialogue_type==='dialogue')?'selected':''}>💬 对话气泡 (圆角矩形)</option>
-                                    <option value="thought" ${seg.dialogue_type==='thought'?'selected':''}>💭 心理活动 (云形)</option>
-                                    <option value="shout" ${seg.dialogue_type==='shout'?'selected':''}>💥 大喊 (锯齿/爆炸)</option>
-                                    <option value="whisper" ${seg.dialogue_type==='whisper'?'selected':''}>🤫 耳语 (虚线圆角)</option>
+                                    <option value="dialogue" ${(!seg.dialogue_type || seg.dialogue_type==='dialogue')?'selected':''}>○ 对话气泡 (圆角矩形)</option>
+                                    <option value="thought" ${seg.dialogue_type==='thought'?'selected':''}>◌ 心理活动 (云形)</option>
+                                    <option value="shout" ${seg.dialogue_type==='shout'?'selected':''}>※ 大喊 (锯齿/爆炸)</option>
+                                    <option value="whisper" ${seg.dialogue_type==='whisper'?'selected':''}>· 耳语 (虚线圆角)</option>
                                     <option value="burst" ${seg.dialogue_type==='burst'?'selected':''}>⚡ 爆发 (辐射射线)</option>
-                                    <option value="narration" ${seg.dialogue_type==='narration'?'selected':''}>📜 旁白叙述 (矩形)</option>
+                                    <option value="narration" ${seg.dialogue_type==='narration'?'selected':''}>▭ 旁白叙述 (矩形)</option>
                                     <option value="box" ${seg.dialogue_type==='box'?'selected':''}>▢ 方框 (无尾矩形)</option>
-                                    <option value="caption" ${seg.dialogue_type==='caption'?'selected':''}>🔊 拟声词 (黑底白字)</option>
+                                    <option value="caption" ${seg.dialogue_type==='caption'?'selected':''}>▲ 拟声词 (黑底白字)</option>
                                 </select>
                                 <span class="bubble-mini" data-type="${(seg.dialogue_type || 'dialogue').toLowerCase()}" title="气泡形状预览"></span>
                                 <span class="text-[10px] text-gray-400">形状预览</span>
@@ -2707,7 +2759,7 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
     // 动态按钮, 用 lockButton 锁住避免连点
     const targetBtn = btn || document.querySelector(`#panel-segments button[onclick*="generateFullPage(${pageIdx}"]`);
     const labelEl = targetBtn ? targetBtn.querySelector('span:not([id*="spinner"])') : null;
-    const unlock = lockButton(targetBtn, labelEl, '⏳ 整页生成中…');
+    const unlock = lockButton(targetBtn, labelEl, '整页生成中…');
 
     const page = currentSegments.pages[pageIdx];
 
@@ -2782,7 +2834,10 @@ async function generateFullPage(pageIdx, skipLock = false, previousPageImage = n
             if (result.bubbles) fullPageBubbles[pageIdx] = result.bubbles;
             renderSegments();
             renderGallery();
-            syncResults();  // 主动同步整页图片映射到服务器
+            syncResults();  // 同步到 session(供断网恢复)
+            // 关键修复: 同时持久化到当前作品, 避免单页生成后 state.json 不更新
+            // 用户只有刷新页面/重新登录才会发现图丢了; 现在生成即落盘
+            saveCurrentState().catch(e => console.warn('save work after page gen failed:', e));
             showToast(`第 ${page.page_number} 页整页生成成功`, 'success');
         } else {
             showToast(result.error || '生成失败', 'error');
@@ -2810,7 +2865,7 @@ function toggleBatchPause() {
         btn.classList.replace('text-yellow-700', 'text-green-700');
         showToast('已暂停, 点击继续恢复', 'info');
     } else {
-        label.textContent = '⏸️ 暂停';
+        label.textContent = '暂停';
         btn.classList.replace('border-green-500', 'border-yellow-500');
         btn.classList.replace('bg-green-50', 'bg-yellow-50');
         btn.classList.replace('text-green-700', 'text-yellow-700');
@@ -2888,7 +2943,7 @@ async function generateAllFullPages() {
     const unlock = lockButton(
         document.getElementById('batch-full-btn'),
         document.getElementById('batch-full-label'),
-        '⏳ 批量整页生成中…'
+        '批量整页生成中…'
     );
 
     const pagesToGenerate = [];
@@ -2907,7 +2962,7 @@ async function generateAllFullPages() {
     const stopBtn = document.getElementById('batch-stop-btn');
     if (pauseBtn) {
         batchPaused = false;
-        document.getElementById('batch-pause-label').textContent = '⏸️ 暂停';
+        document.getElementById('batch-pause-label').textContent = '暂停';
         pauseBtn.classList.remove('hidden');
     }
     if (stopBtn) stopBtn.classList.remove('hidden');
@@ -3028,12 +3083,14 @@ async function autoSaveWorkWithLLMTitle(allDone) {
 
 function renderGallery() {
     const container = document.getElementById('gallery-container');
+    // 重新渲染前清掉 stagger 标记, 让下次 playStagger 能再触发级联
+    if (window.__t2cTransitions) window.__t2cTransitions.resetStagger(container);
 
     const hasFullPages = Object.keys(fullPageImages).length > 0;
 
     if (!hasFullPages) {
         container.innerHTML = emptyState(
-            '🎨',
+            'palette',
             '还没有成品图',
             '在「分镜管理」里对某一页点「整页生成」，或直接「批量整页生成」把所有页一次跑完。',
             { onclick: "switchTab('segments')", label: '去生成整页' }
@@ -3047,7 +3104,7 @@ function renderGallery() {
         html += `
         <div class="mb-8">
             <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
-                <span class="bg-black text-white px-2 py-1 text-sm">✓ 整页生成</span>
+                <span class="bg-black text-white px-2 py-1 text-sm flex items-center gap-1"><span data-icon="check" style="width:14px;height:14px;"></span>整页生成</span>
             </h2>
             <div class="space-y-6">
                 ${currentSegments.pages.map((page, pageIdx) => {
@@ -3091,7 +3148,11 @@ function openModal(src) {
     img.classList.remove('zoom-in');
     void img.offsetWidth;
     img.classList.add('zoom-in');
-    modal.classList.remove('modal-closing', 'hidden');
+    if (window.__t2cTransitions) {
+        window.__t2cTransitions.openModal('image-modal');
+    } else {
+        modal.classList.remove('modal-closing', 'hidden');
+    }
 }
 
 function closeModal() {
@@ -3214,7 +3275,7 @@ function openBubbleEditor(pageIdx) {
     }
 
     function _bubbleTypeLabel(dtype) {
-        return BUBBLE_TYPE_LABELS[dtype] || ('💬 ' + dtype);
+        return BUBBLE_TYPE_LABELS[dtype] || ('○ ' + dtype);
     }
 
     function makeDraggable(el, imgEl, bub) {
@@ -3271,7 +3332,8 @@ function openBubbleEditor(pageIdx) {
             return;
         }
         modal.classList.add('modal-closing');
-        setTimeout(() => modal.remove(), 150);
+        // 给退场动画留够时间 (180ms) 再移除 DOM
+        setTimeout(() => modal.remove(), 180);
     }
 
     // 图片加载后定位气泡 (处理缓存命中 onload 不触发的情况)
@@ -3429,7 +3491,7 @@ async function analyzeCharacters() {
     const unlock = lockButton(
         document.getElementById('analyze-characters-btn'),
         document.getElementById('analyze-characters-label'),
-        '⏳ 角色分析中…'
+        '角色分析中…'
     );
 
     createProgressBar('analyze-progress');
@@ -3532,9 +3594,11 @@ function clearCharacters() {
 
 function renderCharacters() {
     const container = document.getElementById('characters-container');
+    // 重新渲染前清掉 stagger 标记, 让 playStagger / staggerIn 能再触发级联
+    if (window.__t2cTransitions) window.__t2cTransitions.resetStagger(container);
     if (characters.length === 0) {
         container.innerHTML = emptyState(
-            '🎭',
+            'masks',
             '还没有角色',
             '点下面的按钮，模型会从小说的前 8000 字里挑出主要出场角色，并给出外貌与性格描述。',
             { onclick: 'analyzeCharacters()', label: '从小说分析角色', fullSpan: true }

@@ -1,6 +1,8 @@
-# 环境变量 / 敏感凭据
+1# 环境变量 / 敏感凭据
 .env
 .env.*
+# 注册用户凭据 (含密码 hash), 不要提交到 git
+users.json
 # 本地明文配置，避免把 API key 推到远端
 config.json
 # 个人本地配置 (含 API key, 不要提交到 git)
@@ -27,6 +29,45 @@ static/comic2novel/
 app.py
 text2comic_github_backup/
 templates/comic_page_full_1.png
+
+# PyInstaller 打包产物 / 备份 / 工具目录
+build/
+dist/
+*.spec
+config.json.bak
+.pai/
+.trae/
+coding_*.txt
+full_doc.txt
+
+# Android (Chaquopy Gradle) 构建产物 — 重新 build 自动生成
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/captures/
+android/.idea/
+android/app/.cxx/
+
+# Android 字体二进制 (大文件, 由 build_assets.py 同步思源黑体 OTF)
+android/app/src/main/assets/fonts/
+
+# 同步脚本生成的二进制 (本地化脚本可重新下载; 体积大不入 git)
+android/app/src/main/assets/static/fonts/*.woff2
+android/app/src/main/assets/static/fonts/*.ttf
+android/app/src/main/assets/static/js/gsap*.js
+android/app/src/main/assets/static/js/ScrollTrigger*.js
+android/app/src/main/assets/static/tailwind.css
+
+# Node.js (Tailwind CLI)
+node_modules/
+tailwind.input.css
+package-lock.json
+
+# pip 下载日志
+pip.log
+service.log
+
+
 config.json
-config.json
-config.json
+.gitignore

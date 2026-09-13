@@ -5,47 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>小说⇄漫画 双向转换器</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='design-system.css') }}">
     <style>
+        /* ============================================================================
+           index.html · 页面专属样式
+           --------------------------------------------------------------------------
+           通用设计令牌 / 基础组件 / 全局动效都在 design-system.css 里；
+           这里只保留 workspace-bar、stat-tile、stepper、empty-state 等页面布局。
+           ============================================================================ */
+
         body { font-family: 'Noto Sans SC', sans-serif; }
 
-        /* ===== 动效系统 ===== */
-        :root {
-            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-            --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-            --anim-fast: 0.18s;
-            --anim-base: 0.28s;
-            --anim-slow: 0.45s;
-            --stagger: 55ms;
-        }
-
-        .manga-border { border: 2px solid #1a1a1a; }
-        .panel-shadow { box-shadow: 4px 4px 0px #1a1a1a; }
-        .btn-primary {
-            background: #1a1a1a;
-            color: white;
-            transition: transform var(--anim-fast) var(--ease-out-expo), box-shadow var(--anim-fast) var(--ease-out-expo), background-color var(--anim-fast);
-        }
-        .btn-primary:hover {
-            transform: translate(-2px, -2px);
-            box-shadow: 4px 4px 0px #666;
-        }
-        .btn-primary:active {
-            transform: translate(0, 0) scale(0.98);
-            box-shadow: 1px 1px 0px #666;
-            transition-duration: 0.06s;
-        }
-        /* 通用按钮按压反馈 */
+        /* === 通用按钮按压反馈 === */
         button:not(:disabled):active { transform: scale(0.98); }
-        .loading-spinner {
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #1a1a1a;
-            border-radius: 50%;
-            width: 24px;
-            height: 24px;
-            animation: spin 1s linear infinite;
-        }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* === 进度条 === */
         .progress-container {
             width: 100%;
             background-color: #e5e5e5;
@@ -61,27 +36,7 @@
             transform: scaleX(0);
             transition: transform 0.3s var(--ease-out-expo);
         }
-        .fade-in { animation: fadeIn 0.4s var(--ease-out-expo) both; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-
-        /* ===== 模态框进出场 ===== */
-        @keyframes backdropIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes modalIn {
-            from { opacity: 0; transform: translateY(18px) scale(0.97); }
-            to { opacity: 1; transform: translateY(0) scale(1); }
-        }
-        .modal-backdrop { animation: backdropIn var(--anim-fast) ease-out both; }
-        .modal-card { animation: modalIn var(--anim-base) var(--ease-out-expo) both; will-change: transform, opacity; }
-        /* 关闭时由 JS 挂上 .modal-closing, 过渡结束后再 display:none */
-        .modal-closing .modal-backdrop {
-            opacity: 0;
-            transition: opacity 0.15s ease-in;
-        }
-        .modal-closing .modal-card {
-            opacity: 0;
-            transform: translateY(10px) scale(0.98);
-            transition: opacity 0.15s ease-in, transform 0.15s ease-in;
-        }
+        .fade-in { animation: ds-fadeIn 0.4s var(--ease-out-expo) both; }
 
         /* ===== 气泡编辑器: 按 dialogue_type 可视化 ===== */
         /* 编辑器内每个气泡显示成接近最终成图的样子, 避免编辑前/后"类型变了"的误判 */
@@ -164,20 +119,10 @@
         .tab-active { border-bottom: 3px solid transparent; font-weight: 700; }
         .tab-inactive { border-bottom: 3px solid transparent; color: #666; }
         .tab-inactive:hover { border-bottom: 3px solid #ccc; }
-        ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: #f1f1f1; }
-        ::-webkit-scrollbar-thumb { background: #888; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: #555; }
 
         /* ===== 动效系统 2.0: 转场 / 级联 / 显影 / 加载节奏 ===== */
 
-        /* 1) 标签页转场: 由 JS 按点击方向打 .panel-in-left / .panel-in-right */
-        @keyframes panelInRight { from { opacity: 0; transform: translate3d(28px, 0, 0); } to { opacity: 1; transform: none; } }
-        @keyframes panelInLeft  { from { opacity: 0; transform: translate3d(-28px, 0, 0); } to { opacity: 1; transform: none; } }
-        .panel-in-right { animation: panelInRight var(--anim-base) var(--ease-out-expo); }
-        .panel-in-left  { animation: panelInLeft  var(--anim-base) var(--ease-out-expo); }
-
-        /* 2) 顶部标签: 当前项从中心展开下划线 + 轻微弹起 */
+        /* 1) 顶部标签: 当前项从中心展开下划线 + 轻微弹起 */
         #main-tabs button { position: relative; }
         #main-tabs button::after {
             content: '';
@@ -191,27 +136,12 @@
         }
         #main-tabs button.tab-inactive:hover::after { transform: scaleX(1); background: #ccc; }
         /* 当前项的下划线交给滑动的 .ink-indicator, 这里不再画静态线 */
-        @keyframes tabPop { 0% { transform: translateY(3px); } 60% { transform: translateY(-1px); } 100% { transform: none; } }
         #main-tabs button.tab-active { animation: tabPop var(--anim-base) var(--ease-spring); }
 
         /* 3) 移动端底部导航: 选中项弹跳 */
-        @keyframes mtabPop { 0% { transform: translateY(4px) scale(0.92); } 55% { transform: translateY(-2px) scale(1.06); } 100% { transform: none; } }
         .mtab-active { animation: mtabPop 0.4s var(--ease-spring); }
 
-        /* 4) 列表级联入场: JS playStagger() 按可视批次设置 --i */
-        .stagger-ready { opacity: 0; }
-        @keyframes cardRise { from { opacity: 0; transform: translate3d(0, 16px, 0) scale(0.985); } to { opacity: 1; transform: none; } }
-        .stagger-item {
-            animation: cardRise var(--anim-slow) var(--ease-out-expo) backwards;
-            animation-delay: calc(var(--i, 0) * var(--stagger));
-        }
-
-        /* 5) 图片显影: 生成结果不再"啪"地出现 (模糊只保留在入场前半段, 避免大图长时间走滤镜) */
-        @keyframes imgReveal {
-            from { opacity: 0; transform: scale(1.02); filter: blur(4px); }
-            45%  { opacity: 1; filter: blur(0); }
-            to   { opacity: 1; transform: none; filter: none; }
-        }
+        /* 4) 列表级联入场: 关键帧已在 design-system.css, 这里只把"img 自带 imgReveal"挂上 */
         #characters-container img,
         #segments-container img,
         #gallery-container img,
@@ -219,8 +149,6 @@
         #history-writing-list img {
             animation: imgReveal 0.5s var(--ease-out-expo) backwards;
         }
-        #modal-image.zoom-in { animation: zoomIn var(--anim-base) var(--ease-out-expo); }
-        @keyframes zoomIn { from { opacity: 0; transform: scale(0.94); } to { opacity: 1; transform: none; } }
 
         /* 6) 卡片 hover 抬起 (保持"笔触偏移阴影"的漫画感) */
         .comic-page { transition: transform var(--anim-base) var(--ease-out-expo), box-shadow var(--anim-base) var(--ease-out-expo); }
@@ -230,49 +158,21 @@
         }
         #characters-container > div.manga-border:hover { transform: translate(-2px, -2px); box-shadow: 7px 7px 0 #1a1a1a; }
 
-        /* 7) 加载骨架屏 (列表/预览图加载中的占位) */
-        .skeleton { position: relative; overflow: hidden; background: #e5e5e5; }
-        .skeleton::after {
-            content: '';
-            position: absolute; inset: 0;
-            transform: translateX(-100%);
-            background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.75) 50%, rgba(255,255,255,0) 100%);
-            animation: shimmer 1.3s ease-in-out infinite;
-        }
-        @keyframes shimmer { to { transform: translateX(100%); } }
-
-        /* 8) 进度条: 条纹表示"正在跑", 完成时亮度闪一下 + 弹性到位 */
+        /* 8) 进度条: 完成时亮度闪一下 + 弹性到位 */
         .progress-bar.is-active {
             background-image: repeating-linear-gradient(115deg, rgba(255,255,255,0.28) 0 10px, rgba(255,255,255,0) 10px 22px);
             animation: inkStripe 0.9s linear infinite;
         }
-        @keyframes inkStripe { from { background-position: 0 0; } to { background-position: -44px 0; } }
         .progress-bar.is-done {
             transition: transform var(--anim-base) var(--ease-spring);
             animation: barDone 0.7s var(--ease-out-expo);
         }
-        @keyframes barDone { 0% { filter: brightness(1); } 30% { filter: brightness(2.1); } 100% { filter: brightness(1); } }
 
-        /* 9) Toast: 弹入 / 长任务呼吸光晕 / 错误抖动 */
-        @keyframes toastPop { from { transform: translateY(24px) scale(0.96); opacity: 0; } to { transform: translateY(0) scale(1); opacity: 1; } }
+        /* 9) Toast: 错误抖动 (toast-pop / toast-loading 关键帧已在 design-system.css) */
         #toast.toast-pop { animation: toastPop var(--anim-base) var(--ease-spring); }
-        @keyframes toastPulse {
-            0%, 100% { box-shadow: 0 0 0 0 rgba(26, 26, 26, 0.45); }
-            50% { box-shadow: 0 0 0 10px rgba(26, 26, 26, 0); }
-        }
         #toast.toast-loading { animation: toastPop var(--anim-base) var(--ease-spring), toastPulse 1.6s ease-out 0.3s infinite; }
-        @keyframes shakeX {
-            10%, 90% { transform: translateX(-2px); }
-            20%, 80% { transform: translateX(3px); }
-            30%, 50%, 70% { transform: translateX(-5px); }
-            40%, 60% { transform: translateX(5px); }
-        }
-        .shake { animation: shakeX 0.5s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
         /* 错误 toast: 先弹入再抖一下 (放在 .toast-pop 之后以覆盖 animation 简写) */
-        #toast.shake { animation: toastPop var(--anim-base) var(--ease-spring), shakeX 0.5s cubic-bezier(0.36, 0.07, 0.19, 0.97) 0.26s; }
-
-        /* 10) 键盘焦点可见 */
-        :focus-visible { outline: 2px solid #1a1a1a; outline-offset: 2px; }
+        #toast.shake { animation: toastPop var(--anim-base) var(--ease-spring), shakeX 0.5s var(--ease-soft) 0.26s; }
 
         /* ===== 移动端适配 ===== */
         body { min-height: 100vh; min-height: 100dvh; }
@@ -348,11 +248,6 @@
             letter-spacing: -.02em;
         }
         .stat-num.is-bump { animation: numBump .44s var(--ease-spring); }
-        @keyframes numBump {
-            0% { transform: none; }
-            40% { transform: translateY(-3px) scale(1.16); }
-            100% { transform: none; }
-        }
         .stat-label { font-size: .72rem; color: #6b7280; margin-top: 2px; }
         .stat-chip {
             display: inline-flex; align-items: center; gap: 6px;
@@ -468,6 +363,35 @@
             to { opacity: 1; transform: none; }
         }
 
+        /* ==== 图标系统 (替代 emoji, 统一视觉语言) ==== */
+        .icon-inline {
+            display: inline-block;
+            vertical-align: -.125em;  // 与中文基线对齐
+            flex-shrink: 0;
+        }
+        .es-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 56px; height: 56px;
+            margin: 0 auto 14px;
+            border: 2px solid #1a1a1a;
+            background: #fff;
+            color: #1a1a1a;
+        }
+        .es-icon svg { width: 28px; height: 28px; }
+        .icon-spin { animation: iconSpin .9s linear infinite; }
+        @keyframes iconSpin { to { transform: rotate(360deg); } }
+        /* 替代原来 spinkit 圆点的最小占位 (加载态 emoji ⏳) */
+        .icon-loader { animation: iconSpin 1s linear infinite; }
+        /* 导航/小尺寸图标 */
+        .ico-12 { width: 12px; height: 12px; }
+        .ico-14 { width: 14px; height: 14px; }
+        .ico-16 { width: 16px; height: 16px; }
+        .ico-18 { width: 18px; height: 18px; }
+        .ico-20 { width: 20px; height: 20px; }
+        .ico-24 { width: 24px; height: 24px; }
+
         /* 6) 墨点涟漪 (主按钮点击反馈) */
         .btn-primary { position: relative; overflow: hidden; }
         .ink-ripple {
@@ -477,12 +401,8 @@
             pointer-events: none;
             animation: inkRipple .62s ease-out forwards;
         }
-        @keyframes inkRipple {
-            60% { opacity: .55; }
-            to { transform: translate(-50%, -50%) scale(26); opacity: 0; }
-        }
 
-        /* 7) Toast: 图标 + 文本 + 自动关闭进度线 */
+        /* 7) Toast: 图标 + 文本 + 自动关闭进度线 (关键帧已在 design-system.css) */
         #toast { position: fixed; overflow: hidden; }
         .toast-inner { display: flex; align-items: center; gap: 9px; }
         .toast-icon { font-size: 1rem; line-height: 1; }
@@ -491,11 +411,6 @@
             background: rgba(255, 255, 255, .5);
             transform-origin: left center;
             transform: scaleX(0);
-        }
-        #toast.is-counting .toast-timer { animation: toastTimer 3s linear forwards; }
-        @keyframes toastTimer {
-            from { transform: scaleX(1); }
-            to { transform: scaleX(0); }
         }
 
         /* 8) 面板头部补充信息 */
@@ -526,27 +441,6 @@
         .bubble-mini.is-changed { transform: scale(1.18); }
         select:focus + .bubble-mini, select:hover + .bubble-mini { transform: scale(1.08); }
 
-        /* 10) 启动入场: 由 JS 打 boot-armed, 无 JS 时不会隐藏任何内容 */
-        [data-boot] { transition: opacity .5s var(--ease-out-expo), transform .5s var(--ease-out-expo); }
-        html.boot-armed [data-boot] { opacity: 0; transform: translateY(10px); }
-        html.boot-armed [data-boot].is-in { opacity: 1; transform: none; }
-
-        /* 11) 模态遮罩轻微虚化, 让弹窗更"浮" */
-        .modal-backdrop { backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
-
-        /* 无障碍: 用户偏好减少动效时, 所有动画/过渡坍缩为瞬时 */
-        @media (prefers-reduced-motion: reduce) {
-            *, *::before, *::after {
-                animation-duration: 0.01ms !important;
-                animation-iteration-count: 1 !important;
-                /* 级联延迟也要清零, 否则元素会在延迟期间保持动画起始态(不可见) */
-                animation-delay: 0s !important;
-                transition-duration: 0.01ms !important;
-                transition-delay: 0s !important;
-                scroll-behavior: auto !important;
-            }
-        }
-
         /* image-modal 的背景在根元素上, 关闭时整体淡出 */
         #image-modal { transition: opacity 0.15s ease-in; }
         #image-modal.modal-closing { opacity: 0; }
@@ -558,6 +452,62 @@
                 opacity 0.25s ease-out,
                 background-color var(--anim-fast);
         }
+
+        /* ============================================================================
+           衔接动画增强 (2.1)
+           --------------------------------------------------------------------------
+           在 design-system 基础上补齐 "面板退出 / 视图淡入 / 保存庆祝" 等
+           让页面切换与状态变更更连贯。
+           ============================================================================ */
+
+        /* 面板退出 (旧面板在切换时淡出 + 微缩) */
+        @keyframes panelOut { from { opacity: 1; } to { opacity: 0; transform: translateY(-6px) scale(.995); } }
+        .panel-out { animation: panelOut var(--anim-fast) var(--ease-out-expo) both; }
+
+        /* 视图淡入 (IntersectionObserver 触发, 比 cardRise 更轻盈) */
+        @keyframes viewFadeIn {
+            from { opacity: 0; transform: translate3d(0, 12px, 0); }
+            to   { opacity: 1; transform: none; }
+        }
+        .view-fade { animation: viewFadeIn 0.5s var(--ease-out-expo) both; }
+        .view-fade[data-stagger] { animation-delay: calc(var(--i, 0) * var(--stagger-loose)); }
+
+        /* 保存成功庆祝 (替换面板内某项的"保存"按钮, 用 celebrate 类触发) */
+        @keyframes celebrateSave {
+            0%   { transform: scale(1); }
+            40%  { transform: scale(1.18); }
+            70%  { transform: scale(0.96); }
+            100% { transform: scale(1); }
+        }
+        .celebrate-save { animation: celebrateSave 0.5s var(--ease-spring); }
+
+        /* 数字滚动占位 (当数字变化时短暂"涨大", 由 JS 触发) */
+        @keyframes digitRoll {
+            0%   { transform: translateY(0); opacity: 1; }
+            40%  { transform: translateY(-100%); opacity: 0; }
+            60%  { transform: translateY(100%); opacity: 0; }
+            100% { transform: translateY(0); opacity: 1; }
+        }
+        .digit-roll { animation: digitRoll 0.5s var(--ease-out-expo); }
+
+        /* 模态框打开 (与 .modal-closing 对应的入场, 由 JS 添加后强制 reflow 再触发) */
+        .modal-opening .modal-card { animation: modalIn var(--anim-base) var(--ease-out-expo) both; }
+        .modal-opening .modal-backdrop { animation: backdropIn var(--anim-fast) ease-out both; }
+
+        /* 列表刷新重放 (当 renderXxx 后想重播 stagger, 删除 _staggerDone 后批量打 --i) */
+        @keyframes itemRise {
+            from { opacity: 0; transform: translate3d(0, 14px, 0) scale(.99); }
+            to   { opacity: 1; transform: none; }
+        }
+        .item-rise { animation: itemRise var(--anim-slow) var(--ease-out-expo) backwards; }
+
+        /* 移动端 tab 切换: 选中态更柔和的过渡 */
+        @keyframes mtabSpring {
+            0%   { transform: translateY(6px); opacity: .4; }
+            60%  { transform: translateY(-2px); opacity: 1; }
+            100% { transform: translateY(0); }
+        }
+        .mtab-spring { animation: mtabSpring 0.42s var(--ease-spring); }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
@@ -595,7 +545,7 @@
         <!-- 微信/QQ 内打开时提示用浏览器打开 (由 app.js 的 maybeShowInAppBanner 控制显示) -->
         <div id="inapp-browser-banner" class="hidden bg-amber-100 border-2 border-amber-500 mb-4 px-3 md:px-4 py-2.5 flex items-center justify-between gap-3">
             <div class="flex items-center gap-2 text-sm text-amber-900 min-w-0">
-                <span class="text-lg shrink-0">📱</span>
+                <span class="text-lg shrink-0" data-icon="phone"></span>
                 <span id="inapp-browser-text" class="truncate"></span>
             </div>
             <button id="inapp-browser-close" class="shrink-0 text-amber-800 hover:text-amber-950 text-xl leading-none px-1" aria-label="关闭提示">×</button>
@@ -608,9 +558,7 @@
                     <h1 class="text-lg md:text-3xl font-bold tracking-tight truncate">小说⇄漫画 双向转换器</h1>
                 </div>
                 <div class="flex items-center gap-2 shrink-0">
-                    <button onclick="openConfigModal()" title="API 配置" class="w-10 h-10 flex items-center justify-center text-lg text-gray-700 hover:text-black border border-gray-300 hover:border-black transition-colors">
-                        ⚙
-                    </button>
+                    <button onclick="openConfigModal()" title="API 配置" class="w-10 h-10 flex items-center justify-center text-lg text-gray-700 hover:text-black border border-gray-300 hover:border-black transition-colors"><span data-icon="settings" class="icon-inline"></span> </button>
                     <button onclick="handleLogout()" class="text-sm text-gray-600 hover:text-black border border-gray-300 hover:border-black px-4 py-2 transition-colors">
                         退出登录
                     </button>
@@ -649,7 +597,7 @@
         <div class="bg-white p-4 manga-border panel-shadow mb-4">
             <div class="flex items-center justify-between cursor-pointer" onclick="toggleStylePanel()">
                 <h2 class="text-lg font-bold flex items-center gap-2">
-                    <span>🎨</span>
+                    <span data-icon="palette"></span>
                     <span>漫画风格设置</span>
                     <span id="style-summary" class="text-sm font-normal text-gray-500 ml-2"></span>
                 </h2>
@@ -692,7 +640,7 @@
         <!-- 四步流程: 每一步都可点击跳转, 进度来自真实数据 -->
         <section id="workflow" class="stepper mb-4" data-boot aria-label="制作流程">
             <div class="flex items-center justify-between gap-3 mb-3">
-                <h2 class="text-sm font-bold flex items-center gap-2"><span>🧭</span>制作流程</h2>
+                <h2 class="text-sm font-bold flex items-center gap-2"><span data-icon="compass"></span>制作流程</h2>
                 <span class="text-xs text-gray-500 truncate" id="step-summary">粘贴小说正文开始</span>
             </div>
             <div class="steps" id="steps">
@@ -726,31 +674,31 @@
             <div class="relative grid grid-cols-7 max-w-7xl mx-auto" id="mtab-grid">
                 <span class="mtab-pill" id="mtab-pill" aria-hidden="true"></span>
                 <button onclick="switchTab('input')" id="mtab-input" class="mtab-active">
-                    <span class="text-lg leading-none">📖</span>
+                    <span class="text-lg leading-none" data-icon="book-open"></span>
                     <span class="text-[10px] leading-tight">小说输入</span>
                 </button>
                 <button onclick="switchTab('aiwrite')" id="mtab-aiwrite" class="mtab-inactive">
-                    <span class="text-lg leading-none">✍️</span>
+                    <span class="text-lg leading-none" data-icon="pen"></span>
                     <span class="text-[10px] leading-tight">AI 写作</span>
                 </button>
                 <button onclick="switchTab('characters')" id="mtab-characters" class="mtab-inactive">
-                    <span class="text-lg leading-none">🎭</span>
+                    <span class="text-lg leading-none" data-icon="masks"></span>
                     <span class="text-[10px] leading-tight">角色管理</span>
                 </button>
                 <button onclick="switchTab('segments')" id="mtab-segments" class="mtab-inactive">
-                    <span class="text-lg leading-none">🎞️</span>
+                    <span class="text-lg leading-none" data-icon="film"></span>
                     <span class="text-[10px] leading-tight">分镜管理</span>
                 </button>
                 <button onclick="switchTab('gallery')" id="mtab-gallery" class="mtab-inactive">
-                    <span class="text-lg leading-none">🎨</span>
+                    <span class="text-lg leading-none" data-icon="palette"></span>
                     <span class="text-[10px] leading-tight">漫画预览</span>
                 </button>
                 <button onclick="switchTab('history')" id="mtab-history" class="mtab-inactive">
-                    <span class="text-lg leading-none">📚</span>
+                    <span class="text-lg leading-none" data-icon="books"></span>
                     <span class="text-[10px] leading-tight">历史记录</span>
                 </button>
                 <button onclick="switchTab('comic2novel')" id="mtab-comic2novel" class="mtab-inactive">
-                    <span class="text-lg leading-none">🔄</span>
+                    <span class="text-lg leading-none" data-icon="refresh"></span>
                     <span class="text-[10px] leading-tight">漫画转小说</span>
                 </button>
             </div>
@@ -763,7 +711,7 @@
             <!-- 弹窗内容 -->
             <div class="modal-card relative modal-panel max-w-5xl mx-auto mt-2 mb-2 md:mt-10 md:mb-10 bg-gray-100 rounded manga-border panel-shadow">
                 <div class="sticky top-0 bg-white border-b-2 border-gray-200 px-4 py-3 md:px-6 md:py-4 flex items-center justify-between manga-border z-10">
-                    <h2 class="text-lg md:text-2xl font-bold">⚙ API 配置</h2>
+                    <h2 class="text-lg md:text-2xl font-bold"><span data-icon="settings" class="icon-inline"></span> API 配置</h2>
                     <button onclick="closeConfigModal()" class="w-9 h-9 flex items-center justify-center text-2xl text-gray-600 hover:text-black border border-gray-300 hover:border-black transition-colors">×</button>
                 </div>
                 <div class="p-3 md:p-6">
@@ -773,7 +721,7 @@
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div onclick="applyPreset('volc')" class="cursor-pointer border-2 border-gray-300 hover:border-black p-4 hover:bg-gray-50 transition-all panel-shadow">
                         <div class="flex items-center gap-3">
-                            <div class="w-10 h-10 bg-black text-white flex items-center justify-center font-bold">🌋</div>
+                            <div class="w-10 h-10 bg-black text-white flex items-center justify-center" data-icon="volcano" style="width:40px;height:40px;"></div>
                             <div>
                                 <div class="font-bold">火山引擎 v3</div>
                                 <div class="text-xs text-gray-500">MiniMax 文本 + 豆包图像</div>
@@ -782,7 +730,7 @@
                     </div>
                     <div onclick="applyPreset('openai')" class="cursor-pointer border-2 border-gray-300 hover:border-black p-4 hover:bg-gray-50 transition-all panel-shadow">
                         <div class="flex items-center gap-3">
-                            <div class="w-10 h-10 bg-black text-white flex items-center justify-center font-bold">🟢</div>
+                            <div class="w-10 h-10 bg-black text-white flex items-center justify-center" data-icon="online-dot" style="width:40px;height:40px;"></div>
                             <div>
                                 <div class="font-bold">OpenAI 预设</div>
                                 <div class="text-xs text-gray-500">OpenAI 兼容接口</div>
@@ -809,8 +757,7 @@
                         <div>
                             <label class="block text-sm font-medium mb-1">API Key</label>
                             <input type="password" id="llm-api-key" placeholder="sk-..." class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
-                            <p class="text-xs text-gray-500 mt-1">
-                                💡 火山引擎用户: 登录 <a href="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey" target="_blank" class="text-blue-600 hover:underline">火山引擎方舟控制台</a>
+                            <p class="text-xs text-gray-500 mt-1"><span data-icon="lightbulb" class="icon-inline"></span> 火山引擎用户: 登录 <a href="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey" target="_blank" class="text-blue-600 hover:underline">火山引擎方舟控制台</a>
                                 → 「API Key 管理」→ 创建 API Key, 复制以 <code class="bg-gray-100 px-1 rounded">ark-</code> 开头的字符串
                             </p>
                         </div>
@@ -842,8 +789,7 @@
                         <div>
                             <label class="block text-sm font-medium mb-1">API Key / SK</label>
                             <input type="password" id="img-api-key" placeholder="your-api-key" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
-                            <p class="text-xs text-gray-500 mt-1">
-                                💡 火山引擎用户: 与上方 LLM API Key 使用同一个 <code class="bg-gray-100 px-1 rounded">ark-xxx</code> Key 即可 (方舟 API Key 通用)
+                            <p class="text-xs text-gray-500 mt-1"><span data-icon="lightbulb" class="icon-inline"></span> 火山引擎用户: 与上方 LLM API Key 使用同一个 <code class="bg-gray-100 px-1 rounded">ark-xxx</code> Key 即可 (方舟 API Key 通用)
                             </p>
                         </div>
                         <div>
@@ -883,7 +829,7 @@
                                 </span>
                             </label>
                         </div>
-                        <p class="text-xs text-gray-500 mt-1">💡 选择后对分镜、角色人设图与整页生成均生效，可随时切换</p>
+                        <p class="text-xs text-gray-500 mt-1"><span data-icon="lightbulb" class="icon-inline"></span> 选择后对分镜、角色人设图与整页生成均生效，可随时切换</p>
                     </div>
                     <div>
                         <label class="block text-sm font-medium mb-2">气泡渲染方式</label>
@@ -903,15 +849,14 @@
                                 </span>
                             </label>
                         </div>
-                        <p class="text-xs text-gray-500 mt-1">💡 PIL 模式可编辑气泡位置; API 模式速度快但气泡位置由模型决定</p>
+                        <p class="text-xs text-gray-500 mt-1"><span data-icon="lightbulb" class="icon-inline"></span> PIL 模式可编辑气泡位置; API 模式速度快但气泡位置由模型决定</p>
                     </div>
                     <div>
                         <label class="block text-sm font-medium mb-1">
                             每页分镜数 <span class="text-xs text-gray-400 font-normal">(0 = LLM 自由控制)</span>
                         </label>
                         <input type="number" id="segments-per-page" value="0" min="0" max="8" class="w-full p-3 border-2 border-gray-300 focus:border-black outline-none transition-colors">
-                        <p class="text-xs text-gray-500 mt-1">
-                            💡 设为 0 时由 LLM 根据情节节奏自由决定每页分镜数 (2-8 格);
+                        <p class="text-xs text-gray-500 mt-1"><span data-icon="lightbulb" class="icon-inline"></span> 设为 0 时由 LLM 根据情节节奏自由决定每页分镜数 (2-8 格);
                             填 2-8 则作为建议值, LLM 仍可灵活调整
                         </p>
                     </div>
@@ -934,8 +879,7 @@
                         </div>
                     </div>
                     <div class="pt-2 border-t border-gray-200">
-                        <p class="text-sm text-gray-600">
-                            🎨 漫画风格设置已移至主页顶部，请在
+                        <p class="text-sm text-gray-600"><span data-icon="palette" class="icon-inline"></span> 漫画风格设置已移至主页顶部，请在
                             <button type="button" onclick="closeConfigModal(); switchTab('input');" class="text-blue-600 hover:underline font-medium">小说输入</button>
                             页面查看和选择风格
                         </p>
@@ -961,13 +905,12 @@
                     <span class="count-chip is-zero" id="input-count-chip">0 字</span>
                 </div>
                 <textarea id="novel-text" rows="16" placeholder="请在此处粘贴小说内容...&#10;&#10;支持粘贴整章或整篇小说，系统会自动分页分段。&#10;&#10;建议每次处理3000-8000字，以获得最佳分镜效果。" class="w-full p-4 border-2 border-gray-300 focus:border-black outline-none transition-colors resize-none font-mono text-sm leading-relaxed"></textarea>
-                <p class="mt-2 text-xs text-gray-400">✍️ AI 续写 / 润色可在此直接使用（生成分镜前建议先润色），也可到顶部「AI 写作」标签页，两处实时同步</p>
+                <p class="mt-2 text-xs text-gray-400"><span data-icon="pen" class="icon-inline"></span> AI 续写 / 润色可在此直接使用（生成分镜前建议先润色），也可到顶部「AI 写作」标签页，两处实时同步</p>
 
                 <!-- AI 写作 (分镜前润色/续写, 复用 AI 写作页逻辑, 作用域='input') -->
                 <div class="mt-4 border-2 border-gray-200">
                     <div class="flex items-center justify-between bg-gray-50 px-4 py-2 cursor-pointer select-none" onclick="toggleInpAIWrite()">
-                        <h3 class="text-sm font-bold flex items-center gap-2">
-                            ✍️ AI 写作
+                        <h3 class="text-sm font-bold flex items-center gap-2"><span data-icon="pen" class="icon-inline"></span> AI 写作
                             <span class="text-xs font-normal text-gray-400">分镜前可先润色 / 续写</span>
                         </h3>
                         <span id="inp-aw-toggle-icon" class="text-gray-500 text-lg">▼</span>
@@ -977,7 +920,7 @@
                         <div class="mb-5">
                             <div class="flex flex-wrap items-center gap-2">
                                 <button id="inp-gen-options-btn" onclick="genPlotOptions('input')" class="border-2 border-black px-3 py-1.5 font-medium hover:bg-gray-100 flex items-center gap-2 text-sm">
-                                    <span id="inp-gen-options-label">🎬 生成剧情选项</span>
+                                    <span id="inp-gen-options-label"><span data-icon="clapperboard" class="icon-inline"></span> 生成剧情选项</span>
                                     <span id="inp-gen-options-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
                                 </button>
                                 <span class="text-xs text-gray-400">让 AI 给出 3 个剧情发展方向</span>
@@ -993,7 +936,7 @@
                                     <option value="3000">约3000字</option>
                                 </select>
                                 <button id="inp-continue-btn" onclick="continueNovel('input')" class="border-2 border-black px-3 py-1.5 font-medium hover:bg-gray-100 flex items-center gap-2 text-sm">
-                                    <span id="inp-continue-label">✍️ AI 续写</span>
+                                    <span id="inp-continue-label"><span data-icon="pen" class="icon-inline"></span> AI 续写</span>
                                     <span id="inp-continue-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
                                 </button>
                             </div>
@@ -1002,7 +945,7 @@
                         <div>
                             <div class="flex flex-wrap items-center gap-2">
                                 <button id="inp-gen-styles-btn" onclick="genPolishStyles('input')" class="border-2 border-black px-3 py-1.5 font-medium hover:bg-gray-100 flex items-center gap-2 text-sm">
-                                    <span id="inp-gen-styles-label">🎨 生成润色风格</span>
+                                    <span id="inp-gen-styles-label"><span data-icon="palette" class="icon-inline"></span> 生成润色风格</span>
                                     <span id="inp-gen-styles-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
                                 </button>
                                 <span class="text-xs text-gray-400">让 AI 给出几种润色风格建议</span>
@@ -1012,14 +955,14 @@
                                 <input id="inp-polish-style" type="text" placeholder="点击上方风格，或自定义润色要求（可选）"
                                        class="flex-1 min-w-[180px] p-2 border-2 border-gray-300 focus:border-black outline-none transition-colors text-sm">
                                 <button id="inp-polish-btn" onclick="polishNovel('input')" class="border-2 border-black px-3 py-1.5 font-medium hover:bg-gray-100 flex items-center gap-2 text-sm">
-                                    <span id="inp-polish-label">✨ AI 润色</span>
+                                    <span id="inp-polish-label"><span data-icon="sparkles" class="icon-inline"></span> AI 润色</span>
                                     <span id="inp-polish-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
                                 </button>
                             </div>
                             <div id="inp-polish-progress" class="mt-3"></div>
                         </div>
                         <div class="mt-4 pt-3 border-t border-gray-200 flex justify-end">
-                            <button onclick="saveCurrentWriting()" class="border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">💾 保存到写作历史</button>
+                            <button onclick="saveCurrentWriting()" class="border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors"><span data-icon="save" class="icon-inline"></span> 保存到写作历史</button>
                         </div>
                     </div>
                 </div>
@@ -1042,9 +985,9 @@
         <div id="panel-aiwrite" class="hidden fade-in">
             <div class="bg-white p-6 manga-border panel-shadow mb-6">
                 <div class="flex justify-between items-center mb-4 gap-3">
-                    <h2 class="text-xl font-bold">✍️ AI 写作工作台</h2>
+                    <h2 class="text-xl font-bold"><span data-icon="pen" class="icon-inline"></span> AI 写作工作台</h2>
                     <div class="flex items-center gap-3">
-                        <button onclick="saveCurrentWriting()" class="border-2 border-black px-3 py-1.5 text-xs font-medium hover:bg-gray-100 transition-colors">💾 保存到写作历史</button>
+                        <button onclick="saveCurrentWriting()" class="border-2 border-black px-3 py-1.5 text-xs font-medium hover:bg-gray-100 transition-colors"><span data-icon="save" class="icon-inline"></span> 保存到写作历史</button>
                         <span class="text-xs text-gray-400">与「小说输入」文本框实时同步</span>
                     </div>
                 </div>
@@ -1054,10 +997,10 @@
 
             <!-- AI 续写 -->
             <div class="bg-white p-6 manga-border panel-shadow mb-6">
-                <h2 class="text-xl font-bold mb-4">📖 AI 续写</h2>
+                <h2 class="text-xl font-bold mb-4"><span data-icon="book-open" class="icon-inline"></span> AI 续写</h2>
                 <div class="flex flex-wrap items-center gap-2">
                     <button id="gen-options-btn" onclick="genPlotOptions()" class="border-2 border-black px-4 py-2 font-medium hover:bg-gray-100 flex items-center gap-2">
-                        <span id="gen-options-label">🎬 生成剧情选项</span>
+                        <span id="gen-options-label"><span data-icon="clapperboard" class="icon-inline"></span> 生成剧情选项</span>
                         <span id="gen-options-spinner" class="loading-spinner hidden"></span>
                     </button>
                     <span class="text-xs text-gray-400">让 AI 给出 3 个剧情发展方向</span>
@@ -1073,7 +1016,7 @@
                         <option value="3000">约3000字</option>
                     </select>
                     <button id="continue-novel-btn" onclick="continueNovel()" class="border-2 border-black px-4 py-2 font-medium hover:bg-gray-100 flex items-center gap-2">
-                        <span id="continue-novel-label">✍️ AI 续写</span>
+                        <span id="continue-novel-label"><span data-icon="pen" class="icon-inline"></span> AI 续写</span>
                         <span id="continue-novel-spinner" class="loading-spinner hidden"></span>
                     </button>
                 </div>
@@ -1081,10 +1024,10 @@
 
             <!-- AI 润色 -->
             <div class="bg-white p-6 manga-border panel-shadow mb-6">
-                <h2 class="text-xl font-bold mb-4">✨ AI 润色</h2>
+                <h2 class="text-xl font-bold mb-4"><span data-icon="sparkles" class="icon-inline"></span> AI 润色</h2>
                 <div class="flex flex-wrap items-center gap-2">
                     <button id="gen-styles-btn" onclick="genPolishStyles()" class="border-2 border-black px-4 py-2 font-medium hover:bg-gray-100 flex items-center gap-2">
-                        <span id="gen-styles-label">🎨 生成润色风格</span>
+                        <span id="gen-styles-label"><span data-icon="palette" class="icon-inline"></span> 生成润色风格</span>
                         <span id="gen-styles-spinner" class="loading-spinner hidden"></span>
                     </button>
                     <span class="text-xs text-gray-400">让 AI 给出几种润色风格建议</span>
@@ -1094,7 +1037,7 @@
                     <input id="polish-style" type="text" placeholder="点击上方风格，或自定义润色要求（可选）"
                            class="flex-1 min-w-[180px] p-2 border-2 border-gray-300 focus:border-black outline-none transition-colors text-sm">
                     <button id="polish-novel-btn" onclick="polishNovel()" class="border-2 border-black px-4 py-2 font-medium hover:bg-gray-100 flex items-center gap-2">
-                        <span id="polish-novel-label">✨ AI 润色</span>
+                        <span id="polish-novel-label"><span data-icon="sparkles" class="icon-inline"></span> AI 润色</span>
                         <span id="polish-novel-spinner" class="loading-spinner hidden"></span>
                     </button>
                 </div>
@@ -1117,7 +1060,7 @@
                         <span id="analyze-characters-label">从小说分析角色</span>
                         <span id="analyze-spinner" class="loading-spinner hidden"></span>
                     </button>
-                    <button onclick="clearCharacters()" class="border-2 border-red-500 text-red-600 px-4 py-2 font-medium hover:bg-red-50 transition-colors">🗑️ 清空角色</button>
+                    <button onclick="clearCharacters()" class="border-2 border-red-500 text-red-600 px-4 py-2 font-medium hover:bg-red-50 transition-colors"><span data-icon="trash" class="icon-inline"></span> 清空角色</button>
                 </div>
                 <div id="analyze-progress" class="mt-4"></div>
             </div>
@@ -1125,7 +1068,7 @@
             <div id="characters-container" class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
                 <div class="empty-state col-span-full">
                     <span class="es-halftone" aria-hidden="true"></span>
-                    <div class="es-emoji">🎭</div>
+                    <div class="es-icon" data-icon="masks"></div>
                     <p class="es-title">还没有角色</p>
                     <p class="es-hint">点下面的按钮，模型会从小说的前 8000 字里挑出主要出场角色，并给出外貌与性格描述。</p>
                     <button onclick="analyzeCharacters()" class="btn-primary px-5 py-2 text-sm font-medium">从小说分析角色</button>
@@ -1153,10 +1096,9 @@
                         <span id="batch-regen-spinner" class="loading-spinner hidden" style="width:16px;height:16px;border-width:2px;"></span>
                     </button>
                     <button id="batch-pause-btn" onclick="toggleBatchPause()" class="hidden border-2 border-yellow-500 bg-yellow-50 text-yellow-700 px-3 md:px-4 py-2 text-xs md:text-sm font-medium hover:bg-yellow-100 transition-colors">
-                        <span id="batch-pause-label">⏸️ 暂停</span>
+                        <span id="batch-pause-label"><span data-icon="pause" class="icon-inline"></span> 暂停</span>
                     </button>
-                    <button id="batch-stop-btn" onclick="stopBatchGenerate()" class="hidden border-2 border-red-500 bg-red-50 text-red-700 px-3 md:px-4 py-2 text-xs md:text-sm font-medium hover:bg-red-100 transition-colors">
-                        ⛔ 停止
+                    <button id="batch-stop-btn" onclick="stopBatchGenerate()" class="hidden border-2 border-red-500 bg-red-50 text-red-700 px-3 md:px-4 py-2 text-xs md:text-sm font-medium hover:bg-red-100 transition-colors"><span data-icon="stop" class="icon-inline"></span> 停止
                     </button>
                     <button onclick="exportScript()" class="bg-white border-2 border-black px-3 md:px-4 py-2 text-xs md:text-sm font-medium hover:bg-gray-50 transition-colors">导出脚本</button>
                 </div>
@@ -1165,7 +1107,7 @@
             <div id="segments-container" class="space-y-6">
                 <div class="empty-state">
                     <span class="es-halftone" aria-hidden="true"></span>
-                    <div class="es-emoji">📝</div>
+                    <div class="es-icon" data-icon="note"></div>
                     <p class="es-title">还没有分镜</p>
                     <p class="es-hint">回到「小说输入」粘贴正文，点「开始智能分镜」，模型会按情节切页分格，并给每句对白挑一种语气。</p>
                     <button onclick="switchTab('input')" class="btn-primary px-5 py-2 text-sm font-medium">去输入小说</button>
@@ -1190,7 +1132,7 @@
             <div id="gallery-container" class="space-y-8">
                 <div class="empty-state">
                     <span class="es-halftone" aria-hidden="true"></span>
-                    <div class="es-emoji">🎨</div>
+                    <div class="es-icon" data-icon="palette"></div>
                     <p class="es-title">还没有成品图</p>
                     <p class="es-hint">在「分镜管理」里对某一页点「整页生成」，或直接「批量整页生成」把所有页一次跑完。</p>
                     <button onclick="switchTab('segments')" class="btn-primary px-5 py-2 text-sm font-medium">去生成整页</button>
@@ -1204,7 +1146,7 @@
         <div class="bg-white p-6 manga-border panel-shadow">
             <div class="flex items-center justify-between mb-4">
                 <div>
-                    <h2 class="text-2xl font-bold">📚 历史记录</h2>
+                    <h2 class="text-2xl font-bold"><span data-icon="books" class="icon-inline"></span> 历史记录</h2>
                     <p class="text-sm text-gray-500 mt-1">
                         当前账号：<span id="history-username" class="font-mono">-</span>
                         <span class="mx-2">·</span>
@@ -1212,15 +1154,15 @@
                     </p>
                 </div>
                 <div class="flex gap-2">
-                    <button id="history-save-current-btn" onclick="saveCurrentToHistory()" class="border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">💾 保存当前</button>
-                    <button onclick="refreshCurrentHistoryList()" class="border-2 border-gray-300 hover:border-black px-4 py-2 text-sm font-medium transition-colors">🔄 刷新</button>
+                    <button id="history-save-current-btn" onclick="saveCurrentToHistory()" class="border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors"><span data-icon="save" class="icon-inline"></span> 保存当前</button>
+                    <button onclick="refreshCurrentHistoryList()" class="border-2 border-gray-300 hover:border-black px-4 py-2 text-sm font-medium transition-colors"><span data-icon="refresh" class="icon-inline"></span> 刷新</button>
                 </div>
             </div>
             <!-- 子切换: 漫画作品 / AI 写作 -->
             <div id="hist-subtabs" class="relative flex gap-4 border-b-2 border-gray-200 mb-4">
                 <span class="ink-indicator" id="hist-ink" aria-hidden="true"></span>
-                <button id="hist-sub-comic" onclick="switchHistorySub('comic')" class="pb-2 px-1 text-base font-bold border-b-[3px] border-black">📖 漫画作品</button>
-                <button id="hist-sub-writing" onclick="switchHistorySub('writing')" class="pb-2 px-1 text-base text-gray-500 border-b-[3px] border-transparent hover:border-gray-300">✍️ AI 写作</button>
+                <button id="hist-sub-comic" onclick="switchHistorySub('comic')" class="pb-2 px-1 text-base font-bold border-b-[3px] border-black"><span data-icon="book-open" class="icon-inline"></span> 漫画作品</button>
+                <button id="hist-sub-writing" onclick="switchHistorySub('writing')" class="pb-2 px-1 text-base text-gray-500 border-b-[3px] border-transparent hover:border-gray-300"><span data-icon="pen" class="icon-inline"></span> AI 写作</button>
             </div>
             <!-- 漫画作品列表 -->
             <div id="history-comic-wrap">
@@ -1241,7 +1183,7 @@
     <div id="panel-comic2novel" class="hidden fade-in">
         <div class="bg-white p-6 manga-border panel-shadow mb-6">
             <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
-                <span class="w-6 h-6 bg-black text-white text-xs flex items-center justify-center rounded-full">📷</span>
+                <span class="w-6 h-6 bg-black text-white text-xs flex items-center justify-center rounded-full" data-icon="camera"></span>
                 上传漫画图片
             </h2>
             <p class="text-sm text-gray-500 mb-4">支持多张图片上传（按页面顺序），视觉AI将识别画面内容并生成小说文本</p>
@@ -1249,7 +1191,7 @@
             <!-- Upload Area -->
             <div class="border-2 border-dashed border-gray-300 p-8 text-center hover:border-black transition-colors cursor-pointer" onclick="document.getElementById('comic-file-input').click()">
                 <input type="file" id="comic-file-input" accept="image/*" multiple class="hidden" onchange="handleComicUpload(event)">
-                <div class="text-5xl mb-3">📤</div>
+                <div class="text-5xl mb-3" data-icon="upload" style="width:48px;height:48px;color:#1a1a1a;"></div>
                 <p class="text-gray-600 font-medium">点击选择漫画图片</p>
                 <p class="text-sm text-gray-400 mt-1">支持 JPG / PNG / WebP，建议按页码顺序选择</p>
             </div>
@@ -1286,7 +1228,7 @@
             <div class="bg-white p-6 manga-border panel-shadow">
                 <div class="flex justify-between items-center mb-4">
                     <h2 class="text-xl font-bold flex items-center gap-2">
-                        <span>📖</span>
+                        <span data-icon="book-open"></span>
                         生成的小说文本
                     </h2>
                     <div class="flex gap-2">
@@ -1317,7 +1259,7 @@
     <div id="image-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden z-50 flex items-center justify-center p-2 md:p-4" onclick="closeModal()">
         <div class="modal-card relative max-w-4xl max-h-full" onclick="event.stopPropagation()">
             <img id="modal-image" src="" alt="预览" class="max-w-full max-h-[85dvh] object-contain border-4 border-white">
-            <button onclick="closeModal()" class="absolute -top-10 right-0 text-white text-2xl hover:text-gray-300">✕</button>
+            <button onclick="closeModal()" class="absolute -top-10 right-0 text-white text-2xl hover:text-gray-300" data-icon="x" style="width:32px;height:32px;"></button>
         </div>
     </div>
 
@@ -1326,22 +1268,22 @@
         <div class="modal-backdrop absolute inset-0 bg-black bg-opacity-50" onclick="cancelPolishCompare()"></div>
         <div class="modal-card relative modal-panel-compare max-w-6xl mx-auto mt-2 mb-2 md:mt-8 md:mb-8 bg-white manga-border panel-shadow" style="display: flex; flex-direction: column;">
             <div class="flex items-center justify-between px-4 py-3 md:px-6 md:py-4 border-b-2 border-gray-200">
-                <h2 class="text-xl font-bold">✨ 润色对比预览</h2>
+                <h2 class="text-xl font-bold"><span data-icon="sparkles" class="icon-inline"></span> 润色对比预览</h2>
                 <button onclick="cancelPolishCompare()" class="w-9 h-9 flex items-center justify-center text-2xl text-gray-600 hover:text-black border border-gray-300 hover:border-black transition-colors">×</button>
             </div>
             <div class="flex-1 grid grid-cols-1 md:grid-cols-2 gap-0 p-3 md:p-6" style="min-height: 0;">
                 <div class="flex flex-col" style="min-width: 0;">
-                    <div class="text-sm font-bold text-gray-500 mb-2">📄 原文</div>
+                    <div class="text-sm font-bold text-gray-500 mb-2"><span data-icon="document" class="icon-inline"></span> 原文</div>
                     <div id="polish-original" class="whitespace-pre-wrap text-sm leading-relaxed border border-gray-300 p-3 bg-gray-50 overflow-y-auto" style="max-height: 60vh; flex: 1;"></div>
                 </div>
                 <div class="flex flex-col mt-4 md:mt-0 md:ml-4" style="min-width: 0;">
-                    <div class="text-sm font-bold text-green-700 mb-2">✨ 润色稿</div>
+                    <div class="text-sm font-bold text-green-700 mb-2"><span data-icon="sparkles" class="icon-inline"></span> 润色稿</div>
                     <div id="polish-result" class="whitespace-pre-wrap text-sm leading-relaxed border-2 border-green-300 p-3 bg-green-50 overflow-y-auto" style="max-height: 60vh; flex: 1;"></div>
                 </div>
             </div>
             <div class="flex justify-end gap-3 px-4 py-3 md:px-6 md:py-4 border-t-2 border-gray-200">
-                <button onclick="cancelPolishCompare()" class="border-2 border-gray-300 hover:border-black px-6 py-2 font-medium transition-colors">✗ 放弃</button>
-                <button onclick="confirmPolishReplace()" class="btn-primary px-6 py-2 font-medium">✓ 替换文本</button>
+                <button onclick="cancelPolishCompare()" class="border-2 border-gray-300 hover:border-black px-6 py-2 font-medium transition-colors"><span data-icon="x" class="icon-inline"></span> 放弃</button>
+                <button onclick="confirmPolishReplace()" class="btn-primary px-6 py-2 font-medium"><span data-icon="check" class="icon-inline"></span> 替换文本</button>
             </div>
         </div>
     </div>
@@ -1349,6 +1291,8 @@
     <!-- Toast Notification -->
     <div id="toast" class="fixed bottom-24 md:bottom-6 right-6 bg-black text-white px-6 py-3 rounded shadow-lg transform translate-y-20 opacity-0 z-50"></div>
 
+    <script src="{{ url_for('static', filename='icons.js') }}"></script>
+    <script src="{{ url_for('static', filename='transitions.js') }}"></script>
     <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

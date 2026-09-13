@@ -6,6 +6,19 @@ import json
 import os
 import re
 import sys
+
+# Windows 中文控制台默认 GBK 编码, print emoji/特殊符号 (如提示词中的 ⚠️) 时会抛
+# UnicodeEncodeError: 'gbk' codec can't encode character ...; 统一将标准输出/错误
+# 流重配置为 UTF-8 (errors='replace' 兜底), 不支持重配置的环境 (如部分 Android) 跳过
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    try:
+        if _stream is not None:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+del _stream_name, _stream
+
 import time
 import hashlib
 import hmac
@@ -17,18 +30,53 @@ from datetime import datetime, timedelta
 from io import BytesIO
 import base64
 import threading
-import webbrowser
+# webbrowser 在 Android (Chaquopy) 上不可用; 仅非 Android 平台 import
+_IS_ANDROID = hasattr(sys, 'getandroidapilevel')
+if not _IS_ANDROID:
+    import webbrowser
 from PIL import Image, ImageDraw, ImageFont
 
-# ========== PyInstaller 兼容: 区分只读资源目录 (_MEIPASS) 与可写持久化目录 ==========
-# 打包运行 (sys.frozen=True) 时, __file__ 指向 _MEIPASS 临时目录, 写文件到那里会丢失.
-# 因此 BASE_DIR 必须指向 exe 所在目录, 而 Flask 的 templates/static 用 _MEIPASS 路径.
-if getattr(sys, 'frozen', False):
+# ========== 多平台兼容: Windows dev / PyInstaller / Android Chaquopy ==========
+# 三个分支共享同一套 _RESOURCE_DIR (只读) 和 _PERSIST_DIR (可写) 命名.
+# - dev: _RESOURCE_DIR = _PERSIST_DIR = 当前文件目录
+# - PyInstaller: _RESOURCE_DIR = _MEIPASS (解压临时目录), _PERSIST_DIR = exe 所在目录
+# - Android Chaquopy: _RESOURCE_DIR = __file__ 所在目录 (assets 解压后),
+#                    _PERSIST_DIR = app 私有沙盒 getFilesDir() (无需权限, 重装丢失)
+if _IS_ANDROID:
+    _RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
+    try:
+        from chaquopy.utils import get_files_dir
+        _PERSIST_DIR = get_files_dir()
+    except Exception:
+        # 兜底: app 私有目录的常见路径 (老版本 Chaquopy / 自定义镜像)
+        _PERSIST_DIR = '/data/data/com.text2comic.app/files'
+elif getattr(sys, 'frozen', False):
     _RESOURCE_DIR = sys._MEIPASS  # 只读: templates / static / 字体
     _PERSIST_DIR = os.path.dirname(os.path.abspath(sys.executable))  # 可写: .env / users.json / 生成图
 else:
     _RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
     _PERSIST_DIR = _RESOURCE_DIR
+
+
+def _ensure_android_fonts():
+    """Android 首次启动: 把 assets/fonts/ 下的思源黑体复制到 _PERSIST_DIR/fonts/.
+    _get_chinese_font() 的候选路径直接读 _PERSIST_DIR, 此处确保字体就位."""
+    if not _IS_ANDROID:
+        return
+    target = os.path.join(_PERSIST_DIR, 'fonts')
+    try:
+        os.makedirs(target, exist_ok=True)
+    except Exception:
+        return
+    for name in ('SourceHanSansSC-Regular.otf', 'SourceHanSansSC-Bold.otf'):
+        dst = os.path.join(target, name)
+        if os.path.isfile(dst):
+            continue
+        try:
+            from chaquopy.utils import copy_asset
+            copy_asset(f'fonts/{name}', dst)
+        except Exception as e:
+            print(f'[font] failed to copy {name}: {e}')
 
 # ========== .env 加载 (python-dotenv 可选, 没装就用手写 mini 解析) ==========
 ENV_FILE = os.path.join(_PERSIST_DIR, '.env')
@@ -1635,8 +1683,15 @@ def generate_character_image():
 
 # ============ 任务3: 自适应网格 + 4 种对话气泡 ============
 
-# 中文字体候选路径 (Windows 优先, 兼容 Linux/macOS)
-_CHINESE_FONT_CANDIDATES = [
+# 中文字体候选路径 (Android 优先用 assets 复制的思源黑体, 然后 Windows, 最后 Linux/macOS)
+_ANDROID_FONT_CANDIDATES = [
+    '/system/fonts/NotoSansCJK-Regular.ttc',           # 大多数 Android 设备预装
+    os.path.join(_PERSIST_DIR, 'fonts', 'SourceHanSansSC-Regular.otf'),
+    os.path.join(_PERSIST_DIR, 'fonts', 'SourceHanSansSC-Bold.otf'),
+]
+_CHINESE_FONT_CANDIDATES = (
+    _ANDROID_FONT_CANDIDATES if _IS_ANDROID else []
+) + [
     'C:/Windows/Fonts/msyh.ttc',     # 微软雅黑
     'C:/Windows/Fonts/simhei.ttf',   # 黑体
     'C:/Windows/Fonts/simsun.ttc',   # 宋体
@@ -1648,9 +1703,17 @@ _CHINESE_FONT_CANDIDATES = [
 
 
 def _get_chinese_font(size):
-    """按优先级加载中文字体, 全部失败则回退到 PIL 默认字体."""
-    for path in _CHINESE_FONT_CANDIDATES:
+    """按优先级加载中文字体, 全部失败则回退到 PIL 默认字体.
+    Android 上加 layout_engine=BASIC workaround (Pillow #7289: CJK 渲染 bug)."""
+    candidates = _CHINESE_FONT_CANDIDATES
+    if _IS_ANDROID:
+        # Android 启动: 首次复制 fonts 到沙盒
+        _ensure_android_fonts()
+    for path in candidates:
         try:
+            if _IS_ANDROID:
+                # layout_engine=Layout.BASIC 绕过 Pillow 在 Android 上的 CJK 渲染问题
+                return ImageFont.truetype(path, size, layout_engine=ImageFont.Layout.BASIC)
             return ImageFont.truetype(path, size)
         except Exception:
             continue
@@ -2772,8 +2835,13 @@ def work_save_state():
     # 递归处理所有图片 URL
     def _relocate_images_in_obj(obj):
         if isinstance(obj, dict):
-            for k, v in obj.items():
-                if k in ('image_url', 'local_url') and isinstance(v, str) and v.startswith('/'):
+            # 用 list() 避免修改时迭代 dict 报错; value 可能是字符串 URL 或嵌套结构
+            for k, v in list(obj.items()):
+                # 关键修复: 前端发来的 full_page_images / full_page_clean_images /
+                # generated_images / combined_page_images 都是 {"<pageIdx>": "/static/..."}
+                # 这种"URL 作为 value 的 dict", 之前只检查 image_url/local_url key 会漏掉
+                # 这直接导致"另存为新作品"时新作品的 state.json 仍指向旧作品的 images 目录
+                if isinstance(v, str) and v.startswith('/'):
                     obj[k] = _relocate_image(v)
                 elif isinstance(v, (dict, list)):
                     _relocate_images_in_obj(v)
@@ -2883,23 +2951,28 @@ def history_detail(work_id):
                 if stem.startswith('char_') or stem.startswith('character_'):
                     char_images.append(url)
                 # 整页图: comic_page_<N>_full_*.png
+                # 注意: 文件名里的 N 是 1-based page_num(用户在第 N 页触发时传 page.page_number),
+                # 但前端 dict key 是 0-based page_idx(pages 数组下标), 必须 -1 转换
+                # 否则历史作品加载后第 1 页显示第 2 页的图、最后一页永远空白
                 elif stem.startswith('comic_page_') and '_full_' in stem:
-                    # 提取 pageIdx: comic_page_1_full_20260616_090916 -> 1
                     parts = stem.split('_')
                     if len(parts) >= 3:
                         try:
-                            page_idx = int(parts[2])
+                            page_num = int(parts[2])
+                            page_idx = page_num - 1
                             full_page_images_rebuilt[page_idx] = url
                         except ValueError:
                             pass
                 # 分镜图: comic_page_<N>_seg_<M>_*.png
+                # 同理: LLM segment_number 也是 1-based, 前端 segIdx 是 0-based
                 elif stem.startswith('comic_page_') and '_seg_' in stem:
-                    # 提取 pageIdx-segIdx: comic_page_1_seg_2_20260616_... -> 1-2
                     parts = stem.split('_')
                     if len(parts) >= 5:
                         try:
-                            page_idx = int(parts[2])
-                            seg_idx = int(parts[4])
+                            page_num = int(parts[2])
+                            seg_num = int(parts[4])
+                            page_idx = page_num - 1
+                            seg_idx = seg_num - 1
                             seg_images_rebuilt[f'{page_idx}-{seg_idx}'] = url
                         except ValueError:
                             pass
@@ -2912,13 +2985,34 @@ def history_detail(work_id):
     state.setdefault('full_page_images', {})
     state.setdefault('combined_page_images', {})
 
-    # 从磁盘重建图片 URL 映射 (如果 state 里是空的)
-    # 分镜图
-    if not state['generated_images']:
-        state['generated_images'] = seg_images_rebuilt
-    # 整页图
-    if not state['full_page_images']:
-        state['full_page_images'] = full_page_images_rebuilt
+    # 从磁盘重建图片 URL 映射; 同时校验 state 中已有的 URL, 文件不存在的用磁盘版本兜底
+    # 策略: 以磁盘为准, state 中已存在且文件真实存在的 URL 优先保留(可能是用户手动编辑过的路径)
+    # 这样既能修复 state 为空 / 老数据 state.json 缺失的情况, 也能兜底文件丢失导致的 404
+    # 关键: disk_rebuilt 的 key 是 int (page_idx), state JSON 反序列化后 key 是 str
+    # 必须统一类型, 否则合并会同时存在 int(0) 和 str("0") 两个 entry (前端取不到)
+    disk_fpi = full_page_images_rebuilt
+    state_fpi = state.get('full_page_images') or {}
+    merged_fpi = dict(disk_fpi)
+    for k, url in state_fpi.items():
+        abs_path = _local_image_abs_path(url)
+        if abs_path and os.path.exists(abs_path):
+            # 尝试统一为 int key (full_page_images 语义就是 int page_idx)
+            try:
+                k_norm = int(k)
+            except (ValueError, TypeError):
+                k_norm = k
+            merged_fpi[k_norm] = url
+    state['full_page_images'] = merged_fpi
+
+    disk_seg = seg_images_rebuilt
+    state_seg = state.get('generated_images') or {}
+    merged_seg = dict(disk_seg)
+    for k, url in state_seg.items():
+        abs_path = _local_image_abs_path(url)
+        if abs_path and os.path.exists(abs_path):
+            # generated_images 用 "pageIdx-segIdx" 字符串 key, 保持原样
+            merged_seg[k] = url
+    state['generated_images'] = merged_seg
 
     # 重建角色人设图 image_url:
     # 1. data: / http(s) URL: 直接保留 (用户上传或外链, 文件不在本地 images_dir 也无需重建)
@@ -3888,6 +3982,13 @@ def sync_results():
     return jsonify({'success': True})
 
 
+def run_server():
+    """Chaquopy (Android) 入口: 禁用 reloader, threaded 模式, 单进程.
+    MainActivity 通过 module.callAttr('run_server') 调用."""
+    _HOST = '127.0.0.1'  # 只在 Android 沙盒内访问, 不需要外部网络
+    app.run(host=_HOST, port=2778, debug=False, use_reloader=False, threaded=True)
+
+
 if __name__ == '__main__':
     clean_cache()
     migrate_legacy_output()
@@ -3902,16 +4003,22 @@ if __name__ == '__main__':
     print(f'[manga] secret_key : 来自 .env / os.urandom  (持久化到 .env)')
     print('=' * 60)
 
-    # 自动打开浏览器 (debug 模式 reloader 会 fork 子进程, 仅子进程打开避免重复)
-    def _open_browser_delayed():
-        url = 'http://127.0.0.1:2778'
-        print(f'[manga] opening browser: {url}')
-        try:
-            webbrowser.open(url)
-        except Exception as e:
-            print(f'[manga] auto-open browser failed: {e}; please visit {url} manually')
+    # Android: WebView 自己加载 http://127.0.0.1:2778, 不需要打开系统浏览器
+    if _IS_ANDROID:
+        # Android 不走 if __name__ 入口 (Chaquopy 用 module.callAttr), 这里仅作完整性
+        run_server()
+    else:
+        # Windows dev / PyInstaller: 自动打开浏览器 (debug 模式 reloader 会 fork 子进程,
+        # 仅子进程打开避免重复); threaded=True 让长任务不阻塞 WebView 心跳
+        def _open_browser_delayed():
+            url = 'http://127.0.0.1:2778'
+            print(f'[manga] opening browser: {url}')
+            try:
+                webbrowser.open(url)
+            except Exception as e:
+                print(f'[manga] auto-open browser failed: {e}; please visit {url} manually')
 
-    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-        threading.Timer(1.5, _open_browser_delayed).start()
+        if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+            threading.Timer(1.5, _open_browser_delayed).start()
 
-    app.run(host='0.0.0.0', port=2778, debug=True)
+        app.run(host='0.0.0.0', port=2778, debug=True, threaded=True)
