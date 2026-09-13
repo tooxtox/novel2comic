@@ -52,35 +52,35 @@ python app.py
 AI 先读完整本小说，提取每个角色，自动生成人设参考图。后续每页分镜都带人设参考，**同一个角色翻 100 页也不会变脸**。
 
 <p align="center">
-  <img src="static/showcase/char-sheet.jpg" width="80%" alt="角色人设图"/>
+  <img src="static/showcase/01_char-sheet.jpg" width="80%" alt="角色人设图"/>
 </p>
 
 ### 📖 一键智能分镜
 不用手动规划镜位、画分镜草稿。AI 自动把小说拆成 2-8 格的整页结构，标注好**视角、构图、情绪、景别、光照**——专业漫画师的镜头术语 AI 都会用。
 
 <p align="center">
-  <img src="static/showcase/step-page.jpg" width="80%" alt="分镜"/>
+  <img src="static/showcase/02_step-page.jpg" width="80%" alt="分镜"/>
 </p>
 
 ### 🎨 整页黑白漫画一键出图
 不是单格凑，是 **整页** 生成。AI 自适应 2x2 / 2x3 / 3x3 网格，自动配上网格线、画面风格统一。
 
 <p align="center">
-  <img src="static/showcase/hero-page.jpg" width="80%" alt="整页漫画"/>
+  <img src="static/showcase/03_hero-page.jpg" width="80%" alt="整页漫画"/>
 </p>
 
 ### 💬 8 种对白气泡，零乱码
 喊叫 / 耳语 / 心理 / 旁白 / 拟声词... 8 种气泡形状，AI 根据语气自动选型。**图像 API 不画中文**（会乱码），所有对白由后端用系统中文字体（微软雅黑 / 黑体 / 宋体）精准渲染——**100% 不出现方框字**。
 
 <p align="center">
-  <img src="static/showcase/bubbles-page.jpg" width="80%" alt="气泡效果"/>
+  <img src="static/showcase/04_bubbles-page.jpg" width="80%" alt="气泡效果"/>
 </p>
 
 ### 🔄 反向：漫画 → 小说
 上传漫画图片，AI 看图写话，按页拆分还原成小说文本。**支持批量**，把整本漫画扫描版丢进去也能拆。
 
 <p align="center">
-  <img src="static/showcase/reverse-page.jpg" width="80%" alt="漫画转小说"/>
+  <img src="static/showcase/05_reverse-page.jpg" width="80%" alt="漫画转小说"/>
 </p>
 
 ---
