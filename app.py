@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file, session
+from flask import Flask, render_template, request, jsonify, send_file, session, has_request_context
 from flask_cors import CORS
 from functools import wraps
 import requests
@@ -43,13 +43,14 @@ from PIL import Image, ImageDraw, ImageFont
 # - Android Chaquopy: _RESOURCE_DIR = __file__ 所在目录 (assets 解压后),
 #                    _PERSIST_DIR = app 私有沙盒 getFilesDir() (无需权限, 重装丢失)
 if _IS_ANDROID:
-    _RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
-    try:
-        from chaquopy.utils import get_files_dir
-        _PERSIST_DIR = get_files_dir()
-    except Exception:
-        # 兜底: app 私有目录的常见路径 (老版本 Chaquopy / 自定义镜像)
-        _PERSIST_DIR = '/data/data/com.text2comic.app/files'
+    # Android: templates/ static/ fonts/ 以 APK assets 形式打包, Chaquopy 的
+    # AssetFinder 只管 .pyc, Python 侧 os.path.isfile() 看不到 assets —— 所以
+    # MainActivity.prepareResourceDir() 先把它们解压成真实文件, 再由
+    # bootstrap.setup() 通过环境变量把路径传进来.
+    _RESOURCE_DIR = (os.environ.get('T2C_RESOURCE_DIR')
+                     or os.path.dirname(os.path.abspath(__file__)))
+    _PERSIST_DIR = (os.environ.get('T2C_FILES_DIR')
+                    or '/data/data/com.text2comic.app/files')
 elif getattr(sys, 'frozen', False):
     _RESOURCE_DIR = sys._MEIPASS  # 只读: templates / static / 字体
     _PERSIST_DIR = os.path.dirname(os.path.abspath(sys.executable))  # 可写: .env / users.json / 生成图
@@ -59,8 +60,12 @@ else:
 
 
 def _ensure_android_fonts():
-    """Android 首次启动: 把 assets/fonts/ 下的思源黑体复制到 _PERSIST_DIR/fonts/.
-    _get_chinese_font() 的候选路径直接读 _PERSIST_DIR, 此处确保字体就位."""
+    """Android: 把 _RESOURCE_DIR/fonts/ 下的思源黑体复制到 _PERSIST_DIR/fonts/.
+    _get_chinese_font() 的候选路径直接读 _PERSIST_DIR, 此处确保字体就位.
+
+    注意: 不能用 chaquopy.utils.copy_asset —— Chaquopy 17 没有这个模块,
+    import 会静默失败, 字体永远拷不过来. _RESOURCE_DIR/fonts 是
+    MainActivity 从 APK assets 解压出来的真实文件, 直接 copy 即可."""
     if not _IS_ANDROID:
         return
     target = os.path.join(_PERSIST_DIR, 'fonts')
@@ -72,9 +77,12 @@ def _ensure_android_fonts():
         dst = os.path.join(target, name)
         if os.path.isfile(dst):
             continue
+        src = os.path.join(_RESOURCE_DIR, 'fonts', name)
         try:
-            from chaquopy.utils import copy_asset
-            copy_asset(f'fonts/{name}', dst)
+            if os.path.isfile(src):
+                shutil.copy2(src, dst)
+            else:
+                print(f'[font] missing source: {src}')
         except Exception as e:
             print(f'[font] failed to copy {name}: {e}')
 
@@ -176,7 +184,76 @@ ADMIN_PASSWORD = _ensure_env('MANGA_ADMIN_PASSWORD', lambda: secrets.token_urlsa
 
 app = Flask(__name__, static_folder=None, template_folder=os.path.join(_RESOURCE_DIR, 'templates'))
 app.secret_key = SECRET_KEY
-CORS(app, supports_credentials=True)
+
+
+# ========== CSRF 防护 ==========
+# CORS 收紧后跨站读不到了, 但 SameSite=Lax 明确允许**跨站顶级 GET**,
+# 且本应用里所有危险操作都可能被诱导触发, 所以变更类请求仍要带 CSRF token.
+# token 存在 session 里, 由模板 <meta name="csrf-token"> 下发, 前端统一在
+# fetch 拦截器里补 X-CSRF-Token 头 —— 不要依赖每个调用点手动加, 漏一个就静默 403.
+_CSRF_SESSION_KEY = '_csrf_token'
+# 未登录时无法持有 token, 这两个接口必须豁免, 否则所有人都注册/登录不了
+_CSRF_EXEMPT_ENDPOINTS = {'/api/login', '/api/register'}
+
+
+def _csrf_token():
+    """取(或生成)当前 session 的 CSRF token"""
+    token = session.get(_CSRF_SESSION_KEY)
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session[_CSRF_SESSION_KEY] = token
+    return token
+
+
+def _rotate_csrf_token():
+    """登录/登出后轮换 token, 防止会话固定"""
+    session.pop(_CSRF_SESSION_KEY, None)
+    return _csrf_token()
+
+
+app.jinja_env.globals['csrf_token'] = _csrf_token
+
+
+@app.before_request
+def _csrf_protect():
+    """变更类 /api/* 请求校验 X-CSRF-Token"""
+    if request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return None
+    if not request.path.startswith('/api/'):
+        return None
+    if request.path in _CSRF_EXEMPT_ENDPOINTS:
+        return None
+    expected = session.get(_CSRF_SESSION_KEY)
+    provided = request.headers.get('X-CSRF-Token', '')
+    if not expected or not provided or not hmac.compare_digest(str(expected), str(provided)):
+        return jsonify({'error': 'CSRF 校验失败，请刷新页面重试', 'csrf_failed': True}), 403
+    return None
+
+
+# Session cookie 加固. 之前没设过 SameSite/HTTP_ONLY, 只能吃浏览器默认值.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    # 走 HTTPS (内网穿透/公网部署) 时应为 True; 本地 http 调试保持 False,
+    # 否则浏览器在 http://127.0.0.1 上根本不会带 cookie, 登录直接失效.
+    SESSION_COOKIE_SECURE=os.environ.get('T2C_SECURE_COOKIE', '').lower() in ('1', 'true', 'yes'),
+)
+
+# CORS 白名单.
+# 之前是 CORS(app, supports_credentials=True) —— flask-cors 会把请求方任意 Origin
+# 原样回显并附上 Access-Control-Allow-Credentials: true, 等于让**任意网站**都能
+# 以当前登录用户的身份调用全部 /api/* (读历史、删作品、改配置).
+# 本应用是同源的 (WebView / 本机浏览器直接打开 http://127.0.0.1:2778), 正常根本
+# 不需要 CORS 头, 所以默认只放行本机来源; 需要跨机访问时用环境变量追加.
+_allowed_origins = [
+    'http://127.0.0.1:2778', 'http://localhost:2778',
+    'http://127.0.0.1:2779', 'http://localhost:2779',
+]
+_extra_origins = os.environ.get('T2C_EXTRA_ORIGINS', '')
+_allowed_origins += [o.strip() for o in _extra_origins.split(',') if o.strip()]
+CORS(app,
+     resources={r'/api/*': {'origins': _allowed_origins}},
+     supports_credentials=True)
 
 # WebSocket 已移除: 后端从未 emit 进度事件, 前端一律使用 fake progress
 BASE_DIR = _PERSIST_DIR
@@ -187,13 +264,21 @@ CONFIG_TEMPLATE_PATH = os.path.join(BASE_DIR, 'config.json')
 # Flask 默认的 /static 只服务 static_folder (此处 _MEIPASS/static), 但生成图在 BASE_DIR/static.
 # static_folder=None 时 Flask 不注册 'static' 端点, 这里用 endpoint='static' 补上,
 # 使模板里的 url_for('static', filename=...) 能正确生成 URL.
+#
+# 安全: 这条路由曾经是"任何人可读服务器上任意文件"的入口 ——
+#   GET /static/../.env  -> 200 MANGA_SECRET_KEY + MANGA_ADMIN_PASSWORD (匿名可读)
+# 因为 os.path.join(base,'static','../.env') 会归一化到 BASE_DIR/.env.
+# 拿到 SECRET_KEY 就能伪造任意用户的 session cookie, 于是所有账号数据都形同虚设.
+# 现在必须依次过三道关: realpath 包含性 -> 扩展名白名单 -> users/ 子树的可见性校验.
 @app.route('/static/<path:filename>', endpoint='static')
 def _pyinstaller_static(filename):
-    for base in (_RESOURCE_DIR, BASE_DIR):
-        candidate = os.path.join(base, 'static', filename)
-        if os.path.isfile(candidate):
-            return send_file(candidate)
     from flask import abort
+    # ⚠️ users/ 子树规则的不变量写在 _resolve_readable_static 里:
+    #   只放行图片, 永不把 history.json / meta.json / state.json 直出.
+    #   未来任何 url_for('static', filename='users/.../state.json') 都会在这里被 404 掉.
+    candidate = _resolve_readable_static('/static/' + str(filename))
+    if candidate:
+        return send_file(candidate)
     abort(404)
 
 OUTPUT_DIR = os.path.join(BASE_DIR, 'static', 'output')
@@ -256,8 +341,189 @@ def save_users(users: dict) -> None:
 CACHE_EXPIRE_DAYS = 7
 
 
+# ========== 访问控制: 路径包含性 + 作品可见性 ==========
+# 背景: /static 路由原本用 os.path.join(base,'static',filename) 直接拼路径,
+# 没有 realpath 包含性检查, 导致 GET /static/../.env 匿名即可读到
+# MANGA_SECRET_KEY 和 admin 密码 —— 拿到密钥就能伪造任意用户的 session,
+# 于是任何"私密"保证都从根上失效. 下面这套 helper 是所有文件读取路径的唯一收口点.
+#
+# 规则 (fail-closed):
+#   1. 任何 <base>/static 下的文件读取都必须先过 _safe_static_realpath
+#   2. 任何属于某个作品的文件, 还必须过 _can_read_user_file
+#   3. 读不到 / 不合法 一律按"不存在"处理 (404), 不返回 403, 避免泄露"存在但无权限"
+
+# static 路由允许直接对外提供的扩展名 (前端资源)
+_STATIC_PUBLIC_EXTS = frozenset({
+    '.css', '.js', '.map', '.svg', '.woff2', '.woff', '.ttf', '.ico',
+    '.png', '.jpg', '.jpeg', '.webp', '.gif', '.webmanifest',
+})
+# 用户作品目录里, 只有图片可以直接经 /static 提供;
+# history.json / meta.json / state.json 一律不走 static, 只能经 API 且过权限校验
+_IMAGE_EXTS = frozenset({'.png', '.jpg', '.jpeg', '.webp', '.gif'})
+
+_WORK_ID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+# 用户名规则与 register 路由保持一致 (中英文/数字/下划线/连字符, 2-32)
+_USERNAME_RE = re.compile(r'^[A-Za-z0-9_\-一-龥]{2,32}$')
+
+# meta.json 可见性查询缓存: (username, work_id) -> (expires_monotonic, is_public)
+# 图片墙一次会并发几十个图片请求, 每次都读盘太浪费; 5s 足够, 且切公开/私密后
+# 最多 5 秒生效 —— 对"我刚点了公开, 结果对方 5 秒后才看到"这种场景完全够用.
+_visibility_cache = {}
+_visibility_cache_lock = threading.Lock()
+_VISIBILITY_TTL = 5.0
+
+
+def _is_valid_work_id(work_id):
+    """work_id 必须是严格 UUID —— 挡掉 '../../victim/works/w1' 这类穿越."""
+    return bool(work_id) and bool(_WORK_ID_RE.match(str(work_id)))
+
+
+def _is_valid_username(username):
+    return bool(username) and bool(_USERNAME_RE.match(str(username)))
+
+
+def _safe_static_realpath(root_dir, url_path):
+    """把 URL 里的相对路径安全地解析到 root_dir 之内, 越界/穿越一律返回 None.
+
+    root_dir 应当是 <base>/static 这样的根目录. 双重防护:
+      1. 显式拒绝任何 '..' 片段 (realpath 归一化后可能恰好抵消回根内, 语义上不该放行)
+      2. realpath 归一化后必须仍位于 realpath(root_dir) 之内 (防软链/绝对路径/编码绕过)
+    """
+    if not url_path:
+        return None
+    rel = str(url_path).lstrip('/').replace('\\', '/')
+    if not rel or '..' in rel.split('/'):
+        return None
+    if '\x00' in rel:
+        return None
+    try:
+        root_real = os.path.realpath(root_dir)
+        candidate = os.path.realpath(os.path.join(root_real, rel))
+    except (OSError, ValueError):
+        return None
+    # candidate 必须等于 root 或以 root + os.sep 开头 (加 os.sep 防 /static-evil 误判)
+    if candidate != root_real and not candidate.startswith(root_real + os.sep):
+        return None
+    return candidate
+
+
+def _read_work_meta(username, work_id):
+    """读某个作品的 meta.json; 非法 id / 读不到 一律返回 None."""
+    if not _is_valid_work_id(work_id) or not _is_valid_username(username):
+        return None
+    meta_path = os.path.join(USER_DATA_DIR, username, 'works', work_id, 'meta.json')
+    try:
+        real = os.path.realpath(meta_path)
+        works_root = os.path.realpath(os.path.join(USER_DATA_DIR, username, 'works'))
+        if not real.startswith(works_root + os.sep):
+            return None
+        if not os.path.isfile(real):
+            return None
+        with open(real, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError) as e:
+        print(f"[auth] read meta failed for {username}/{work_id}: {e}")
+        return None
+
+
+def _is_work_public(username, work_id):
+    """该作品是否公开. 读不到 meta 时按"私密"处理 (fail-closed). 带 5s 缓存."""
+    if not _is_valid_work_id(work_id) or not _is_valid_username(username):
+        return False
+    key = (username, str(work_id))
+    now = time.monotonic()
+    with _visibility_cache_lock:
+        hit = _visibility_cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+    meta = _read_work_meta(username, work_id)
+    value = bool(meta.get('is_public')) if meta else False
+    with _visibility_cache_lock:
+        if len(_visibility_cache) > 4096:  # 防止长时间运行无限增长
+            _visibility_cache.clear()
+        _visibility_cache[key] = (now + _VISIBILITY_TTL, value)
+    return value
+
+
+def _can_read_user_file(username, work_id, caller):
+    """调用者能否经 /static 读取 <username>/<work_id> 下的文件.
+
+    caller 为 None 表示未登录. 仅两种情况放行:
+      - caller == username (本人) —— 已登录, 且 username 来自 session 而非请求参数
+      - 该作品 is_public 为真 (任何人可看公开作品)
+    """
+    if not _is_valid_work_id(work_id) or not _is_valid_username(username):
+        return False
+    if caller and caller == username:
+        return True
+    return _is_work_public(username, work_id)
+
+
+def _invalidate_visibility(username=None, work_id=None):
+    """切换公开/私密后清缓存, 保证立刻生效."""
+    with _visibility_cache_lock:
+        if username is None:
+            _visibility_cache.clear()
+            return
+        for key in [k for k in _visibility_cache
+                    if k[0] == username and (work_id is None or k[1] == str(work_id))]:
+            _visibility_cache.pop(key, None)
+
+
+def _current_caller():
+    """当前调用者用户名; 不在请求上下文里 (后台线程) 一律 None."""
+    try:
+        if not has_request_context():
+            return None
+        return session.get('username') if session.get('logged_in') else None
+    except Exception:
+        return None
+
+
+def _resolve_readable_static(url):
+    """把 '/static/xxx' URL 解析成本地**可读**的绝对路径; 不可读返回 None.
+
+    这是所有 "URL → 磁盘路径" 的唯一收口点. 之前有四处各写一遍
+    os.path.join(BASE_DIR, url.lstrip('/')), 任意一处都能读遍服务器:
+      - /static/<path> 路由本身
+      - /api/download 的 /static 分支
+      - cache_reference_image / get_cached_image_base64
+      - _relocate_image (把别人私密图复制进自己目录 = 洗白原语)
+
+    规则与 static 路由一致: 扩展名白名单 → realpath 包含性 → users/ 可见性.
+    """
+    if not url or not isinstance(url, str) or not url.startswith('/static/'):
+        return None
+    rel = url[len('/static/'):].replace('\\', '/')
+    ext = os.path.splitext(rel)[1].lower()
+    if ext not in _STATIC_PUBLIC_EXTS:
+        return None
+
+    caller = _current_caller()
+    for base in (_RESOURCE_DIR, BASE_DIR):
+        candidate = _safe_static_realpath(os.path.join(base, 'static'), rel)
+        if not candidate or not os.path.isfile(candidate):
+            continue
+        # users/ 子树: 只放行图片, 且需要"本人 或 该作品已公开"
+        parts = rel.split('/')
+        if len(parts) >= 3 and parts[0] == 'users':
+            if ext not in _IMAGE_EXTS:
+                return None
+            if len(parts) >= 4 and parts[2] == 'works' and _is_valid_work_id(parts[3]):
+                if not _can_read_user_file(parts[1], parts[3], caller):
+                    return None
+            elif not (caller and caller == parts[1]):
+                return None
+        return candidate
+    return None
+
+
 def get_user_dir(username):
     """获取用户账号目录，不存在则创建"""
+    if not _is_valid_username(username):
+        raise ValueError('非法用户名')
     user_dir = os.path.join(USER_DATA_DIR, username)
     os.makedirs(user_dir, exist_ok=True)
     os.makedirs(os.path.join(user_dir, 'works'), exist_ok=True)
@@ -265,26 +531,49 @@ def get_user_dir(username):
 
 
 def get_work_dir(username, work_id):
-    """获取单个作品目录"""
-    work_dir = os.path.join(get_user_dir(username), 'works', work_id)
+    """获取单个作品目录 (不存在则创建)"""
+    # work_id 必须是严格 UUID: 否则 '../../别的账号/works/xxx' 会被 join 进去,
+    # 造成跨账号读写 (实测: POST /api/work/save-state 传 work_id='../../victim/works/w1'
+    # 会直接覆写 victim 的 state.json)
+    if not _is_valid_work_id(work_id):
+        raise ValueError('非法作品ID')
+    work_dir = own_work_dir(username, work_id)
+    if not work_dir:
+        raise ValueError('非法作品路径')
     os.makedirs(work_dir, exist_ok=True)
     os.makedirs(os.path.join(work_dir, 'images'), exist_ok=True)
     return work_dir
 
 
+def get_current_username():
+    """当前请求的用户名 (唯一收口, 避免 8 处各写一遍 guest_ 回退)"""
+    sid = get_session_id()
+    return session.get('username') or f'guest_{sid[:8]}'
+
+
+def resolve_own_work_id():
+    """当前会话绑定的作品ID —— **只**认 session, 永不读请求体.
+
+    任何"操作我自己的作品"的路径都必须用这个, 不能用 get_current_work_id():
+    后者会接受请求体里的 work_id, 等于把跨账号写权限交给客户端.
+    """
+    return session.get('work_id')
+
+
 def get_current_work_id():
     """获取当前会话绑定的作品ID（用户未显式创建时，使用session_id作为虚拟账号）
 
-    优先从请求体读 work_id (小程序前端会传, 用于云存储路径),
-    其次用 session 中的 work_id。
+    兼容小程序前端: 它会在请求体里带 work_id (用于云存储路径).
+    但该值来自客户端, 不可信 —— 所以这里必须做严格 UUID 校验,
+    校验不过就忽略它, 回落到 session 里的值.
     """
-    sid = get_session_id()
-    username = session.get('username') or f'guest_{sid[:8]}'
-    work_id = session.get('work_id')
+    username = get_current_username()
+    work_id = resolve_own_work_id()
     try:
         body = request.get_json(silent=True) or {}
         req_work_id = body.get('work_id')
-        if req_work_id:
+        # 只有严格 UUID 才采信客户端传的 work_id
+        if req_work_id and _is_valid_work_id(req_work_id):
             work_id = req_work_id
     except Exception:
         pass
@@ -306,14 +595,21 @@ def list_user_works(username):
 
 
 def save_user_history(username, history):
-    """保存用户的历史索引"""
+    """保存用户的历史索引 (原子写: tmp + os.replace)"""
     user_dir = get_user_dir(username)
     works_file = os.path.join(user_dir, 'history.json')
+    tmp = works_file + '.tmp'
     try:
-        with open(works_file, 'w', encoding='utf-8') as f:
+        with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, works_file)
     except Exception as e:
         print(f"Save history error: {e}")
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
 
 
 # ========== AI 写作历史 (与漫画作品分开存储) ==========
@@ -578,8 +874,8 @@ def cache_reference_image(url, name=""):
                 print(f"[cache-ref] download failed: {e}")
                 img_data = None
         elif url.startswith('/static'):
-            local_path = os.path.join(BASE_DIR, url.lstrip('/'))
-            if os.path.exists(local_path):
+            local_path = _resolve_readable_static(url)
+            if local_path:
                 with open(local_path, 'rb') as f:
                     img_data = f.read()
         elif url.startswith('data:image'):
@@ -633,8 +929,8 @@ def get_cached_image_base64(cache_url):
     if not cache_url:
         return None
     try:
-        local_path = os.path.join(BASE_DIR, cache_url.lstrip('/'))
-        if os.path.exists(local_path):
+        local_path = _resolve_readable_static(cache_url)
+        if local_path:
             with open(local_path, 'rb') as f:
                 img_data = f.read()
             # mime 按 PIL 实际探测 — 不靠扩展名, 防止 .jpg 文件里实际是 png 字节被错送
@@ -759,8 +1055,48 @@ def login_required(f):
     def decorated_function(*args, **kwargs):
         if not session.get('logged_in'):
             return jsonify({'error': '请先登录', 'need_login': True}), 401
+        # 账号可能已被删除, 但 session cookie 还在 (它是客户端签名 cookie,
+        # 生命周期完全由浏览器决定). 复查一次, 避免"账号没了还能读写其作品".
+        username = session.get('username')
+        if username and username != ADMIN_USERNAME:
+            if username not in load_users():
+                session.clear()
+                return jsonify({'error': '账号不存在，请重新登录', 'need_login': True}), 401
         return f(*args, **kwargs)
     return decorated_function
+
+
+def work_id_required(f):
+    """校验 URL 里的 <work_id> 是严格 UUID.
+
+    没有这道校验时, DELETE /api/history/.. 会 rmtree 掉调用者**整个账号目录**,
+    而 /api/history/<别人的相对路径> 之类可被用来跨账号操作.
+    路由里凡是拿 work_id 去 join 路径的, 都必须挂这个装饰器.
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not _is_valid_work_id(kwargs.get('work_id')):
+            return jsonify({'error': '作品ID不合法'}), 400
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def own_work_dir(username, work_id):
+    """本账号下某个作品的目录; 非法 id / 越界 一律返回 None (fail-closed).
+
+    注意这里刻意**不**用 get_work_dir: 那个会 makedirs 建目录,
+    而查询类路由只想解析路径, 不该凭空造出目录.
+    """
+    if not _is_valid_work_id(work_id) or not _is_valid_username(username):
+        return None
+    try:
+        works_root = os.path.realpath(os.path.join(USER_DATA_DIR, username, 'works'))
+        candidate = os.path.realpath(os.path.join(works_root, work_id))
+    except (OSError, ValueError):
+        return None
+    if candidate != works_root and not candidate.startswith(works_root + os.sep):
+        return None
+    return candidate
 
 
 # ========== WebSocket 实时进度推送 ==========
@@ -845,6 +1181,12 @@ def _is_host_machine_request():
 
 
 @app.route('/')
+def home():
+    """默认入口: 登录页"""
+    return render_template('login.html')
+
+
+@app.route('/tooxtox')
 def landing():
     """宣传页: 未登录也能看, 展示核心功能, CTA 进入 /app"""
     return render_template('landing.html')
@@ -874,6 +1216,7 @@ def login():
         session['logged_in'] = True
         session['username'] = username
         session['is_admin'] = True
+        _rotate_csrf_token()
         return jsonify({'success': True, 'message': '登录成功', 'username': username, 'is_admin': True})
 
     # 2. 校验普通注册用户 (来自 users.json)
@@ -883,6 +1226,7 @@ def login():
         session['logged_in'] = True
         session['username'] = username
         session['is_admin'] = False
+        _rotate_csrf_token()
         # 确保用户目录存在
         get_user_dir(username)
         return jsonify({'success': True, 'message': '登录成功', 'username': username, 'is_admin': False})
@@ -2309,10 +2653,30 @@ def render_panel_bubble(draw, panel_box, seg, font, overflow=True, canvas_bounds
 
 
 def _local_image_abs_path(local_url):
-    """把 /static/xxx URL 转成本地绝对路径; 非 /static/ 前缀返回 None"""
+    """把 /static/xxx URL 转成本地绝对路径; 不合法 / 越界 / 无权访问 返回 None.
+
+    这个函数被用在**写**路径上 (reposition_bubbles 会把气泡烘到 output_abs),
+    以前是裸 os.path.join, 意味着一个登录用户可以传
+    output_image_url=/static/users/<别人>/works/<私密id>/images/x.png
+    直接覆写别人的私密作品. 现在统一走 _resolve_readable_static.
+
+    注意: 不在请求上下文里 (后台线程, 没有 session) 时无法判断调用者身份,
+    此时只做路径包含性检查, 放行权限判定 —— 这些都是内部流程,
+    而跨账号攻击必然发生在有 session 的请求里, 所以不会因此漏掉.
+    """
     if not local_url or not local_url.startswith('/static/'):
         return None
-    return os.path.join(BASE_DIR, local_url[1:])
+    resolved = _resolve_readable_static(local_url)
+    if resolved:
+        return resolved
+    # _resolve_readable_static 拒绝的原因可能是"无权限"而不是"路径非法";
+    # 无请求上下文时退回仅做包含性检查, 保证内部/后台流程不被误伤
+    if not has_request_context():
+        rel = local_url[len('/static/'):]
+        if '..' in rel.replace('\\', '/').split('/'):
+            return None
+        return _safe_static_realpath(os.path.join(BASE_DIR, 'static'), rel)
+    return None
 
 
 def _save_clean_copy(local_url):
@@ -2743,6 +3107,9 @@ def work_start():
         'title': title,
         'created_at': datetime.now().isoformat(),
         'updated_at': datetime.now().isoformat(),
+        # 默认私密: 用户必须主动打开开关才会公开. 存量作品没有这个字段,
+        # _is_work_public() 也按 False 处理, 所以历史数据天然保持私密.
+        'is_public': False,
     }
     with open(os.path.join(work_dir, 'meta.json'), 'w', encoding='utf-8') as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -2759,6 +3126,7 @@ def work_start():
         'title': title,
         'created_at': meta['created_at'],
         'updated_at': meta['updated_at'],
+        'is_public': False,
     })
     save_user_history(username, history)
 
@@ -2783,6 +3151,7 @@ def work_save_state():
             'title': title,
             'created_at': datetime.now().isoformat(),
             'updated_at': datetime.now().isoformat(),
+            'is_public': False,   # 新作品一律先私密
         }
         with open(os.path.join(work_dir, 'meta.json'), 'w', encoding='utf-8') as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -2796,6 +3165,7 @@ def work_save_state():
             'title': title,
             'created_at': meta['created_at'],
             'updated_at': meta['updated_at'],
+            'is_public': False,
         })
         save_user_history(username, history)
 
@@ -2817,11 +3187,14 @@ def work_save_state():
             return url
         # 尝试从磁盘复制
         try:
-            # URL → 磁盘路径
-            rel_path = url.lstrip('/')
-            disk_path = os.path.join(BASE_DIR, rel_path)
-            if not os.path.isfile(disk_path):
-                return url  # 文件不存在, 保持原 URL (可能是外部链接)
+            # URL → 磁盘路径. 必须过 _resolve_readable_static: 这条路径以前是
+            # os.path.join(BASE_DIR, url.lstrip('/')), 意味着只要请求体里塞一个
+            # /static/users/<别人>/works/<私密id>/images/x.png, 就能把别人的私密图
+            # 复制进自己作品目录, 再由 /api/history 返回一个"自己人"的 URL ——
+            # 任何按用户做的门禁都会被这样洗白. 现在统一按"本人 或 已公开"放行.
+            disk_path = _resolve_readable_static(url)
+            if not disk_path:
+                return url  # 不存在 / 越界 / 无权限, 保持原 URL
             # 生成新文件名
             ext = os.path.splitext(disk_path)[1] or '.png'
             new_filename = f"{os.path.splitext(os.path.basename(disk_path))[0]}_{int(time.time())}{ext}"
@@ -2911,10 +3284,13 @@ def history_list():
 
 @app.route('/api/history/<work_id>', methods=['GET'])
 @login_required
+@work_id_required
 def history_detail(work_id):
     """获取某个作品的完整数据（meta + state + 图片列表）"""
     username = session.get('username') or f'guest_{get_session_id()[:8]}'
-    work_dir = os.path.join(get_user_dir(username), 'works', work_id)
+    work_dir = own_work_dir(username, work_id)
+    if not work_dir:
+        return jsonify({'error': '作品ID不合法'}), 400
     if not os.path.isdir(work_dir):
         return jsonify({'error': '作品不存在'}), 404
 
@@ -3051,10 +3427,13 @@ def history_detail(work_id):
 
 @app.route('/api/history/<work_id>/load', methods=['POST'])
 @login_required
+@work_id_required
 def history_load(work_id):
     """加载历史作品到当前会话"""
     username = session.get('username') or f'guest_{get_session_id()[:8]}'
-    work_dir = os.path.join(get_user_dir(username), 'works', work_id)
+    work_dir = own_work_dir(username, work_id)
+    if not work_dir:
+        return jsonify({'error': '作品ID不合法'}), 400
     if not os.path.isdir(work_dir):
         return jsonify({'error': '作品不存在'}), 404
 
@@ -3082,12 +3461,19 @@ def history_load(work_id):
 
 @app.route('/api/history/<work_id>', methods=['DELETE'])
 @login_required
+@work_id_required
 def history_delete(work_id):
     """删除一个作品"""
     username = session.get('username') or f'guest_{get_session_id()[:8]}'
-    work_dir = os.path.join(get_user_dir(username), 'works', work_id)
-    if os.path.isdir(work_dir):
-        shutil.rmtree(work_dir)
+    work_dir = own_work_dir(username, work_id)
+    if not work_dir:
+        return jsonify({'error': '作品ID不合法'}), 400
+    # 目录不存在说明这本作品不属于当前用户 (或已被删过). 必须回 404:
+    # 以前这里是无条件返回 success, 别人传一个 work_id 就能得到"删除成功"的
+    # 假回执, 既误导调用方又让人以为这接口真的校验了归属.
+    if not os.path.isdir(work_dir):
+        return jsonify({'error': '作品不存在'}), 404
+    shutil.rmtree(work_dir)
 
     history = [w for w in list_user_works(username) if w['work_id'] != work_id]
     save_user_history(username, history)
@@ -3102,6 +3488,7 @@ def history_delete(work_id):
 
 @app.route('/api/history/<work_id>/rename', methods=['POST'])
 @login_required
+@work_id_required
 def history_rename(work_id):
     """重命名作品"""
     username = session.get('username') or f'guest_{get_session_id()[:8]}'
@@ -3110,7 +3497,9 @@ def history_rename(work_id):
     if not new_title:
         return jsonify({'error': '标题不能为空'}), 400
 
-    work_dir = os.path.join(get_user_dir(username), 'works', work_id)
+    work_dir = own_work_dir(username, work_id)
+    if not work_dir:
+        return jsonify({'error': '作品ID不合法'}), 400
     if not os.path.isdir(work_dir):
         return jsonify({'error': '作品不存在'}), 404
 
@@ -3136,6 +3525,311 @@ def history_rename(work_id):
         session['work_title'] = new_title
 
     return jsonify({'success': True, 'title': new_title})
+
+
+# ========== 作品可见性 (公开/私密) + 搜索他人公开作品 ==========
+# 数据模型: meta.json 和 history.json 条目上都有 is_public 布尔字段.
+#   缺省 / False = 私密. 存量 36 个作品都没有这个字段, 因此天然保持私密, 无需迁移.
+# 读权限的唯一判据是 _can_read_user_file(); 它同时被 /static 图片路由和
+# /api/download 共用, 保证"网页上看得到"和"图片能下载"两条路永远一致 ——
+
+
+def _set_work_visibility(username, work_id, is_public):
+    """同步写 meta.json 与 history.json 索引, 并清可见性缓存.
+
+    两处必须一起改: _is_work_public() 读的是 meta.json, 而搜索/列表读的是
+    history.json; 只改一处会导致"开关显示已公开但搜不到"之类的漂移.
+    """
+    meta = _read_work_meta(username, work_id) or {}
+    meta['is_public'] = bool(is_public)
+    meta['updated_at'] = datetime.now().isoformat()
+    work_dir = own_work_dir(username, work_id)
+    if not work_dir:
+        return False
+    tmp = os.path.join(work_dir, 'meta.json.tmp')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, os.path.join(work_dir, 'meta.json'))
+
+    history = list_user_works(username)
+    for w in history:
+        if w.get('work_id') == work_id:
+            w['is_public'] = bool(is_public)
+            break
+    save_user_history(username, history)
+    _invalidate_visibility(username, work_id)
+    return True
+
+
+@app.route('/api/history/<work_id>/visibility', methods=['POST'])
+@login_required
+@work_id_required
+def history_visibility(work_id):
+    """切换我自己的某个作品是公开还是私密.
+
+    owner 只从 session 取 —— 传任何 username/work_id 参数都无法影响他人作品.
+    """
+    username = session.get('username')
+    work_dir = own_work_dir(username, work_id)
+    if not work_dir or not os.path.isdir(work_dir):
+        return jsonify({'error': '作品不存在'}), 404
+
+    data = request.json or {}
+    if 'is_public' in data:
+        is_public = bool(data.get('is_public'))
+    else:
+        # 不传则取反 (前端点一下开关的语义)
+        is_public = not _is_work_public(username, work_id)
+
+    if not _set_work_visibility(username, work_id, is_public):
+        return jsonify({'error': '设置失败'}), 500
+    return jsonify({'success': True, 'work_id': work_id, 'is_public': is_public})
+
+
+def _iter_public_works():
+    """遍历全站所有**已公开**的作品, 产出 {owner, work_id, title, created_at, updated_at}.
+
+    以每个作品的 meta.json 为准 (和 _is_work_public 读的是同一份),
+    而不是 history.json 索引 —— 索引可能过期或损坏, 而可见性是隐私属性,
+    必须只有一个真相来源, 否则会出现"开关显示公开但搜不到"这类静默漂移.
+
+    直接扫目录而不是维护一份全局索引文件: 当前规模 (十几个账号 / 几十个作品)
+    下完全够用, 换来的是"不存在索引与实体不一致"这一整类 bug.
+    guest_ 前缀是未登录会话产生的虚拟账号, 不参与搜索.
+    """
+    try:
+        owners = os.listdir(USER_DATA_DIR)
+    except OSError:
+        return
+    for owner in owners:
+        if owner.startswith('guest_') or not _is_valid_username(owner):
+            continue
+        works_root = os.path.join(USER_DATA_DIR, owner, 'works')
+        if not os.path.isdir(works_root):
+            continue
+        try:
+            work_ids = os.listdir(works_root)
+        except OSError:
+            continue
+        for wid in work_ids:
+            if not _is_valid_work_id(wid):
+                continue
+            if not _is_work_public(owner, wid):
+                continue
+            meta = _read_work_meta(owner, wid) or {}
+            yield {
+                'owner': owner,
+                'work_id': wid,
+                'title': meta.get('title', ''),
+                'created_at': meta.get('created_at', ''),
+                'updated_at': meta.get('updated_at', ''),
+            }
+
+
+@app.route('/api/discover', methods=['GET'])
+@login_required
+def discover():
+    """搜索他人公开作品: 账号名 或 作品标题.
+
+    只返回 is_public 的条目; 自己公开的作品也会出现在结果里 (方便确认"我公开了什么").
+    """
+    q = (request.args.get('q') or '').strip()
+    limit = min(int(request.args.get('limit') or 60), 200)
+    try:
+        limit = max(1, limit)
+    except (TypeError, ValueError):
+        limit = 60
+
+    q_lower = q.lower()
+    results = []
+    accounts = set()
+    for item in _iter_public_works():
+        if q_lower:
+            hit_user = q_lower in item['owner'].lower()
+            hit_title = q_lower in (item['title'] or '').lower()
+            if not (hit_user or hit_title):
+                continue
+            if hit_user:
+                accounts.add(item['owner'])
+        results.append(item)
+
+    # 排序: 先按更新时间倒序, 再用稳定排序把"账号命中"的作品提到前面.
+    # 用户搜"人"时最想要的是该人的最新作品, 搜"标题"时按时间看即可.
+    results.sort(key=lambda w: w.get('updated_at') or '', reverse=True)
+    if q_lower:
+        results.sort(key=lambda w: 0 if q_lower in w['owner'].lower() else 1)
+
+    truncated = len(results) > limit
+    return jsonify({
+        'success': True,
+        'query': q,
+        'total': len(results),
+        'truncated': truncated,      # 让前端能提示"还有更多", 不静默截断
+        'accounts': sorted(accounts),
+        'works': results[:limit],
+    })
+
+
+def _public_work_payload(owner, work_id):
+    """构造公开作品的只读载荷: **只含 meta + 图片列表, 绝不含 state**.
+
+    state.json 里有 novel_text (小说正文) 以及气泡坐标等编辑数据.
+    用户"公开作品"的语义是分享生成的漫画图, 不是公开自己写的原文,
+    所以这里刻意不返回 state —— 否则等于把原文也发了出去.
+    """
+    work_dir = own_work_dir(owner, work_id)
+    if not work_dir or not os.path.isdir(work_dir):
+        return None
+    if not _is_work_public(owner, work_id):
+        return None
+
+    meta = _read_work_meta(owner, work_id) or {}
+    images_dir = os.path.join(work_dir, 'images')
+    images = []
+    cover = None
+    if os.path.isdir(images_dir):
+        for fn in sorted(os.listdir(images_dir)):
+            if os.path.splitext(fn)[1].lower() not in _IMAGE_EXTS:
+                continue
+            url = f'/static/users/{owner}/works/{work_id}/images/{fn}'
+            images.append(url)
+            # 优先用整页图做封面 (comic_page_*_full_*) 排版上更像成品
+            if cover is None or (fn.startswith('comic_page_') and '_full_' in fn):
+                cover = url
+
+    return {
+        'owner': owner,
+        'work_id': work_id,
+        'title': meta.get('title', ''),
+        'created_at': meta.get('created_at', ''),
+        'updated_at': meta.get('updated_at', ''),
+        'cover': cover,
+        'images': images,
+        'image_count': len(images),
+    }
+
+
+@app.route('/api/public/work/<owner>/<work_id>', methods=['GET'])
+@login_required
+def public_work_detail(owner, work_id):
+    """只读查看他人公开作品 (封面 + 图片墙). 非公开一律 404, 不区分"不存在"和"无权限"."""
+    if not _is_valid_username(owner) or not _is_valid_work_id(work_id):
+        return jsonify({'error': '作品不存在'}), 404
+    payload = _public_work_payload(owner, work_id)
+    if not payload:
+        return jsonify({'error': '作品不存在或未公开'}), 404
+    return jsonify({'success': True, 'work': payload})
+
+
+@app.route('/api/public/work/<owner>/<work_id>/fork', methods=['POST'])
+@login_required
+def public_work_fork(owner, work_id):
+    """把他人公开作品「另存为我的作品」: 深拷贝到我自己账号下, 默认私密.
+
+    必须真拷贝图片而不是引用对方路径 —— 否则原主人把作品改回私密,
+    我这份"副本"就会跟着失效, 也会让权限判断出现两个主人.
+    """
+    if not _is_valid_username(owner) or not _is_valid_work_id(work_id):
+        return jsonify({'error': '作品不存在'}), 404
+    payload = _public_work_payload(owner, work_id)
+    if not payload:
+        return jsonify({'error': '作品不存在或未公开'}), 404
+
+    username = session.get('username')
+    new_work_id = str(uuid.uuid4())
+    new_dir = get_work_dir(username, new_work_id)
+
+    # 1) 复制图片: 对方 images/ -> 我的 images/ (公开作品的图必然可读)
+    src_images = os.path.join(own_work_dir(owner, work_id), 'images')
+    name_map = {}
+    if os.path.isdir(src_images):
+        for fn in os.listdir(src_images):
+            if os.path.splitext(fn)[1].lower() not in _IMAGE_EXTS:
+                continue
+            src = os.path.join(src_images, fn)
+            if not os.path.isfile(src):
+                continue
+            # 加新 work_id 前缀避免同名冲突
+            dst_name = f'{new_work_id}_{fn}'
+            try:
+                shutil.copy2(src, os.path.join(new_dir, 'images', dst_name))
+                name_map[fn] = dst_name
+            except OSError as e:
+                print(f"[fork] copy image failed {fn}: {e}")
+
+    def _remap(url):
+        """把 /static/users/<owner>/works/<work_id>/images/<fn> 改写成我的路径"""
+        if not isinstance(url, str) or not url.startswith('/static/'):
+            return url
+        base = f'/static/users/{owner}/works/{work_id}/images/'
+        if not url.startswith(base):
+            return url
+        fn = url[len(base):]
+        dst = name_map.get(os.path.basename(fn))
+        if not dst:
+            return url
+        return f'/static/users/{username}/works/{new_work_id}/images/{dst}'
+
+    # 2) 复制 state 并把所有图片 URL 指向我的副本
+    state = {}
+    src_state = os.path.join(own_work_dir(owner, work_id), 'state.json')
+    if os.path.isfile(src_state):
+        try:
+            with open(src_state, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+        except (OSError, ValueError) as e:
+            print(f"[fork] read state failed: {e}")
+            state = {}
+
+    def _remap_deep(obj):
+        if isinstance(obj, dict):
+            for k, v in list(obj.items()):
+                if isinstance(v, str):
+                    obj[k] = _remap(v)
+                else:
+                    _remap_deep(v)
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                if isinstance(v, str):
+                    obj[i] = _remap(v)
+                else:
+                    _remap_deep(v)
+
+    _remap_deep(state)
+    state['updated_at'] = datetime.now().isoformat()
+    with open(os.path.join(new_dir, 'state.json'), 'w', encoding='utf-8') as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+    # 3) 写 meta + 索引. 副本一律**私密** —— 复制别人的东西不该顺手替他公开
+    title = f"{payload['title']} (副本)" if payload['title'] else '副本作品'
+    now = datetime.now().isoformat()
+    meta = {
+        'work_id': new_work_id,
+        'title': title,
+        'created_at': now,
+        'updated_at': now,
+        'is_public': False,
+        'forked_from': {'owner': owner, 'work_id': work_id},
+    }
+    with open(os.path.join(new_dir, 'meta.json'), 'w', encoding='utf-8') as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    history = list_user_works(username)
+    history.insert(0, {
+        'work_id': new_work_id,
+        'title': title,
+        'created_at': now,
+        'updated_at': now,
+        'is_public': False,
+    })
+    save_user_history(username, history)
+
+    return jsonify({
+        'success': True,
+        'work_id': new_work_id,
+        'title': title,
+        'image_count': len(name_map),
+    })
 
 
 # ========== AI 写作历史接口 ==========
@@ -3697,7 +4391,9 @@ def rename_current_work():
     if not new_title:
         return jsonify({'error': '标题不能为空'}), 400
 
-    work_dir = os.path.join(get_user_dir(username), 'works', work_id)
+    work_dir = own_work_dir(username, work_id)
+    if not work_dir:
+        return jsonify({'error': '作品ID不合法'}), 400
     if not os.path.isdir(work_dir):
         return jsonify({'error': '作品不存在'}), 404
 
@@ -3797,7 +4493,12 @@ def download_image_proxy():
             response = _api_request('GET', url, timeout=60)
             image_data = BytesIO(response.content)
         elif url.startswith('/static'):
-            local_path = os.path.join(BASE_DIR, url.lstrip('/'))
+            # 走统一收口: 挡穿越 + 挡越权读他人私密图.
+            # 之前这里是裸 join, 任意注册用户都能把 url 换成
+            # /static/../.env 或 /static/users/<别人>/works/<私密>/images/x.png 取走
+            local_path = _resolve_readable_static(url)
+            if not local_path:
+                return jsonify({'error': '文件不存在或无权访问'}), 404
             image_data = BytesIO()
             with open(local_path, 'rb') as f:
                 image_data.write(f.read())

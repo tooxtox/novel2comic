@@ -1,0 +1,12 @@
+{
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.19",
+    "typescript": "5.4",
+    "esbuild": "0.20"
+  }
+}

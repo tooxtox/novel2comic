@@ -2,11 +2,17 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>小说⇄漫画 双向转换器</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;800;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='design-system.css') }}">
+    <link rel="manifest" href="/static/manifest.webmanifest">
+    <meta name="theme-color" content="#1a1a1a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="Text2Comic">
     <style>
         /* ============================================================================
            index.html · 页面专属样式
@@ -508,6 +514,15 @@
             100% { transform: translateY(0); }
         }
         .mtab-spring { animation: mtabSpring 0.42s var(--ease-spring); }
+
+        /* 角色图片拖拽上传视觉反馈 */
+        .upload-zone.is-drag-over {
+            border-style: dashed !important;
+            border-color: #b5301f !important;
+            background: rgba(181, 48, 31, 0.05) !important;
+            transform: scale(1.02);
+            transition: transform var(--anim-fast) var(--ease-spring);
+        } }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
@@ -623,18 +638,18 @@
         </div>
 
         <!-- Tabs (移动端隐藏, 改用底部导航) -->
-        <div id="main-tabs" class="relative hidden md:flex gap-6 mb-4 border-b border-gray-300 items-center">
+        <div id="main-tabs" role="tablist" class="relative hidden md:flex gap-6 mb-4 border-b border-gray-300 items-center">
             <span class="ink-indicator" id="tab-ink" aria-hidden="true"></span>
             <!-- 小说→漫画 功能组 -->
-            <button onclick="switchTab('input')" id="tab-input" class="tab-active pb-2 px-1 text-lg transition-all">小说输入</button>
-            <button onclick="switchTab('aiwrite')" id="tab-aiwrite" class="tab-inactive pb-2 px-1 text-lg transition-all">AI 写作</button>
-            <button onclick="switchTab('characters')" id="tab-characters" class="tab-inactive pb-2 px-1 text-lg transition-all">角色管理</button>
-            <button onclick="switchTab('segments')" id="tab-segments" class="tab-inactive pb-2 px-1 text-lg transition-all">分镜管理</button>
-            <button onclick="switchTab('gallery')" id="tab-gallery" class="tab-inactive pb-2 px-1 text-lg transition-all">漫画预览</button>
-            <button onclick="switchTab('history')" id="tab-history" class="tab-inactive pb-2 px-1 text-lg transition-all">历史记录</button>
+            <button onclick="switchTab('input')" id="tab-input" role="tab" aria-selected="true" class="tab-active pb-2 px-1 text-lg transition-all">小说输入</button>
+            <button onclick="switchTab('aiwrite')" id="tab-aiwrite" role="tab" aria-selected="false" class="tab-inactive pb-2 px-1 text-lg transition-all">AI 写作</button>
+            <button onclick="switchTab('characters')" id="tab-characters" role="tab" aria-selected="false" class="tab-inactive pb-2 px-1 text-lg transition-all">角色管理</button>
+            <button onclick="switchTab('segments')" id="tab-segments" role="tab" aria-selected="false" class="tab-inactive pb-2 px-1 text-lg transition-all">分镜管理</button>
+            <button onclick="switchTab('gallery')" id="tab-gallery" role="tab" aria-selected="false" class="tab-inactive pb-2 px-1 text-lg transition-all">漫画预览</button>
+            <button onclick="switchTab('history')" id="tab-history" role="tab" aria-selected="false" class="tab-inactive pb-2 px-1 text-lg transition-all">历史记录</button>
             <span class="text-gray-300 text-2xl font-light mx-1">|</span>
             <!-- 漫画→小说 功能组 -->
-            <button onclick="switchTab('comic2novel')" id="tab-comic2novel" class="tab-inactive pb-2 px-1 text-lg transition-all">漫画转小说</button>
+            <button onclick="switchTab('comic2novel')" id="tab-comic2novel" role="tab" aria-selected="false" class="tab-inactive pb-2 px-1 text-lg transition-all">漫画转小说</button>
         </div>
 
         <!-- 四步流程: 每一步都可点击跳转, 进度来自真实数据 -->
@@ -705,13 +720,13 @@
         </nav>
 
         <!-- Config Modal (右上角 ⚙ 按钮触发) -->
-        <div id="config-modal" class="fixed inset-0 z-50 hidden">
+        <div id="config-modal" role="dialog" aria-modal="true" aria-labelledby="config-modal-title" class="fixed inset-0 z-50 hidden">
             <!-- 背景遮罩 -->
             <div class="modal-backdrop absolute inset-0 bg-black bg-opacity-50" onclick="closeConfigModal()"></div>
             <!-- 弹窗内容 -->
             <div class="modal-card relative modal-panel max-w-5xl mx-auto mt-2 mb-2 md:mt-10 md:mb-10 bg-gray-100 rounded manga-border panel-shadow">
                 <div class="sticky top-0 bg-white border-b-2 border-gray-200 px-4 py-3 md:px-6 md:py-4 flex items-center justify-between manga-border z-10">
-                    <h2 class="text-lg md:text-2xl font-bold"><span data-icon="settings" class="icon-inline"></span> API 配置</h2>
+                    <h2 id="config-modal-title" class="text-lg md:text-2xl font-bold"><span data-icon="settings" class="icon-inline"></span> API 配置</h2>
                     <button onclick="closeConfigModal()" class="w-9 h-9 flex items-center justify-center text-2xl text-gray-600 hover:text-black border border-gray-300 hover:border-black transition-colors">×</button>
                 </div>
                 <div class="p-3 md:p-6">
@@ -1158,6 +1173,20 @@
                     <button onclick="refreshCurrentHistoryList()" class="border-2 border-gray-300 hover:border-black px-4 py-2 text-sm font-medium transition-colors"><span data-icon="refresh" class="icon-inline"></span> 刷新</button>
                 </div>
             </div>
+
+            <!-- 发现: 搜索其他人的公开作品 (私密作品永远搜不到) -->
+            <div class="border-2 border-black bg-gray-50 p-4 mb-4">
+                <h3 class="font-bold text-base mb-1 flex items-center gap-1"><span data-icon="search" class="icon-inline"></span> 发现公开作品</h3>
+                <p class="text-xs text-gray-500 mb-3">按账号名或作品标题搜索。作品默认私密，只有作者主动设为「公开」才会出现在这里。</p>
+                <div class="flex gap-2">
+                    <input id="discover-q" type="search" placeholder="搜索账号名或作品标题…" autocomplete="off"
+                           oninput="onDiscoverInput()" onkeydown="if(event.key==='Enter'){runDiscoverSearch();}"
+                           class="flex-1 border-2 border-black px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-black">
+                    <button onclick="runDiscoverSearch()" class="border-2 border-black bg-black text-white px-4 py-2 text-sm font-medium hover:bg-gray-800 transition-colors flex items-center gap-1"><span data-icon="search" class="icon-inline"></span> 搜索</button>
+                </div>
+                <p id="discover-meta" class="text-xs text-gray-500 mt-2">输入账号名或作品标题，搜索其他人公开的作品</p>
+                <div id="discover-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4"></div>
+            </div>
             <!-- 子切换: 漫画作品 / AI 写作 -->
             <div id="hist-subtabs" class="relative flex gap-4 border-b-2 border-gray-200 mb-4">
                 <span class="ink-indicator" id="hist-ink" aria-hidden="true"></span>
@@ -1256,19 +1285,37 @@
     </div>
 
     <!-- Image Preview Modal -->
-    <div id="image-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden z-50 flex items-center justify-center p-2 md:p-4" onclick="closeModal()">
+    <div id="image-modal" role="dialog" aria-modal="true" aria-label="图片预览" class="fixed inset-0 bg-black bg-opacity-80 hidden z-50 flex items-center justify-center p-2 md:p-4" onclick="closeModal()">
         <div class="modal-card relative max-w-4xl max-h-full" onclick="event.stopPropagation()">
             <img id="modal-image" src="" alt="预览" class="max-w-full max-h-[85dvh] object-contain border-4 border-white">
             <button onclick="closeModal()" class="absolute -top-10 right-0 text-white text-2xl hover:text-gray-300" data-icon="x" style="width:32px;height:32px;"></button>
         </div>
     </div>
 
+    <!-- 查看他人公开作品 (只读: 只能看 + 另存为我的作品, 不能改名/删除/改内容) -->
+    <div id="public-work-modal" role="dialog" aria-modal="true" aria-labelledby="public-work-title" class="fixed inset-0 z-50 hidden">
+        <div class="modal-backdrop absolute inset-0 bg-black bg-opacity-50" onclick="closePublicWork()"></div>
+        <div class="modal-card relative max-w-5xl mx-auto mt-2 mb-2 md:mt-8 md:mb-8 bg-white manga-border panel-shadow" style="display: flex; flex-direction: column; max-height: 92dvh;">
+            <div class="flex items-center justify-between px-4 py-3 md:px-6 md:py-4 border-b-2 border-gray-200">
+                <div class="min-w-0">
+                    <h2 id="public-work-title" class="text-xl font-bold truncate"><span data-icon="book-open" class="icon-inline"></span> <span class="public-work-title-text">公开作品</span></h2>
+                    <p class="text-xs text-gray-500 mt-0.5">作者 <span id="public-work-owner" class="font-mono"></span> · 只读浏览</p>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                    <button id="public-work-fork-btn" onclick="forkPublicWork(document.getElementById('public-work-owner').textContent, window.__pwWorkId)" class="border-2 border-black bg-black text-white px-3 py-1.5 text-xs font-medium hover:bg-gray-800 transition-colors flex items-center gap-1"><span data-icon="copy" style="width:12px;height:12px;"></span> 另存为我的作品</button>
+                    <button onclick="closePublicWork()" class="border-2 border-gray-300 hover:border-black px-2 py-1.5 text-xs transition-colors" title="关闭"><span data-icon="x" style="width:14px;height:14px;"></span></button>
+                </div>
+            </div>
+            <div id="public-work-body" class="p-4 md:p-6 overflow-y-auto"></div>
+        </div>
+    </div>
+
     <!-- AI 润色对比预览 Modal -->
-    <div id="polish-compare-modal" class="fixed inset-0 z-50 hidden">
+    <div id="polish-compare-modal" role="dialog" aria-modal="true" aria-labelledby="polish-modal-title" class="fixed inset-0 z-50 hidden">
         <div class="modal-backdrop absolute inset-0 bg-black bg-opacity-50" onclick="cancelPolishCompare()"></div>
         <div class="modal-card relative modal-panel-compare max-w-6xl mx-auto mt-2 mb-2 md:mt-8 md:mb-8 bg-white manga-border panel-shadow" style="display: flex; flex-direction: column;">
             <div class="flex items-center justify-between px-4 py-3 md:px-6 md:py-4 border-b-2 border-gray-200">
-                <h2 class="text-xl font-bold"><span data-icon="sparkles" class="icon-inline"></span> 润色对比预览</h2>
+                <h2 id="polish-modal-title" class="text-xl font-bold"><span data-icon="sparkles" class="icon-inline"></span> 润色对比预览</h2>
                 <button onclick="cancelPolishCompare()" class="w-9 h-9 flex items-center justify-center text-2xl text-gray-600 hover:text-black border border-gray-300 hover:border-black transition-colors">×</button>
             </div>
             <div class="flex-1 grid grid-cols-1 md:grid-cols-2 gap-0 p-3 md:p-6" style="min-height: 0;">
@@ -1289,10 +1336,11 @@
     </div>
 
     <!-- Toast Notification -->
-    <div id="toast" class="fixed bottom-24 md:bottom-6 right-6 bg-black text-white px-6 py-3 rounded shadow-lg transform translate-y-20 opacity-0 z-50"></div>
+    <div id="toast" role="status" aria-live="polite" aria-atomic="true" class="fixed bottom-24 md:bottom-6 right-6 bg-black text-white px-6 py-3 rounded shadow-lg transform translate-y-20 opacity-0 z-50"></div>
 
-    <script src="{{ url_for('static', filename='icons.js') }}"></script>
-    <script src="{{ url_for('static', filename='transitions.js') }}"></script>
-    <script src="{{ url_for('static', filename='app.js') }}"></script>
+    <!-- Legacy icons.js / transitions.js merged into dist/app.js (kept as backup in static/) -->
+    <!-- <script src="{{ url_for('static', filename='icons.js') }}"></script> -->
+    <!-- <script src="{{ url_for('static', filename='transitions.js') }}"></script> -->
+    <script src="{{ url_for('static', filename='dist/app.js') }}"></script>
 </body>
 </html>

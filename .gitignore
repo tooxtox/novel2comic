@@ -71,3 +71,14 @@ service.log
 
 config.json
 .gitignore
+
+# TypeScript / esbuild 输出
+static/dist/
+*.tsbuildinfo
+config.json
+
+# 本地开发/调试运行日志 (含启动横幅等运行时信息, 不应进仓)
+_local_server.log
+_local_server.err
+_repro.log
+_repro.err
