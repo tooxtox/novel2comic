@@ -1,0 +1,8 @@
+// Top-level build file. Plugins declared but not applied here.
+plugins {
+    id 'com.android.application' version '8.7.0' apply false
+    id 'com.chaquo.python' version '17.0.0' apply false
+    // 必须声明: 不 apply Kotlin 插件的话 AGP 不会编译 .kt 文件,
+    // MainActivity 不会进 dex, 启动即 ClassNotFoundException 闪退.
+    id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+}

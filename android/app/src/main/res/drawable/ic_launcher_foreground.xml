@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 漫画分镜格背景 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,30 L78,30 L78,78 L30,78 Z" />
+
+    <!-- 内部分隔线: 2x2 网格 -->
+    <path
+        android:fillColor="#1a1a1a"
+        android:pathData="M54,30 L54,78 L54,30 Z M30,54 L78,54 L30,54 Z"
+        android:strokeColor="#1a1a1a"
+        android:strokeWidth="1.5" />
+
+    <!-- 对话气泡 (左下角) -->
+    <path
+        android:fillColor="#1a1a1a"
+        android:pathData="M34,58 Q34,54 38,54 L52,54 Q56,54 56,58 L56,66 Q56,70 52,70 L42,70 L38,74 L40,70 L38,70 Q34,70 34,66 Z" />
+
+    <!-- 感叹号在气泡里 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M44,58 L46,58 L45.5,64 L44.5,64 Z M44.5,66 L45.5,66 L45.5,67 L44.5,67 Z" />
+
+</vector>

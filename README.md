@@ -42,6 +42,32 @@ python app.py
 
 浏览器打开 `http://localhost:2778`，搞定。
 
+### 后端代码结构
+
+`app.py` 保留桌面启动和 Android 的 `run_server()` 入口，业务代码位于 `backend/`：
+
+| 模块 | 职责 |
+|------|------|
+| `runtime.py` | 平台路径、环境变量、Flask 实例与公共配置 |
+| `auth.py` | 登录注册、CSRF、鉴权、页面与静态资源路由 |
+| `storage.py` | 用户、作品、写作、会话与图片存储，文件访问校验 |
+| `ai_client.py` | HTTP 重试、AI 响应解析与进度上报 |
+| `rendering.py` | 分镜网格、中文字体与对白气泡绘制 |
+| `comic.py` | 小说分镜、角色分析与漫画生成接口 |
+| `works.py` | 作品历史、公开设置、搜索与作品复制接口 |
+| `writing.py` | 写作历史、续写润色与漫画转小说接口 |
+| `api.py` | API 配置、连接测试、下载、缓存与结果同步接口 |
+
+模块使用显式导入，业务路由在入口统一加载。运行回归检查：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+测试使用临时目录保存数据并模拟 AI 请求。Android 构建前运行 `python build_assets.py`，入口和后端包会一起同步。
+
+运行所需的前端文件已包含在 `static/dist/`。修改 `static/src/` 后，先运行 `npm install`，再运行 `npm run build` 更新它们。
+
 > 🎯 **不需要 GPU**，全靠云端 API；不需要美术基础，全靠 AI 分镜；不需要写一行代码。
 
 ---
@@ -146,6 +172,8 @@ python app.py
 ### 第一次配置 API
 
 进入 **API 配置** Tab，选个预设填上 Key 即可：
+
+也可以复制 `config.example.json` 为 `config.local.json` 后填写配置。`.env`、本地配置、账号数据、作品和日志均不应提交到 Git；仓库只提供不含凭据的配置示例。
 
 | 预设 | 推荐模型 |
 |------|----------|

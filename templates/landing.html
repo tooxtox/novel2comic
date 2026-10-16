@@ -7,7 +7,7 @@
     <meta name="description" content="贴入小说，自动分镜、配人设、出整页漫画，中文对白由本地字体渲染。也能把漫画图片读回小说。本地运行，用自己的 API 接口。">
     <meta name="theme-color" content="#f4f4f2" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#131315" media="(prefers-color-scheme: dark)">
-    <link rel="preload" as="image" href="{{ url_for('static', filename='showcase/hero-page.jpg') }}">
+    <link rel="preload" as="image" href="{{ url_for('static', filename='showcase/03_hero-page.jpg') }}">
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -375,7 +375,7 @@
             <div class="relative">
                 <div class="absolute -inset-6 speedlines mask-r pointer-events-none" aria-hidden="true"></div>
                 <div class="relative frame p-2.5" data-frame>
-                    <img src="{{ url_for('static', filename='showcase/hero-page.jpg') }}"
+                    <img src="{{ url_for('static', filename='showcase/03_hero-page.jpg') }}"
                          width="1600" height="1067" alt="由本工具生成的彩色漫画页: 六格分镜, 森林里的叶蛋家族, 含旁白框与对白气泡"
                          class="block w-full h-auto" fetchpriority="high">
                     <span class="wipe" data-wipe aria-hidden="true"></span>
@@ -473,7 +473,7 @@
 
     <figure class="mt-16 reveal">
         <div class="frame-sm p-2">
-            <img src="{{ url_for('static', filename='showcase/bubbles-page.jpg') }}"
+            <img src="{{ url_for('static', filename='showcase/04_bubbles-page.jpg') }}"
                  width="1400" height="933" loading="lazy" decoding="async"
                  alt="成品漫画页: 四格里同时出现锯齿喊叫气泡与方框对白" class="block w-full h-auto">
         </div>
@@ -502,7 +502,7 @@
                 <h3 class="h2 mb-4">每个人先有一张人设</h3>
                 <p class="body-copy mb-6">角色先出人设图，之后每一页都拿它当参考图，脸部与服装不会一页一个样。</p>
                 <div class="frame-sm p-2">
-                    <img src="{{ url_for('static', filename='showcase/char-sheet.jpg') }}"
+                    <img src="{{ url_for('static', filename='showcase/01_char-sheet.jpg') }}"
                          width="900" height="900" loading="lazy" decoding="async"
                          alt="角色设定图: 黑发男生的原本形态与变成小猫之后的形态" class="block w-full h-auto">
                 </div>
@@ -513,7 +513,7 @@
                 <h3 class="h2 mb-4">整页一次出图</h3>
                 <p class="body-copy mb-6">一次性生成整页分镜，气泡由本地按坐标叠上去，位置还能拖。</p>
                 <div class="frame-sm p-2">
-                    <img src="{{ url_for('static', filename='showcase/step-page.jpg') }}"
+                    <img src="{{ url_for('static', filename='showcase/02_step-page.jpg') }}"
                          width="1000" height="1500" loading="lazy" decoding="async"
                          alt="生成完成的六格漫画页: 变成小猫的主角在巷子里, 含四段对白气泡" class="block w-full h-auto">
                 </div>
@@ -531,7 +531,7 @@
     <div class="grid lg:grid-cols-[.8fr_1.2fr] gap-12 lg:gap-20 items-start">
         <div class="lg:sticky lg:top-24 reveal">
             <div class="scan-wrap frame-sm p-2">
-                <img src="{{ url_for('static', filename='showcase/reverse-page.jpg') }}"
+                <img src="{{ url_for('static', filename='showcase/05_reverse-page.jpg') }}"
                      width="1000" height="1500" loading="lazy" decoding="async"
                      alt="黑白漫画页: 六格竖排, 荒山、枯树、水井与村落, 含系统提示方框" class="block w-full h-auto">
                 <span class="scan-line" data-scan aria-hidden="true"></span>
@@ -628,6 +628,7 @@
     <span></span><span></span><span></span><span></span><span></span><span></span>
 </div>
 
-<script src="{{ url_for('static', filename='landing.js') }}"></script>
+<!-- Legacy landing.js kept as backup in static/ -->
+    <script src="{{ url_for('static', filename='dist/landing.js') }}"></script>
 </body>
 </html>

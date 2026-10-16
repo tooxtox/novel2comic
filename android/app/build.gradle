@@ -1,0 +1,86 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.text2comic.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.text2comic.app'
+        minSdk 24           // Android 7.0 (Nougat) — WebView 80+ 才能跑 Tailwind/GSAP
+        targetSdk 34
+        versionCode 1
+        versionName '1.0.0'
+        ndk {
+            // 单 ABI: 国内 99%+ 设备都支持 arm64-v8a
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    buildTypes {
+        debug {
+            // 默认即可; debug key 自动生成
+            minifyEnabled false
+        }
+        release {
+            // 侧载用的正式包, 刻意不混淆:
+            // Chaquopy 靠反射加载 Python 运行时, R8 混淆会打断它;
+            // 资源压缩同理先关掉, 避免把 assets 里的模板/静态资源裁掉.
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // 暂用 debug key, 正式发布请生成专用 release keystore
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    // Kotlin 的 jvmTarget 必须跟上面 Java 的 17 对齐, 否则报
+    // "Inconsistent JVM-target compatibility detected"
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+        resources {
+            excludes += ['META-INF/AL2.0', 'META-INF/LGPL2.1']
+        }
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        version '3.13'
+        pip {
+            install 'flask>=3.0,<4'
+            install 'flask-cors>=4.0'
+            install 'requests>=2.31'
+            install 'Pillow>=10.4'
+            // 显式不要: flask-socketio, numpy, scipy, pandas, matplotlib
+        }
+    }
+}
+
+dependencies {
+    // Kotlin 1.8.20 起 jdk7/jdk8 已并入 kotlin-stdlib (仅剩空壳)。
+    // Chaquopy 17 传递进来的是 1.6.21, 与 androidx 拉起的 kotlin-stdlib 1.8.22
+    // 产生重复类, 导致 checkDebugDuplicateClasses 失败 —— 统一到 1.8.22 即可。
+    constraints {
+        implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+        implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+    }
+
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.activity:activity-ktx:1.9.0'
+    // Chaquopy 自动注入 com.chaquo.python:runtime
+}

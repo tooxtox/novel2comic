@@ -458,6 +458,59 @@ function bootIntro() {
     staggerPanel(document.getElementById(`panel-${currentTab}`));
     // 标记放在最后: 中途抛错时不设标记, 让 2.5s 兜底把内容放出来
     window.__appBooted = true;
+    // PWA: 注册 Service Worker（失败不影响主流程）
+    if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+      navigator.serviceWorker.register('/static/sw.js').catch((err) => console.warn('[PWA] SW register failed:', err));
+    }
+}
+
+/** 全局键盘快捷键: Esc 关 modal, Ctrl/Cmd+S 存草稿, Ctrl/Cmd+Enter 触发当前 Tab 主操作, Ctrl+Tab 切 Tab */
+function setupKeyboardShortcuts() {
+  document.addEventListener('keydown', (e) => {
+    const isInputFocused = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+    const isContentEditable = document.activeElement?.isContentEditable;
+    const inEditor = isInputFocused || isContentEditable;
+
+    // Esc: 关闭最上层 modal
+    if (e.key === 'Escape') {
+      if (!document.getElementById('config-modal').classList.contains('hidden')) {
+        closeConfigModal(); e.preventDefault(); return;
+      }
+      if (!document.getElementById('image-modal').classList.contains('hidden')) {
+        closeModal(); e.preventDefault(); return;
+      }
+      if (!document.getElementById('polish-compare-modal').classList.contains('hidden')) {
+        cancelPolishCompare(); e.preventDefault(); return;
+      }
+    }
+
+    // Ctrl+S / Cmd+S: 保存草稿(编辑器内不拦截, 由浏览器原生保存)
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      if (typeof markSaved === 'function') {
+        const t = document.getElementById('work-title')?.value || workMeta?.title || '';
+        markSaved(t);
+        showToast('已保存草稿', 'success');
+      }
+      return;
+    }
+
+    // Ctrl+Enter / Cmd+Enter: 触发当前 Tab 主操作
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      if (inEditor) return;  // 输入框内交给具体按钮
+      e.preventDefault();
+      runPrimaryAction();
+      return;
+    }
+
+    // Ctrl+Tab / Ctrl+Shift+Tab: Tab 循环
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Tab') {
+      e.preventDefault();
+      const idx = tabs.indexOf(currentTab);
+      const next = e.shiftKey ? (idx - 1 + tabs.length) % tabs.length : (idx + 1) % tabs.length;
+      switchTab(tabs[next]);
+    }
+  });
 }
 
 /** 气泡类型迷你预览: 改下拉时形状跟着变 */
@@ -1118,16 +1171,90 @@ function animateCloseModal(modalId, onClose) {
     }, 150);
 }
 
-function openConfigModal() {
-    if (window.__t2cTransitions) {
-        window.__t2cTransitions.openModal('config-modal');
-    } else {
-        const modal = document.getElementById('config-modal');
-        modal.classList.remove('modal-closing', 'hidden');
+// ===== a11y 焦点陷阱管理器 =====
+const FOCUSABLE_SELECTOR = [
+    'a[href]',
+    'button:not([disabled])',
+    'textarea:not([disabled])',
+    'input:not([disabled]):not([type="hidden"])',
+    'select:not([disabled])',
+    '[tabindex]:not([tabindex="-1"])'
+].join(',');
+
+function getFocusableElements(modalEl) {
+    return Array.from(modalEl.querySelectorAll(FOCUSABLE_SELECTOR))
+        .filter(el => !el.hasAttribute('disabled') && el.offsetParent !== null);
+}
+
+function trapFocus(modalEl) {
+    const handler = (e) => {
+        if (e.key !== 'Tab') return;
+        const focusables = getFocusableElements(modalEl);
+        if (focusables.length === 0) {
+            e.preventDefault();
+            return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        if (e.shiftKey) {
+            if (active === first || !modalEl.contains(active)) {
+                e.preventDefault();
+                last.focus();
+            }
+        } else {
+            if (active === last || !modalEl.contains(active)) {
+                e.preventDefault();
+                first.focus();
+            }
+        }
+    };
+    modalEl._trapHandler = handler;
+    modalEl.addEventListener('keydown', handler);
+}
+
+function untrapFocus(modalEl) {
+    if (modalEl && modalEl._trapHandler) {
+        modalEl.removeEventListener('keydown', modalEl._trapHandler);
+        modalEl._trapHandler = null;
     }
 }
 
+function openModalA11y(modalId) {
+    const modalEl = document.getElementById(modalId);
+    if (!modalEl) return;
+    // 记录打开前焦点
+    modalEl._previouslyFocused = document.activeElement;
+    // 显示 modal (沿用现有 transitions 框架)
+    if (window.__t2cTransitions) {
+        window.__t2cTransitions.openModal(modalId);
+    } else {
+        modalEl.classList.remove('modal-closing', 'hidden');
+    }
+    // 焦点陷阱 + 焦点移到第一个可聚焦元素
+    trapFocus(modalEl);
+    const focusables = getFocusableElements(modalEl);
+    if (focusables.length > 0) {
+        // 用 setTimeout 避免入场动画期间抢焦点
+        setTimeout(() => focusables[0].focus(), 50);
+    }
+}
+
+function closeModalA11y(modalId) {
+    const modalEl = document.getElementById(modalId);
+    untrapFocus(modalEl);
+    if (modalEl && modalEl._previouslyFocused && typeof modalEl._previouslyFocused.focus === 'function') {
+        modalEl._previouslyFocused.focus();
+    }
+    if (modalEl) modalEl._previouslyFocused = null;
+}
+
+function openConfigModal() {
+    openModalA11y('config-modal');
+}
+
 function closeConfigModal() {
+    closeModalA11y('config-modal');
     animateCloseModal('config-modal');
 }
 
@@ -2429,6 +2556,7 @@ function openPolishCompare() {
 }
 
 function cancelPolishCompare() {
+    closeModalA11y('polish-compare-modal');
     animateCloseModal('polish-compare-modal');
 }
 
@@ -3156,6 +3284,7 @@ function openModal(src) {
 }
 
 function closeModal() {
+    closeModalA11y('image-modal');
     animateCloseModal('image-modal');
 }
 
@@ -3609,7 +3738,7 @@ function renderCharacters() {
     container.innerHTML = characters.map((char, idx) => {
         const safeImageUrl = escapeHtml(char.image_url || '');
         return `
-        <div class="bg-white p-4 manga-border panel-shadow">
+        <div class="bg-white p-4 manga-border panel-shadow upload-zone">
             <div class="flex justify-between items-start mb-2">
                 <h3 class="text-lg font-bold">${escapeHtml(char.name)}</h3>
                 <button onclick="togglePromptEditor(${idx})" class="text-xs border border-gray-300 rounded px-2 py-0.5 hover:bg-gray-100 transition-colors" title="编辑人设图生成提示词" id="prompt-toggle-${idx}">✏️ Prompt</button>
@@ -3709,6 +3838,42 @@ function handleCharacterImageFile(idx, input) {
         showToast('读取图片失败', 'error');
     };
     reader.readAsDataURL(file);
+}
+
+// ===== 角色图片拖拽上传 =====
+function setupDragDropUpload() {
+  const inputs = document.querySelectorAll('[id^="char-upload-"]');
+  inputs.forEach(input => {
+    const zone = input.closest('.upload-zone, label, div') || input.parentElement;
+    if (!zone) return;
+    ['dragenter', 'dragover'].forEach(ev => {
+      zone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        zone.classList.add('is-drag-over');
+      });
+    });
+    ['dragleave', 'drop'].forEach(ev => {
+      zone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        zone.classList.remove('is-drag-over');
+      });
+    });
+    zone.addEventListener('drop', (e) => {
+      const files = e.dataTransfer && e.dataTransfer.files;
+      if (!files || !files.length) return;
+      try {
+        const dt = new DataTransfer();
+        Array.from(files).forEach(f => dt.items.add(f));
+        input.files = dt.files;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        showToast('已接收 ' + files.length + ' 个文件', 'success');
+      } catch (err) {
+        showToast('拖拽上传失败: ' + err.message, 'error');
+      }
+    });
+  });
 }
 
 function applyCharacterImage(idx, dataUrl, isUncompressedFallback) {
@@ -4005,6 +4170,8 @@ window.addEventListener('DOMContentLoaded', () => {
     renderWorkMeta();
     refreshInks();
     bootIntro();
+    setupDragDropUpload();
+    setupKeyboardShortcuts();
 
     // 指示器要在字体加载完、以及每次改变窗口尺寸后重新量一次
     if (document.fonts && document.fonts.ready) {
