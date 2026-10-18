@@ -201,7 +201,6 @@ function exposeToWindow(): void {
 
     // UI
     w.detectBrowserDevice = Ui.detectBrowserDevice;
-    w.adjustBottomNav = Ui.adjustBottomNav;
     w.maybeShowInAppBanner = Ui.maybeShowInAppBanner;
     w.staggerPanel = Tabs.staggerPanel;
 }
@@ -252,16 +251,10 @@ function boot(): void {
 
     // 设备识别 / 移动端适配
     Ui.detectBrowserDevice();
-    Ui.adjustBottomNav();
     window.addEventListener('resize', () => {
         clearTimeout(state._deviceResizeTimer);
         state._deviceResizeTimer = setTimeout(Ui.detectBrowserDevice, 200);
-        Ui.adjustBottomNav();
     });
-    if ((window as any).visualViewport) {
-        (window as any).visualViewport.addEventListener('resize', Ui.adjustBottomNav);
-        (window as any).visualViewport.addEventListener('scroll', Ui.adjustBottomNav);
-    }
 
     // 微信/QQ 横幅关闭按钮: 记住忽略
     const bannerClose = document.getElementById('inapp-browser-close');

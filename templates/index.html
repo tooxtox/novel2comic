@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="csrf-token" content="{{ csrf_token() }}">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-visual">
     <title>小说⇄漫画 双向转换器</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;800;900&display=swap" rel="stylesheet">
@@ -684,7 +684,7 @@
             </div>
         </section>
 
-        <!-- 移动端底部导航栏 (md 以下显示) -->
+        <!-- 移动端底部导航栏固定在布局视口底部，输入法弹出时覆盖导航，不随键盘上移。 -->
         <nav id="mobile-bottom-nav" class="fixed bottom-0 left-0 right-0 z-40 md:hidden bg-white border-t-2 border-gray-800" style="padding-bottom: env(safe-area-inset-bottom);">
             <div class="relative grid grid-cols-7 max-w-7xl mx-auto" id="mtab-grid">
                 <span class="mtab-pill" id="mtab-pill" aria-hidden="true"></span>

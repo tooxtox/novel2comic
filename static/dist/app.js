@@ -257,19 +257,6 @@
     }
     banner.classList.remove("hidden");
   }
-  function adjustBottomNav() {
-    const nav = document.getElementById("mobile-bottom-nav");
-    if (!nav)
-      return;
-    if (window.matchMedia && window.matchMedia("(min-width: 768px)").matches)
-      return;
-    const vv = window.visualViewport;
-    let offset = 0;
-    if (vv && window.innerHeight > vv.height) {
-      offset = Math.round(window.innerHeight - vv.height);
-    }
-    nav.style.bottom = offset + "px";
-  }
 
   // static/src/modules/tabs.ts
   function switchTab(tabName) {
@@ -4433,7 +4420,6 @@
     w.syncResults = syncResults;
     w.recoverSession = recoverSession;
     w.detectBrowserDevice = detectBrowserDevice;
-    w.adjustBottomNav = adjustBottomNav;
     w.maybeShowInAppBanner = maybeShowInAppBanner;
     w.staggerPanel = staggerPanel;
   }
@@ -4466,16 +4452,10 @@
       io.observe(sentinel);
     }
     detectBrowserDevice();
-    adjustBottomNav();
     window.addEventListener("resize", () => {
       clearTimeout(state._deviceResizeTimer);
       state._deviceResizeTimer = setTimeout(detectBrowserDevice, 200);
-      adjustBottomNav();
     });
-    if (window.visualViewport) {
-      window.visualViewport.addEventListener("resize", adjustBottomNav);
-      window.visualViewport.addEventListener("scroll", adjustBottomNav);
-    }
     const bannerClose = document.getElementById("inapp-browser-close");
     if (bannerClose) {
       bannerClose.addEventListener("click", function() {

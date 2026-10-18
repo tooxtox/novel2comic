@@ -4111,31 +4111,10 @@ let _deviceResizeTimer = null;
 window.addEventListener('resize', function () {
     clearTimeout(_deviceResizeTimer);
     _deviceResizeTimer = setTimeout(detectBrowserDevice, 200);
-    adjustBottomNav();
 });
-
-// 移动端底部导航：避免与浏览器底部工具栏 / 虚拟键盘重叠（iOS Safari / WKWebView 常见问题）。
-// 通过 visualViewport 高度差算出被浏览器底栏/键盘占用的高度，把导航栏抬上去。
-function adjustBottomNav() {
-    const nav = document.getElementById('mobile-bottom-nav');
-    if (!nav) return;
-    // 桌面端 (md 及以上) 底栏本来就隐藏，无需处理
-    if (window.matchMedia && window.matchMedia('(min-width: 768px)').matches) return;
-    const vv = window.visualViewport;
-    let offset = 0;
-    if (vv && window.innerHeight > vv.height) {
-        offset = Math.round(window.innerHeight - vv.height);
-    }
-    nav.style.bottom = offset + 'px';
-}
-if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', adjustBottomNav);
-    window.visualViewport.addEventListener('scroll', adjustBottomNav);
-}
 
 window.addEventListener('DOMContentLoaded', () => {
     detectBrowserDevice();
-    adjustBottomNav();
 
     // 微信/QQ 提示横幅关闭按钮：记住忽略，避免每次进入都弹出
     const bannerClose = document.getElementById('inapp-browser-close');

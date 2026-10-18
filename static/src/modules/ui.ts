@@ -164,17 +164,3 @@ export function maybeShowInAppBanner(info: DeviceInfo): void {
     }
     banner.classList.remove('hidden');
 }
-
-/** 移动端底部导航: visualViewport 高度差算出底栏占用高度, 避免与 iOS Safari 工具栏重叠 */
-export function adjustBottomNav(): void {
-    const nav = document.getElementById('mobile-bottom-nav');
-    if (!nav) return;
-    // 桌面端 (md 及以上) 底栏本来就隐藏，无需处理
-    if (window.matchMedia && window.matchMedia('(min-width: 768px)').matches) return;
-    const vv: any = (window as any).visualViewport;
-    let offset = 0;
-    if (vv && window.innerHeight > vv.height) {
-        offset = Math.round(window.innerHeight - vv.height);
-    }
-    nav.style.bottom = offset + 'px';
-}

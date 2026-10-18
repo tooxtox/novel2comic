@@ -1,4 +1,4 @@
-const CACHE_NAME = 'text2comic-v2';
+const CACHE_NAME = 'text2comic-v3';
 const PRECACHE_URLS = [
   '/',
   '/static/design-system.css',
