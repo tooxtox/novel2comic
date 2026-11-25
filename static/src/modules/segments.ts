@@ -147,24 +147,28 @@ export function renderSegments(): void {
         });
 
         return `
-        <div class="comic-page p-6">
-            <div class="flex justify-between items-center mb-4 pb-2 border-b-2 border-gray-200">
-                <h3 class="text-lg font-bold">第 ${page.page_number} 页</h3>
+        <div class="comic-page p-5 md:p-6">
+            <div class="flex flex-wrap justify-between items-center gap-3 mb-4 pb-3 border-b-2 border-[#111112]">
+                <h3 class="text-base md:text-lg font-black flex items-center gap-2">
+                    <span class="ink-badge mono">PAGE ${String(page.page_number).padStart(2, '0')}</span>
+                    <span>第 ${page.page_number} 页</span>
+                </h3>
                 <div class="flex gap-2">
-                    <button onclick="generateFullPage(${pageIdx}, false, null, this)" class="text-sm bg-black text-white px-3 py-1 hover:bg-gray-800 transition-colors flex items-center gap-1">
+                    <button onclick="generateFullPage(${pageIdx}, false, null, this)" class="btn-primary text-xs md:text-sm px-4 py-1.5">
                         <span>整页生成</span>
-                        <span id="full-page-spinner-${pageIdx}" class="loading-spinner hidden" style="width:12px;height:12px;border-width:1px;"></span>
+                        <span id="full-page-spinner-${pageIdx}" class="loading-spinner hidden" style="width:13px;height:13px;border-width:2px;"></span>
                     </button>
                 </div>
             </div>
+            <div id="fullpage-progress-${pageIdx}" class="mb-3"></div>
             ${hasFullPageImage ? `
-            <div class="mb-6 border-2 border-black p-1">
-                <div class="text-sm text-gray-600 mb-2 flex items-center gap-1"><span data-icon="check-circle" style="width:14px;height:14px;color:#16a34a;"></span>整页漫画</div>
-                <img src="${hasFullPageImage}" class="w-full cursor-pointer" onclick="openModal('${hasFullPageImage}')">
+            <div class="mb-6 border-2 border-[#111112] p-2 bg-[#f7f6f2]">
+                <div class="text-xs font-bold text-[#15803d] mb-2 flex items-center gap-1.5"><span data-icon="check-circle" class="ico-14"></span>本页已生成整页漫画（点击大图预览）</div>
+                <img src="${hasFullPageImage}" class="w-full cursor-pointer border border-[#d4d1c7]" onclick="openModal('${hasFullPageImage}')">
             </div>
             ` : ''}
-            <div class="text-xs text-gray-500 mb-3">
-                本页出场角色: ${allSelectedChars.length > 0 ? allSelectedChars.map((cIdx: number) => state.characters[cIdx]?.name || cIdx).join(', ') : '（未选择角色）'}
+            <div class="text-xs text-[#4e4e54] bg-[#f7f6f2] border border-[#e6e3da] px-3 py-1.5 mb-4">
+                <span class="font-bold text-[#111112]">本页出场角色：</span>${allSelectedChars.length > 0 ? allSelectedChars.map((cIdx: number) => escapeHtml(state.characters[cIdx]?.name || cIdx)).join('、') : '（未指定角色，生成时将自动参考全部角色）'}
             </div>
             <div class="grid md:grid-cols-2 gap-4">
                 ${page.segments.map((seg: any, segIdx: number) => {

@@ -316,8 +316,8 @@ export function switchHistorySub(sub: 'comic' | 'writing'): void {
     const writingWrap = document.getElementById('history-writing-wrap');
     const saveBtn = document.getElementById('history-save-current-btn');
     const countLabel = document.getElementById('history-count-label');
-    const activeCls = 'pb-2 px-1 text-base font-bold border-b-[3px] border-transparent';
-    const inactiveCls = 'pb-2 px-1 text-base text-gray-500 border-b-[3px] border-transparent hover:border-gray-300';
+    const activeCls = 'pb-2.5 px-1 text-sm md:text-base font-extrabold text-[#111112] border-b-[3px] border-transparent flex items-center gap-1.5';
+    const inactiveCls = 'pb-2.5 px-1 text-sm md:text-base font-medium text-[#7d7d84] border-b-[3px] border-transparent hover:text-[#111112] flex items-center gap-1.5';
     if (sub === 'writing') {
         if (comicBtn) comicBtn.className = inactiveCls;
         if (writingBtn) writingBtn.className = activeCls;

@@ -89,7 +89,7 @@ import type {} from '../types/index';
         kids.forEach((el: Element, i: number) => {
             if (i > 12) return; // 最多 12 个, 避免长列表的卡顿
             (el as HTMLElement).classList.remove(className);
-            (el as HTMLElement).style.setProperty('--i', i);
+            (el as HTMLElement).style.setProperty('--i', String(i));
             reflow(el as HTMLElement);
             (el as HTMLElement).classList.add(className);
         });
@@ -171,7 +171,7 @@ import type {} from '../types/index';
             ? container.querySelectorAll(selector)
             : container.children;
         Array.from(kids).forEach((el: Element, i: number) => {
-            (el as HTMLElement).style.setProperty('--i', i);
+            (el as HTMLElement).style.setProperty('--i', String(i));
             (el as HTMLElement).classList.remove('stagger-ready', 'stagger-item');
             reflow(el as HTMLElement);
             (el as HTMLElement).classList.add('stagger-item');
@@ -217,7 +217,7 @@ import type {} from '../types/index';
             return;
         }
         els.forEach((el: HTMLElement, i: number) => {
-            el.style.setProperty('--i', Math.min(i, 12));
+            el.style.setProperty('--i', String(Math.min(i, 12)));
             el.classList.add('view-fade');
             // 初始隐藏, 等 IO 触发再显示
             el.style.opacity = '0';

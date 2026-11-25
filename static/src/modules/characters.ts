@@ -11,6 +11,7 @@ import { fetchWithRetry, lockButton, syncResults } from './api';
 import { registerTaskProgress } from './progress';
 import { openConfigModal } from './modals';
 import { switchTab } from './tabs';
+import { setupDragDropUpload } from './dragdrop';
 
 export async function analyzeCharacters(): Promise<void> {
     const text = (document.getElementById('novel-text') as HTMLTextAreaElement).value.trim();
@@ -152,44 +153,50 @@ export function renderCharacters(): void {
     container.innerHTML = state.characters.map((char: any, idx: number) => {
         const safeImageUrl = escapeHtml(char.image_url || '');
         return `
-        <div class="bg-white p-4 manga-border panel-shadow upload-zone">
-            <div class="flex justify-between items-start mb-2">
-                <h3 class="text-lg font-bold">${escapeHtml(char.name)}</h3>
-                <button onclick="togglePromptEditor(${idx})" class="text-xs border border-gray-300 rounded px-2 py-0.5 hover:bg-gray-100 transition-colors" title="编辑人设图生成提示词" id="prompt-toggle-${idx}">✏️ Prompt</button>
+        <div class="bg-white p-4 manga-border panel-shadow upload-zone flex flex-col">
+            <div class="flex justify-between items-start gap-2 mb-2">
+                <h3 class="text-base md:text-lg font-black truncate">${escapeHtml(char.name)}</h3>
+                <button onclick="togglePromptEditor(${idx})" class="text-xs font-semibold border border-[#d4d1c7] hover:border-[#111112] px-2 py-0.5 bg-[#f7f6f2] hover:bg-white transition-colors inline-flex items-center gap-1 shrink-0" title="编辑人设图生成提示词" id="prompt-toggle-${idx}"><span data-icon="pencil" class="ico-12"></span> Prompt</button>
             </div>
-            <p class="text-sm text-gray-600 mb-3">${escapeHtml(char.description)}</p>
+            <p class="text-xs md:text-sm text-[#4e4e54] leading-relaxed mb-3">${escapeHtml(char.description)}</p>
             ${char.image_url ? `
-            <div class="mb-3 border-2 border-gray-300 relative group">
-                <img src="${safeImageUrl}" class="w-full h-48 object-cover cursor-pointer" onclick="openModal('${safeImageUrl}')">
-                <div class="absolute top-1 right-1 hidden group-hover:flex gap-1">
-                    <button onclick="event.stopPropagation(); uploadCharacterImage(${idx})" class="bg-white border-2 border-black text-xs px-2 py-1 hover:bg-yellow-200" title="手动上传/更换图片">📁 换图</button>
+            <div class="mb-3 border-2 border-[#111112] relative group bg-[#f7f6f2] overflow-hidden">
+                <img src="${safeImageUrl}" class="w-full h-52 object-cover cursor-pointer transition-transform duration-300 group-hover:scale-[1.02]" onclick="openModal('${safeImageUrl}')">
+                <div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                    <button onclick="event.stopPropagation(); uploadCharacterImage(${idx})" class="bg-white border-2 border-[#111112] text-xs font-bold px-2.5 py-1 hover:bg-[#faeae6] inline-flex items-center gap-1" title="手动上传/更换图片"><span data-icon="upload" class="ico-12"></span> 换图</button>
                 </div>
             </div>
-            ` : ''}
+            ` : `
+            <div class="mb-3 border-2 border-dashed border-[#d4d1c7] bg-[#f7f6f2] py-6 px-3 text-center text-xs text-[#7d7d84]">
+                可点击下方生成，或直接拖拽人设图到卡片上传
+            </div>
+            `}
             <div id="prompt-editor-${idx}" class="hidden mb-3">
-                <label class="block text-xs font-medium text-gray-600 mb-1">图像生成提示词 (空=自动生成)</label>
-                <textarea id="char-prompt-${idx}" rows="3" class="w-full text-xs border border-gray-300 rounded p-2 font-mono" oninput="saveCharPrompt(${idx}, this.value)" onblur="saveCharPrompt(${idx}, this.value)">${escapeHtml(char.char_prompt || '')}</textarea>
-                <div class="text-xs text-gray-500 mt-1">
-                    实时同步 · 当前提示词:
-                    <code class="text-gray-800" id="char-prompt-preview-${idx}">${escapeHtml(char.char_prompt || '(自动生成)')}</code>
+                <label class="block text-xs font-bold text-[#4e4e54] mb-1">图像生成提示词（留空则自动生成）</label>
+                <textarea id="char-prompt-${idx}" rows="3" class="w-full text-xs input-ink p-2 font-mono" oninput="saveCharPrompt(${idx}, this.value)" onblur="saveCharPrompt(${idx}, this.value)">${escapeHtml(char.char_prompt || '')}</textarea>
+                <div class="text-xs text-[#7d7d84] mt-1">
+                    实时同步 · 当前提示词：
+                    <code class="text-[#111112]" id="char-prompt-preview-${idx}">${escapeHtml(char.char_prompt || '(自动生成)')}</code>
                 </div>
             </div>
-            <div class="flex gap-2">
-                <button onclick="generateCharacterImage(${idx}, this)" class="flex-1 btn-primary py-2 text-sm">
+            <div class="flex gap-2 mt-auto pt-1">
+                <button onclick="generateCharacterImage(${idx}, this)" class="flex-1 btn-primary py-2 text-xs md:text-sm">
                     ${char.image_url ? '重新生成' : '生成人设图'}
                 </button>
-                <button onclick="uploadCharacterImage(${idx})" class="flex-1 bg-gray-700 text-white py-2 text-sm hover:bg-gray-800 transition-colors">
-                    📁 ${char.image_url ? '更换' : '上传'}
+                <button onclick="uploadCharacterImage(${idx})" class="flex-1 btn-ghost py-2 text-xs md:text-sm">
+                    <span data-icon="upload" class="ico-14"></span> ${char.image_url ? '更换图片' : '上传参考图'}
                 </button>
             </div>
             <input type="file" id="char-upload-${idx}" accept="image/*" class="hidden" onchange="handleCharacterImageFile(${idx}, this)">
         </div>
     `;}).join('');
 
-    // 角色卡片级联入场
+    // 绑定拖拽上传 + 图标水合 + 卡片级联入场
+    setupDragDropUpload();
+    const w: any = window;
+    if (typeof w.hydrateIcons === 'function') w.hydrateIcons(container);
     playStagger(container);
     markDirtyLocal();
-    const w: any = window;
     if (typeof w.scheduleWorkspaceUI === 'function') w.scheduleWorkspaceUI();
 }
 

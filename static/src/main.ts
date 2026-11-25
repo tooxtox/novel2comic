@@ -25,9 +25,9 @@ import * as Api from './modules/api';
 
 import { showToast } from './modules/toast';
 
-// 副作用导入: 图标库自启动 (hydrateIcons + MutationObserver),
-// 把 <span data-icon="xxx"> 替换成内联 SVG。必须在 boot() 之前引入。
+// 副作用导入: 图标库 + 衔接动画协调器自启动, 必须在 boot() 之前引入。
 import './modules/icons';
+import './modules/transitions';
 
 /* ============================================================
  * PRIMARY_ACTIONS: 状态条 / 快捷键共用的当前 Tab 主操作

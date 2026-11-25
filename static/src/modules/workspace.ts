@@ -88,6 +88,11 @@ export function updateWorkspaceUI(): void {
     _setCountChip('seg-count-chip', `${pages} 页 / ${segCount} 格`, segCount > 0);
     _setCountChip('gallery-count-chip', `${fullPages} 张`, fullPages > 0);
 
+    const wbCounts = document.getElementById('wb-counts');
+    if (wbCounts) {
+        wbCounts.textContent = `${chars} 字 / ${charCount} 角色 / ${segCount} 分镜 / ${fullPages} 整页`;
+    }
+
     // 接口状态
     let cfg: any = {};
     try { cfg = JSON.parse(localStorage.getItem('manga_config') || '{}'); } catch (e) { cfg = {}; }
@@ -280,11 +285,11 @@ export function renderStylePresets(): void {
 
         // 分类标题
         const title = document.createElement('div');
-        title.className = 'text-xs font-bold text-gray-700 mb-2 flex items-center gap-1';
-        const categoryEmoji: any = {
-            '日漫': 'A', '美漫': 'B', '韩漫': 'C', '国漫': 'D', '其他': 'E'
+        title.className = 'text-xs font-extrabold text-[#4e4e54] mb-2 flex items-center gap-1.5';
+        const categoryCode: any = {
+            '日漫': 'JP', '美漫': 'US', '韩漫': 'KR', '国漫': 'CN', '其他': 'EX'
         };
-        title.innerHTML = `<span>${categoryEmoji[category] || '🎨'}</span><span>${category}</span>`;
+        title.innerHTML = `<span class="mono px-1.5 py-0.5 text-[10px] bg-[#111112] text-white">${categoryCode[category] || 'ST'}</span><span>${category}</span>`;
         groupDiv.appendChild(title);
 
         // 风格按钮组
@@ -297,8 +302,8 @@ export function renderStylePresets(): void {
             btn.dataset.id = preset.id;
             const isSelected = state.selectedPresetIds.has(preset.id);
             btn.className = isSelected
-                ? 'px-3 py-1.5 text-sm font-medium border-2 border-black bg-black text-white transition-all'
-                : 'px-3 py-1.5 text-sm font-medium border-2 border-gray-300 hover:border-black transition-all';
+                ? 'px-3 py-1.5 text-xs md:text-sm font-bold border-2 border-[#111112] bg-[#111112] text-white shadow-[2px_2px_0_#c23623] transition-all'
+                : 'px-3 py-1.5 text-xs md:text-sm font-medium border-2 border-[#d4d1c7] bg-white text-[#111112] hover:border-[#111112] transition-all';
             btn.textContent = preset.label;
             btn.onclick = () => togglePresetStyle(preset.id);
             btnGroup.appendChild(btn);
@@ -409,7 +414,7 @@ export function getStyleTagsString(): string {
 /** 气泡类型迷你预览: 改下拉时形状跟着变 */
 export function syncBubbleMini(selectEl: HTMLSelectElement | null): void {
     const mini = selectEl && selectEl.parentElement ? selectEl.parentElement.querySelector('.bubble-mini') as HTMLElement | null : null;
-    if (!mini) return;
+    if (!selectEl || !mini) return;
     mini.dataset.type = selectEl.value;
     mini.classList.remove('is-changed');
     void mini.offsetWidth;
@@ -525,8 +530,10 @@ export function clearConfig(): void {
     (document.getElementById('img-api-key') as HTMLInputElement).value = '';
     (document.getElementById('img-model') as HTMLInputElement).value = '';
     localStorage.removeItem('manga_config');
-    document.getElementById('test-llm-result').innerHTML = '';
-    document.getElementById('test-image-result').innerHTML = '';
+    const llmRes = document.getElementById('test-llm-result');
+    if (llmRes) llmRes.innerHTML = '';
+    const imgRes = document.getElementById('test-image-result');
+    if (imgRes) imgRes.innerHTML = '';
     showToast('配置已清空！', 'success');
 }
 
@@ -713,7 +720,8 @@ export function applyConfigToForm(config: any): void {
 
 export function updateCharCount(): void {
     const text = (document.getElementById('novel-text') as HTMLTextAreaElement).value;
-    document.getElementById('char-count').textContent = String(text.length);
+    const cc = document.getElementById('char-count');
+    if (cc) cc.textContent = String(text.length);
     markDirty();
     scheduleWorkspaceUI();
 }
@@ -1140,8 +1148,10 @@ export async function polishNovel(scope: string = 'aiwrite'): Promise<void> {
 export function openPolishCompare(): void {
     const modal = document.getElementById('polish-compare-modal');
     if (!modal) return;
-    document.getElementById('polish-original').textContent = state._polishOriginal;
-    document.getElementById('polish-result').textContent = state._polishResult;
+    const origEl = document.getElementById('polish-original');
+    if (origEl) origEl.textContent = state._polishOriginal;
+    const resEl = document.getElementById('polish-result');
+    if (resEl) resEl.textContent = state._polishResult;
     const t: any = (window as any).__t2cTransitions;
     if (t) {
         t.openModal('polish-compare-modal');

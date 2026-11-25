@@ -32,12 +32,12 @@ export function openBubbleEditor(pageIdx: number): void {
     modal.className = 'fixed inset-0 z-50 flex flex-col';
     modal.innerHTML = `
         <div class="modal-backdrop absolute inset-0 bg-black bg-opacity-70"></div>
-        <div class="modal-card relative flex flex-col h-full max-w-6xl mx-auto w-full bg-white">
-            <div class="flex items-center justify-between p-4 border-b-2 border-black">
-                <h2 class="text-lg font-bold">✏️ 拖动气泡调整位置</h2>
+        <div class="modal-card relative flex flex-col h-full max-w-6xl mx-auto w-full bg-white manga-border">
+            <div class="flex items-center justify-between p-4 border-b-2 border-[#111112] bg-[#f7f6f2]">
+                <h2 class="text-base md:text-lg font-black flex items-center gap-2"><span data-icon="pencil" class="ico-18" style="color: var(--spot);"></span><span>拖动气泡调整位置（可点击右上角切换气泡形状）</span></h2>
                 <div class="flex gap-2">
-                    <button id="bubble-editor-cancel" class="border-2 border-gray-400 px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">取消</button>
-                    <button id="bubble-editor-save" class="btn-primary px-4 py-2 text-sm font-medium">保存</button>
+                    <button id="bubble-editor-cancel" class="btn-ghost px-4 py-1.5 text-sm">取消</button>
+                    <button id="bubble-editor-save" class="btn-accent px-5 py-1.5 text-sm">保存并重新渲染</button>
                 </div>
             </div>
             <div class="flex-1 overflow-auto bg-gray-200 p-4 flex justify-center">
@@ -188,21 +188,24 @@ export function openBubbleEditor(pageIdx: number): void {
         };
     }
 
-    document.getElementById('bubble-editor-cancel').onclick = closeModalEditor;
+    const cancelBtn = document.getElementById('bubble-editor-cancel');
+    if (cancelBtn) cancelBtn.onclick = closeModalEditor;
 
-    document.getElementById('bubble-editor-save').onclick = async function(this: HTMLButtonElement) {
-        const btn = this;
-        btn.disabled = true;
-        btn.textContent = '保存中...';
-        try {
-            await saveBubblePositions(pageIdx, editBubbles);
-            closeModalEditor();
-        } catch (e: any) {
-            btn.disabled = false;
-            btn.textContent = '保存';
-            showToast('保存失败: ' + (e.message || e), 'error');
-        }
-    };
+    const saveBtn = document.getElementById('bubble-editor-save') as HTMLButtonElement | null;
+    if (saveBtn) {
+        saveBtn.onclick = async function() {
+            saveBtn.disabled = true;
+            saveBtn.textContent = '保存中...';
+            try {
+                await saveBubblePositions(pageIdx, editBubbles);
+                closeModalEditor();
+            } catch (e: any) {
+                saveBtn.disabled = false;
+                saveBtn.textContent = '保存并重新渲染';
+                showToast('保存失败: ' + (e.message || e), 'error');
+            }
+        };
+    }
 }
 
 export async function saveBubblePositions(pageIdx: number, bubbles: any[]): Promise<void> {

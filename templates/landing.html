@@ -1,12 +1,12 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-page="landing">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>小说⇄漫画 双向转换器 | 把小说变成一页漫画</title>
     <meta name="description" content="贴入小说，自动分镜、配人设、出整页漫画，中文对白由本地字体渲染。也能把漫画图片读回小说。本地运行，用自己的 API 接口。">
-    <meta name="theme-color" content="#f4f4f2" media="(prefers-color-scheme: light)">
-    <meta name="theme-color" content="#131315" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f3ee" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#121214" media="(prefers-color-scheme: dark)">
     <link rel="preload" as="image" href="{{ url_for('static', filename='showcase/03_hero-page.jpg') }}">
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -16,12 +16,10 @@
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='design-system.css') }}">
     <script>
-        // 只有 GSAP 真的可用时才允许 CSS 预隐藏 (避免离线/CDN 失败导致内容不可见)
         (function () {
             var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
             if (window.gsap && window.ScrollTrigger && !reduce) {
                 document.documentElement.classList.add('has-gsap');
-                // 兜底: 主脚本若没跑起来, 5s 后强制显示全部内容
                 window.setTimeout(function () {
                     if (!window.__landingReady) document.documentElement.classList.remove('has-gsap');
                 }, 5000);
@@ -29,143 +27,150 @@
         })();
     </script>
     <style>
-        /* =====================================================================
-           设计读数: 面向中文小说作者的本地工具宣传页, 漫画印刷 / 网点 的 brutalist 语言
-           三个旋钮: DESIGN_VARIANCE 8  MOTION_INTENSITY 8  VISUAL_DENSITY 3
-           形状锁: 页面一律直角; 只有"气泡"按产品真实形状绘制 (见 .bb-*)
-           z 轴: --z-nav 40 / --z-curtain 60 / --z-grain 70
-           ===================================================================== */
+        /* landing.html 专属变量与排版规则 (继承 design-system.css v3) */
         :root {
-            --paper: #f4f4f2;
-            --paper-2: #eaeae6;
-            --ink: #111112;
-            --ink-soft: #55555a;
-            --rule: #d5d5cf;
-            /* 专色(朱红)分两档, 全页只用这一个色相:
-               --spot 给文字与描边, --spot-fill 给填充块(配白字) */
-            --spot: #b5301f;
-            --spot-fill: #b5301f;
-            --spot-soft: #f0d9d5;
-            /* 画框: 纸永远是纸, 边与投影跟着主题走 */
-            --frame-paper: #f4f4f2;
+            --frame-paper: #f4f3ee;
             --frame-edge: #111112;
             --frame-shadow: #111112;
-            --z-nav: 40;
-            --z-curtain: 60;
-            --z-grain: 70;
             --dur-fast: .18s;
             --dur: .32s;
-            --dur-slow: .7s;
             --ease: cubic-bezier(.16, 1, .3, 1);
-            --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
         }
-        /* 深色模式: 纸墨互换 (漫画负片). 生成图始终留在纸色画框里, 因为纸就是纸 */
         @media (prefers-color-scheme: dark) {
-            :root {
-                --paper: #131315;
-                --paper-2: #1c1c1f;
-                --ink: #f1f1ee;
-                --ink-soft: #a6a6a1;
-                --rule: #34343a;
-                --spot: #ec6a52;        /* 深底上提亮, 文字对比度 ≥ 4.5:1 */
-                --spot-fill: #b5301f;   /* 填充块保持深红, 白字对比度 6:1 */
-                --spot-soft: #40231f;
-                --frame-edge: #4a4a52;
+            html[data-page="landing"] {
+                --frame-edge: #4e4e56;
                 --frame-shadow: #000000;
             }
         }
-        html { scroll-behavior: smooth; }
         body {
-            background: var(--paper);
+            background: var(--bg);
             color: var(--ink);
-            font-family: 'Noto Sans SC', system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
-            -webkit-font-smoothing: antialiased;
             overflow-x: hidden;
         }
-        ::selection { background: var(--spot); color: #fff; }
-        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
         .wrap { max-width: 1280px; margin: 0 auto; padding-left: 20px; padding-right: 20px; }
         @media (min-width: 768px) { .wrap { padding-left: 40px; padding-right: 40px; } }
 
-        /* ---------- 网点 / 速度线 (漫画印刷纹理, 纯静态, 不用滤镜) ---------- */
-        .halftone {
-            background-image: radial-gradient(var(--ink) 1px, transparent 1.3px);
-            background-size: 7px 7px;
-            opacity: .16;
-        }
-        .halftone-soft {
-            background-image: radial-gradient(var(--ink) .8px, transparent 1.1px);
-            background-size: 5px 5px;
-            opacity: .1;
-        }
-        .speedlines {
-            background-image: repeating-linear-gradient(92deg, var(--ink) 0 1px, transparent 1px 6px);
-            opacity: .14;
-        }
         .mask-b { -webkit-mask-image: linear-gradient(to bottom, #000 35%, transparent); mask-image: linear-gradient(to bottom, #000 35%, transparent); }
         .mask-r { -webkit-mask-image: linear-gradient(to right, #000 45%, transparent); mask-image: linear-gradient(to right, #000 45%, transparent); }
 
-        /* ---------- 字号 / 排版 ---------- */
+        /* 排版阶梯 */
         .display {
             font-weight: 900;
-            letter-spacing: -.02em;
-            line-height: 1.12;
-            font-size: clamp(2.4rem, 7.4vw, 4.4rem);
+            letter-spacing: -.025em;
+            line-height: 1.1;
+            font-size: clamp(2.4rem, 7.4vw, 4.5rem);
         }
-        @media (min-width: 1024px) { .display { font-size: clamp(3rem, 4.6vw, 4.6rem); } }
+        @media (min-width: 1024px) { .display { font-size: clamp(3.1rem, 4.7vw, 4.75rem); } }
         .h2 {
             font-weight: 900;
-            letter-spacing: -.015em;
+            letter-spacing: -.018em;
             line-height: 1.18;
-            font-size: clamp(1.7rem, 3.9vw, 2.7rem);
+            font-size: clamp(1.75rem, 3.8vw, 2.75rem);
         }
-        .lead { color: var(--ink-soft); line-height: 1.9; font-size: 1.02rem; }
+        .lead { color: var(--ink-soft); line-height: 1.88; font-size: 1.04rem; }
         .body-copy { color: var(--ink-soft); line-height: 1.85; }
-        .label {
-            font-size: .74rem;
-            font-weight: 500;
-            letter-spacing: .14em;
+        .kicker {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
             color: var(--ink-soft);
         }
+        .kicker-num {
+            color: var(--spot);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
         .accent { color: var(--spot); }
-        .rule { border-top: 2px solid var(--ink); }
 
-        /* ---------- 组件 ---------- */
+        /* 宣传页按钮（与工坊主按钮保持同一印章体系） */
         .btn {
             display: inline-flex;
             align-items: center;
             justify-content: center;
             gap: 8px;
             border: 2px solid var(--ink);
-            padding: 14px 26px;
+            padding: 13px 26px;
             font-weight: 700;
             white-space: nowrap;
             cursor: pointer;
-            transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease), background-color var(--dur-fast) linear, color var(--dur-fast) linear;
+            transition: transform var(--dur-fast) var(--ease),
+                        box-shadow var(--dur-fast) var(--ease),
+                        background-color var(--dur-fast) linear,
+                        color var(--dur-fast) linear;
         }
-        .btn-primary { background: var(--spot-fill); color: #fff; border-color: var(--spot-fill); }
-        .btn-primary:hover { transform: translate(-2px, -2px); box-shadow: 5px 5px 0 var(--ink); }
-        .btn-primary:active { transform: translate(0, 0) scale(.985); box-shadow: 1px 1px 0 var(--ink); }
-        .btn-ghost { background: transparent; color: var(--ink); }
-        .btn-ghost:hover { transform: translate(-2px, -2px); box-shadow: 5px 5px 0 var(--ink); background: var(--paper-2); }
-        .btn-ghost:active { transform: translate(0, 0) scale(.985); box-shadow: 1px 1px 0 var(--ink); }
-        :focus-visible { outline: 3px solid var(--spot); outline-offset: 3px; }
+        .landing-cta {
+            background: var(--spot-fill);
+            color: #ffffff;
+            border-color: var(--ink);
+            box-shadow: 4px 4px 0 var(--ink);
+        }
+        .landing-cta:hover {
+            transform: translate(-2px, -2px);
+            box-shadow: 6px 6px 0 var(--ink);
+            background: var(--spot-hover);
+        }
+        .landing-cta:active {
+            transform: translate(1px, 1px) scale(.985);
+            box-shadow: 1px 1px 0 var(--ink);
+        }
+        .landing-ghost {
+            background: transparent;
+            color: var(--ink);
+        }
+        .landing-ghost:hover {
+            transform: translate(-2px, -2px);
+            box-shadow: 5px 5px 0 var(--ink);
+            background: var(--paper-2);
+        }
+        .landing-ghost:active {
+            transform: translate(0, 0) scale(.985);
+            box-shadow: 1px 1px 0 var(--ink);
+        }
 
-        .frame {
+        /* 漫画印刷画框（纸永远是纸色） */
+        .art-frame {
             border: 2px solid var(--frame-edge);
-            background: var(--frame-paper);   /* 画框始终是纸色: 漫画印在纸上 */
+            background: var(--frame-paper);
             box-shadow: 10px 10px 0 var(--frame-shadow);
         }
-        .frame-sm { border: 2px solid var(--frame-edge); background: var(--frame-paper); box-shadow: 6px 6px 0 var(--frame-shadow); }
-
-        /* 墨迹擦除: 进场时从下往上"印"出来 (用画框纸色, 与画框同一张纸) */
-        .wipe { position: absolute; inset: -2px; background: var(--frame-paper); transform-origin: bottom; pointer-events: none; }
+        .art-frame-sm {
+            border: 2px solid var(--frame-edge);
+            background: var(--frame-paper);
+            box-shadow: 6px 6px 0 var(--frame-shadow);
+        }
+        .frame-caption-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 7px 10px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            color: #4e4e54;
+            border-top: 1.5px solid #d4d1c7;
+            background: #f4f3ee;
+        }
+        .wipe {
+            position: absolute;
+            inset: -2px;
+            background: var(--frame-paper);
+            transform-origin: bottom;
+            pointer-events: none;
+        }
 
         /* 顶部导航 */
+        .landing-nav {
+            background: var(--bg);
+            border-bottom: 2px solid var(--ink);
+        }
         .nav-link {
             position: relative;
             padding: 6px 2px;
             color: var(--ink-soft);
+            font-weight: 500;
             transition: color var(--dur-fast) linear;
         }
         .nav-link::after {
@@ -181,26 +186,59 @@
         .nav-link:hover { color: var(--ink); }
         .nav-link:hover::after { transform: scaleX(1); }
 
-        /* 跑马灯 (全页仅此一条) */
-        .marquee { overflow: hidden; border-top: 2px solid var(--ink); border-bottom: 2px solid var(--ink); background: var(--ink); color: var(--paper); }
-        .marquee-track { display: flex; align-items: center; gap: 42px; padding: 14px 0; width: max-content; will-change: transform; }
-        .marquee-item { font-weight: 700; font-size: 1.05rem; letter-spacing: .04em; white-space: nowrap; }
-        .mk-sep { width: 9px; height: 9px; background: var(--spot); transform: rotate(45deg); flex: none; }
+        /* 跑马灯 */
+        .marquee {
+            overflow: hidden;
+            border-top: 2px solid var(--ink);
+            border-bottom: 2px solid var(--ink);
+            background: var(--ink);
+            color: var(--bg);
+        }
+        .marquee-track {
+            display: flex;
+            align-items: center;
+            gap: 42px;
+            padding: 14px 0;
+            width: max-content;
+            will-change: transform;
+        }
+        .marquee-item {
+            font-weight: 700;
+            font-size: 1.02rem;
+            letter-spacing: .05em;
+            white-space: nowrap;
+        }
+        .mk-sep {
+            width: 8px;
+            height: 8px;
+            background: var(--spot);
+            transform: rotate(45deg);
+            flex: none;
+        }
 
-        /* ---------- 八种气泡: 与后端 BUBBLE_DRAWERS 的真实形状对齐 ---------- */
-        .bb-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+        /* 八种气泡陈列墙 */
+        .bb-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
         @media (min-width: 768px) { .bb-grid { grid-template-columns: repeat(6, 1fr); } }
         .bb-cell {
             position: relative;
             border: 2px solid var(--ink);
             background: var(--paper);
-            padding: 18px;
+            padding: 20px;
             display: flex;
             flex-direction: column;
             gap: 14px;
             transition: transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
         }
         .bb-cell:hover { transform: translate(-3px, -3px); box-shadow: 7px 7px 0 var(--ink); }
+        .bb-idx {
+            position: absolute;
+            top: 10px;
+            right: 12px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            opacity: 0.45;
+        }
         .bb-stage { height: 118px; display: flex; align-items: center; justify-content: center; }
         .bb {
             position: relative;
@@ -208,14 +246,14 @@
             align-items: center;
             justify-content: center;
             text-align: center;
-            font-size: .82rem;
-            font-weight: 500;
+            font-size: .84rem;
+            font-weight: 600;
             line-height: 1.35;
             padding: 10px 14px;
             max-width: 100%;
-            color: #1a1a1a;
-            background: #fff;
-            border: 2px solid #1a1a1a;
+            color: #111112;
+            background: #ffffff;
+            border: 2px solid #111112;
             transition: transform var(--dur) var(--ease-spring);
         }
         .bb-cell:hover .bb { transform: scale(1.06); }
@@ -223,11 +261,11 @@
         .bb-thought  { border-radius: 26px; background: #fafcff; min-width: 118px; }
         .bb-thought::before {
             content: ''; position: absolute; left: 10%; right: 10%; top: -9px; height: 12px;
-            border: 2px solid #1a1a1a; border-bottom: 0; border-radius: 18px 18px 0 0; background: #fafcff;
+            border: 2px solid #111112; border-bottom: 0; border-radius: 18px 18px 0 0; background: #fafcff;
         }
         .bb-thought::after {
             content: ''; position: absolute; right: 16%; bottom: -11px; width: 13px; height: 13px;
-            border: 2px solid #1a1a1a; border-radius: 50%; background: #fafcff;
+            border: 2px solid #111112; border-radius: 50%; background: #fafcff;
         }
         .bb-shout {
             border-radius: 4px; border-width: 3px; background: #fff7e6; padding: 14px 16px;
@@ -240,94 +278,124 @@
             background: radial-gradient(circle at center, #fff8d6 0%, #fff8d6 58%, rgba(255, 248, 214, 0) 72%);
         }
         .bb-narration { border-radius: 2px; background: #f5f5dc; border-color: #333; min-width: 124px; }
-        .bb-box { border-radius: 0; background: #fff; min-width: 118px; }
-        .bb-caption { border-radius: 0; background: #1a1a1a; color: #fff; border-color: #1a1a1a; min-width: 110px; }
-        .bb-name { font-weight: 700; }
-        .bb-desc { color: var(--ink-soft); font-size: .86rem; line-height: 1.7; }
+        .bb-box { border-radius: 0; background: #ffffff; min-width: 118px; }
+        .bb-caption { border-radius: 0; background: #111112; color: #ffffff; border-color: #111112; min-width: 110px; }
+        .bb-name { font-weight: 800; font-size: 0.98rem; }
+        .bb-desc { color: var(--ink-soft); font-size: .85rem; line-height: 1.7; margin-top: 2px; }
 
-        /* ---------- 三步横向轨道 (桌面钉住横移, 手机/减少动效转纵向) ---------- */
-        [data-pan] { overflow: hidden; }
+        /* 三步横向轨道 */
+        [data-pan] {
+            overflow: hidden;
+            background: var(--paper-2);
+            border-top: 2px solid var(--ink);
+            border-bottom: 2px solid var(--ink);
+        }
         .pan-wrap { display: flex; align-items: center; min-height: 100dvh; }
         .pan-track { display: flex; align-items: center; gap: 20px; padding: 0 20px; }
-        @media (min-width: 768px) { .pan-track { padding: 0 40px; gap: 32px; } }
+        @media (min-width: 768px) { .pan-track { padding: 0 40px; gap: 36px; } }
         .pan-card { width: min(86vw, 460px); flex: none; }
-        .pan-card-wide { width: min(86vw, 640px); }
+        .pan-card-wide { width: min(86vw, 620px); }
         @media (max-width: 767px) {
             .pan-wrap { min-height: 0; padding: 64px 0; }
-            .pan-track { flex-direction: column; align-items: stretch; }
+            .pan-track { flex-direction: column; align-items: stretch; gap: 40px; }
             .pan-card, .pan-card-wide { width: 100%; }
         }
         [data-pan].pan-static { overflow: visible; }
         [data-pan].pan-static .pan-wrap { min-height: 0; padding: 72px 0; }
-        [data-pan].pan-static .pan-track { flex-direction: column; align-items: stretch; }
+        [data-pan].pan-static .pan-track { flex-direction: column; align-items: stretch; gap: 44px; }
         [data-pan].pan-static .pan-card,
         [data-pan].pan-static .pan-card-wide { width: 100%; max-width: 720px; margin: 0 auto; }
         .pan-label {
-            display: inline-block;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
             background: var(--ink);
-            color: var(--paper);
-            padding: 5px 12px;
-            font-weight: 700;
+            color: var(--bg);
+            padding: 5px 13px;
+            font-weight: 800;
             letter-spacing: .06em;
-            font-size: .9rem;
+            font-size: .85rem;
         }
         .novel-slab {
             border: 2px solid var(--ink);
-            background: var(--paper-2);
-            padding: 22px;
+            background: var(--paper);
+            padding: 24px;
             line-height: 2;
-            font-size: .98rem;
+            font-size: .96rem;
+            box-shadow: 6px 6px 0 var(--ink);
         }
         .novel-slab p + p { margin-top: 12px; }
 
-        /* ---------- 反向: 扫描线 ---------- */
+        /* 反向扫描 */
         .scan-wrap { position: relative; overflow: hidden; }
         .scan-line {
             position: absolute; left: 0; right: 0; top: 0; height: 3px;
             background: var(--spot);
-            box-shadow: 0 0 22px 6px rgba(200, 55, 42, .45);
+            box-shadow: 0 0 22px 6px rgba(194, 54, 35, .45);
             transform: translateY(-10px);
             opacity: 0;
         }
-        .rev-step { border-left: 3px solid var(--spot); padding-left: 14px; }
-        .rev-step dt { font-weight: 700; }
+        .rev-step {
+            border-left: 3px solid var(--spot);
+            padding: 4px 0 4px 18px;
+        }
+        .rev-step dt { font-weight: 800; font-size: 1.05rem; margin-bottom: 4px; }
         .rev-step dd { color: var(--ink-soft); line-height: 1.8; font-size: .95rem; }
 
-        /* ---------- 代码板 ---------- */
-        .code-slab {
+        /* 配置代码板 */
+        .code-window {
             border: 2px solid var(--ink);
-            background: var(--paper-2);
+            background: var(--paper);
+            box-shadow: 8px 8px 0 var(--ink);
+        }
+        .code-window-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 9px 16px;
+            border-bottom: 2px solid var(--ink);
+            background: var(--paper-3);
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .code-slab {
             padding: 20px 22px;
-            font-size: .84rem;
-            line-height: 1.85;
+            font-size: .86rem;
+            line-height: 1.9;
             overflow-x: auto;
             color: var(--ink);
         }
-        .code-slab .k { color: var(--spot); }
+        .code-slab .k { color: var(--spot); font-weight: 700; }
         .code-slab .s { color: var(--ink-soft); }
 
-        /* ---------- 收尾 CTA: 全页唯一一处刻意反相的色块 ---------- */
-        .closing { background: var(--ink); color: var(--paper); }
-        .closing .btn-primary { border-color: var(--spot); }
-        .closing .halftone { background-image: radial-gradient(var(--paper) 1px, transparent 1.3px); opacity: .18; }
+        .feature-card {
+            border: 2px solid var(--ink);
+            background: var(--paper);
+            padding: 22px;
+            box-shadow: 4px 4px 0 var(--ink);
+            transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+        }
+        .feature-card:hover {
+            transform: translate(-2px, -2px);
+            box-shadow: 6px 6px 0 var(--spot);
+        }
 
-        /* ---------- 进页面幕布 ---------- */
+        /* 收尾 CTA */
+        .closing { background: var(--ink); color: var(--bg); }
+        .closing .halftone { background-image: radial-gradient(var(--bg) 1px, transparent 1.3px); opacity: .15; }
+        .closing .landing-cta { border-color: #ffffff; box-shadow: 5px 5px 0 rgba(255, 255, 255, 0.22); }
+        .closing .landing-cta:hover { box-shadow: 7px 7px 0 #ffffff; }
+
+        /* 进站幕布 */
         #curtain { position: fixed; inset: 0; z-index: var(--z-curtain); pointer-events: none; display: flex; }
         #curtain span { flex: 1; background: var(--ink); transform: scaleY(0); transform-origin: bottom; }
         #curtain.on { pointer-events: auto; }
 
-        /* 只在 GSAP 可用时预隐藏待入场元素 (标题逐字单独隐藏, 避免整块闪一下) */
         html.has-gsap [data-anim] { opacity: 0; }
         html.has-gsap [data-split] .ch { opacity: 0; }
         html.has-gsap .reveal { opacity: 0; }
 
         @media (prefers-reduced-motion: reduce) {
-            html { scroll-behavior: auto; }
-            *, *::before, *::after {
-                animation-duration: .01ms !important;
-                animation-iteration-count: 1 !important;
-                transition-duration: .01ms !important;
-            }
             html.has-gsap [data-anim], html.has-gsap .reveal { opacity: 1 !important; }
             .marquee-track { transform: none !important; }
         }
@@ -335,49 +403,67 @@
 </head>
 <body>
 
-<!-- ========== 顶部导航: 单行, 68px ========== -->
-<nav class="sticky top-0 z-[40]" style="background: var(--paper); border-bottom: 2px solid var(--ink);">
+<!-- ========== 顶部导航 ========== -->
+<nav class="landing-nav sticky top-0 z-[40]">
     <div class="wrap h-[68px] flex items-center justify-between gap-6">
         <a href="#top" class="flex items-center gap-3 shrink-0">
-            <span class="w-8 h-8 flex items-center justify-center font-black text-lg" style="background: var(--ink); color: var(--paper);">⇄</span>
-            <span class="font-black tracking-tight hidden sm:inline">小说⇄漫画</span>
+            <span class="w-9 h-9 flex items-center justify-center font-black text-lg" style="background: var(--ink); color: var(--bg);">⇄</span>
+            <div class="hidden sm:block">
+                <span class="font-black tracking-tight block leading-none">小说⇄漫画</span>
+                <span class="mono text-[10px] tracking-[0.18em] uppercase" style="color: var(--ink-soft);">PRINT STUDIO</span>
+            </div>
         </a>
         <div class="hidden lg:flex items-center gap-8 text-sm">
-            <a class="nav-link" href="#pipeline">功能</a>
-            <a class="nav-link" href="#bubbles">气泡</a>
-            <a class="nav-link" href="#reverse">双向</a>
-            <a class="nav-link" href="#local">本地运行</a>
+            <a class="nav-link" href="#bubbles">八种气泡</a>
+            <a class="nav-link" href="#pipeline">三步流程</a>
+            <a class="nav-link" href="#reverse">漫画转小说</a>
+            <a class="nav-link" href="#local">本地隐私</a>
         </div>
-        <a href="/app" class="btn btn-primary text-sm" style="padding: 10px 20px;" data-cta>开始使用</a>
+        <div class="flex items-center gap-2.5">
+            <a href="/" class="btn landing-ghost text-sm hidden sm:inline-flex" style="padding: 9px 16px;">登录</a>
+            <a href="/app" class="btn landing-cta text-sm" style="padding: 9px 20px;" data-cta>开始使用</a>
+        </div>
     </div>
 </nav>
 
-<!-- ========== Hero: 非对称分栏 ========== -->
+<!-- ========== Hero：非对称分栏 ========== -->
 <header id="top" class="relative overflow-hidden">
     <div class="absolute inset-0 halftone mask-r pointer-events-none" aria-hidden="true"></div>
     <div class="wrap relative pt-12 pb-16 md:pt-20 md:pb-24">
-        <div class="grid lg:grid-cols-[1.05fr_.95fr] gap-12 lg:gap-16 items-center">
+        <div class="grid lg:grid-cols-[1.04fr_.96fr] gap-12 lg:gap-16 items-center">
             <div>
-                <p class="label mb-5" data-anim="eyebrow">本地运行的漫画生成工作台</p>
+                <p class="kicker mb-5" data-anim="eyebrow">
+                    <span class="kicker-num">ISSUE 01</span>
+                    <span>本地运行的漫画生成工作台</span>
+                </p>
                 <h1 class="display mb-6" data-split>
                     <span class="block">把一段小说，</span>
                     <span class="block accent">变成一页漫画</span>
                 </h1>
-                <p class="lead max-w-[36ch] mb-9" data-anim="sub">
-                    贴入小说，自动分镜、配人设、出整页。中文对白由本机字体画进画面，不会变成方块。
+                <p class="lead max-w-[38ch] mb-8" data-anim="sub">
+                    贴入小说，自动分镜、配人设、出整页。中文对白由本机字体精准渲染进画面，彻底告别 AI 乱码与方块字。
                 </p>
-                <div class="flex flex-wrap items-center gap-4" data-anim="cta">
-                    <a href="/app" class="btn btn-primary" data-cta data-magnetic>开始使用</a>
-                    <a href="#pipeline" class="btn btn-ghost">看它怎么跑</a>
+                <div class="flex flex-wrap items-center gap-4 mb-8" data-anim="cta">
+                    <a href="/app" class="btn landing-cta" data-cta data-magnetic>立即进入工作台 →</a>
+                    <a href="#pipeline" class="btn landing-ghost">看它怎么跑</a>
+                </div>
+                <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs mono" style="color: var(--ink-soft);" data-anim="sub">
+                    <span>[✓] 整页分镜直出</span>
+                    <span>[✓] 人设参考不跑形</span>
+                    <span>[✓] 反向漫画读小说</span>
                 </div>
             </div>
 
             <div class="relative">
                 <div class="absolute -inset-6 speedlines mask-r pointer-events-none" aria-hidden="true"></div>
-                <div class="relative frame p-2.5" data-frame>
+                <div class="relative art-frame p-2.5" data-frame>
                     <img src="{{ url_for('static', filename='showcase/03_hero-page.jpg') }}"
                          width="1600" height="1067" alt="由本工具生成的彩色漫画页: 六格分镜, 森林里的叶蛋家族, 含旁白框与对白气泡"
                          class="block w-full h-auto" fetchpriority="high">
+                    <div class="frame-caption-bar mono">
+                        <span>FIG 01 · FULL-PAGE MANGA</span>
+                        <span style="color: var(--spot);">6 PANELS / PIL BUBBLES</span>
+                    </div>
                     <span class="wipe" data-wipe aria-hidden="true"></span>
                 </div>
             </div>
@@ -385,7 +471,7 @@
     </div>
 </header>
 
-<!-- ========== 能力带: 全页唯一一条跑马灯 ========== -->
+<!-- ========== 能力跑马灯 ========== -->
 <div class="marquee" data-marquee>
     <div class="marquee-track" data-marquee-track>
         <span class="marquee-item">智能分镜</span><span class="mk-sep"></span>
@@ -393,32 +479,35 @@
         <span class="marquee-item">整页出图</span><span class="mk-sep"></span>
         <span class="marquee-item">中文对白本地渲染</span><span class="mk-sep"></span>
         <span class="marquee-item">八种语气气泡</span><span class="mk-sep"></span>
+        <span class="marquee-item">气泡拖拽编辑</span><span class="mk-sep"></span>
         <span class="marquee-item">漫画读回小说</span><span class="mk-sep"></span>
-        <span class="marquee-item">作品历史</span><span class="mk-sep"></span>
         <span class="marquee-item">自带 API 接口</span><span class="mk-sep"></span>
     </div>
 </div>
 
-<!-- ========== 八种气泡: 真实形状的迷你预览 (8 项 = 8 格) ========== -->
+<!-- ========== 01 / 八种气泡 ========== -->
 <section id="bubbles" class="wrap py-20 md:py-28">
-    <div class="max-w-[62ch] mb-12">
+    <div class="max-w-[64ch] mb-12">
+        <p class="kicker mb-3"><span class="kicker-num">01 /</span><span>BUBBLE ENGINE</span></p>
         <h2 class="h2 mb-5">八种气泡，语气由分镜自己挑</h2>
         <p class="body-copy">
-            分镜阶段模型会给每句对白选一种语气，出图时后端按这份语气把对应形状的气泡画进页面。
-            这是它支持的八种形状，你也能在分镜管理里逐格改。
+            分镜阶段模型会给每句对白选一种语气，出图时后端按这份语气把对应形状的气泡与中文字体画进页面。
+            你也可以在分镜管理或气泡编辑器里随时逐格切换。
         </p>
     </div>
 
     <div class="bb-grid">
         <div class="bb-cell md:col-span-2 relative overflow-hidden">
             <span class="absolute inset-0 halftone-soft pointer-events-none" aria-hidden="true"></span>
+            <span class="bb-idx mono">01</span>
             <div class="bb-stage relative"><span class="bb bb-dialogue">你也是被选中的吗？</span></div>
             <div class="relative">
                 <p class="bb-name">对话</p>
-                <p class="bb-desc">圆角矩形。最常用的普通对白。</p>
+                <p class="bb-desc">圆角矩形。最常用的普通角色对白。</p>
             </div>
         </div>
         <div class="bb-cell md:col-span-2">
+            <span class="bb-idx mono">02</span>
             <div class="bb-stage"><span class="bb bb-thought">他想，这事不对劲。</span></div>
             <div>
                 <p class="bb-name">心理</p>
@@ -426,6 +515,7 @@
             </div>
         </div>
         <div class="bb-cell md:col-span-2">
+            <span class="bb-idx mono">03</span>
             <div class="bb-stage"><span class="bb bb-shout">住手！</span></div>
             <div>
                 <p class="bb-name">喊叫</p>
@@ -434,28 +524,32 @@
         </div>
 
         <div class="bb-cell md:col-span-3">
+            <span class="bb-idx mono">04</span>
             <div class="bb-stage"><span class="bb bb-whisper">别出声……</span></div>
             <div>
                 <p class="bb-name">耳语</p>
                 <p class="bb-desc">虚线圆角。悄悄话、秘密、压低的声音。</p>
             </div>
         </div>
-        <div class="bb-cell md:col-span-3" style="background: var(--ink); color: var(--paper);">
+        <div class="bb-cell md:col-span-3" style="background: var(--ink); color: var(--bg);">
+            <span class="bb-idx mono" style="color: var(--bg);">05</span>
             <div class="bb-stage"><span class="bb bb-burst">砰</span></div>
             <div>
-                <p class="bb-name" style="color: var(--paper);">爆发</p>
-                <p class="bb-desc" style="color: var(--paper); opacity: .75;">辐射射线。撞击、音爆这类外部声效。</p>
+                <p class="bb-name" style="color: var(--bg);">爆发</p>
+                <p class="bb-desc" style="color: var(--bg); opacity: .78;">辐射射线。撞击、音爆这类外部声效。</p>
             </div>
         </div>
 
         <div class="bb-cell md:col-span-2">
+            <span class="bb-idx mono">06</span>
             <div class="bb-stage"><span class="bb bb-narration">那天夜里下起了雨。</span></div>
             <div>
                 <p class="bb-name">旁白</p>
-                <p class="bb-desc">米黄方框。第三人称叙述。</p>
+                <p class="bb-desc">米黄方框。第三人称叙述与转场。</p>
             </div>
         </div>
         <div class="bb-cell md:col-span-2">
+            <span class="bb-idx mono">07</span>
             <div class="bb-stage"><span class="bb bb-box">还好吧。</span></div>
             <div>
                 <p class="bb-name">方框</p>
@@ -463,6 +557,7 @@
             </div>
         </div>
         <div class="bb-cell md:col-span-2">
+            <span class="bb-idx mono">08</span>
             <div class="bb-stage"><span class="bb bb-caption">咔嚓</span></div>
             <div>
                 <p class="bb-name">拟声</p>
@@ -472,36 +567,40 @@
     </div>
 
     <figure class="mt-16 reveal">
-        <div class="frame-sm p-2">
+        <div class="art-frame-sm p-2.5">
             <img src="{{ url_for('static', filename='showcase/04_bubbles-page.jpg') }}"
                  width="1400" height="933" loading="lazy" decoding="async"
                  alt="成品漫画页: 四格里同时出现锯齿喊叫气泡与方框对白" class="block w-full h-auto">
+            <div class="frame-caption-bar mono">
+                <span>FIG 02 · LOCAL PIL RENDERING</span>
+                <span>SHOUT + BOX BUBBLES</span>
+            </div>
         </div>
         <figcaption class="mt-4 text-sm" style="color: var(--ink-soft);">
-            成品页里的样子：锯齿的喊叫，方框的应答。
+            成品页里的真实效果：锯齿的喊叫与方框的应答同页混排，中文清晰锐利。
         </figcaption>
     </figure>
 </section>
 
-<!-- ========== 三步: 横向轨道 (滚动驱动) ========== -->
+<!-- ========== 02 / 三步横向轨道 ========== -->
 <section id="pipeline" class="relative" data-pan>
     <div class="pan-wrap">
         <div class="pan-track items-center" data-pan-track>
             <div class="pan-card pan-card-wide">
-                <div class="mb-5 flex items-center gap-3"><span class="pan-label">贴入小说</span></div>
+                <div class="mb-5 flex items-center gap-3"><span class="pan-label"><span class="mono" style="color: #f37b67;">01</span> 贴入小说</span></div>
                 <h3 class="h2 mb-4">先给它一段故事</h3>
-                <p class="body-copy mb-6">几千字一章就行。它会按情节切页，每页两到八格，并顺手把出场角色挑出来。</p>
+                <p class="body-copy mb-6">几千字一章就行。它会按情节切页，每页两到八格，标注镜头语言，并顺手把出场角色挑出来。</p>
                 <div class="novel-slab mono">
-                    <p>一天清晨，lcy睁开了惺忪的睡眼，立即感受到了身体的疲惫与不适。</p>
+                    <p>一天清晨，lcy 睁开了惺忪的睡眼，立即感受到了身体的疲惫与不适。</p>
                     <p>“哎呦，早知道就不冲牢大的战力了。”可发出的只有一声喵喵喵。</p>
                 </div>
             </div>
 
             <div class="pan-card">
-                <div class="mb-5 flex items-center gap-3"><span class="pan-label">定角色</span></div>
+                <div class="mb-5 flex items-center gap-3"><span class="pan-label"><span class="mono" style="color: #f37b67;">02</span> 定角色</span></div>
                 <h3 class="h2 mb-4">每个人先有一张人设</h3>
-                <p class="body-copy mb-6">角色先出人设图，之后每一页都拿它当参考图，脸部与服装不会一页一个样。</p>
-                <div class="frame-sm p-2">
+                <p class="body-copy mb-6">角色先出人设图（或手动上传参考图），之后每一页都拿它当基准，脸部与服装不会一页一个样。</p>
+                <div class="art-frame-sm p-2">
                     <img src="{{ url_for('static', filename='showcase/01_char-sheet.jpg') }}"
                          width="900" height="900" loading="lazy" decoding="async"
                          alt="角色设定图: 黑发男生的原本形态与变成小猫之后的形态" class="block w-full h-auto">
@@ -509,10 +608,10 @@
             </div>
 
             <div class="pan-card">
-                <div class="mb-5 flex items-center gap-3"><span class="pan-label">出整页</span></div>
+                <div class="mb-5 flex items-center gap-3"><span class="pan-label"><span class="mono" style="color: #f37b67;">03</span> 出整页</span></div>
                 <h3 class="h2 mb-4">整页一次出图</h3>
-                <p class="body-copy mb-6">一次性生成整页分镜，气泡由本地按坐标叠上去，位置还能拖。</p>
-                <div class="frame-sm p-2">
+                <p class="body-copy mb-6">一次性生成整页网格分镜，气泡由本地按坐标精准叠上去，不满意还能直接拖动微调位置。</p>
+                <div class="art-frame-sm p-2">
                     <img src="{{ url_for('static', filename='showcase/02_step-page.jpg') }}"
                          width="1000" height="1500" loading="lazy" decoding="async"
                          alt="生成完成的六格漫画页: 变成小猫的主角在巷子里, 含四段对白气泡" class="block w-full h-auto">
@@ -522,15 +621,16 @@
     </div>
 </section>
 
-<!-- ========== 反向: 图钉住, 步骤滚过去 (sticky 家族, 与首屏的分栏不同) ========== -->
+<!-- ========== 03 / 反向：漫画转小说 ========== -->
 <section id="reverse" class="wrap py-20 md:py-28">
+    <p class="kicker mb-3 reveal"><span class="kicker-num">03 /</span><span>REVERSE WORKFLOW</span></p>
     <h2 class="h2 mb-5 reveal max-w-[24ch]">漫画也能读成小说</h2>
-    <p class="body-copy mb-14 max-w-[52ch] reveal">
-        把画好的页面丢回去，视觉模型逐页读出画面、对白和旁白，再按页拼成一篇可编辑的小说。
+    <p class="body-copy mb-14 max-w-[54ch] reveal">
+        把画好的漫画页或扫描页丢进去，视觉模型逐页读出画面、对白和旁白，按顺序拼成一篇连贯可编辑的小说正文。
     </p>
-    <div class="grid lg:grid-cols-[.8fr_1.2fr] gap-12 lg:gap-20 items-start">
+    <div class="grid lg:grid-cols-[.82fr_1.18fr] gap-12 lg:gap-20 items-start">
         <div class="lg:sticky lg:top-24 reveal">
-            <div class="scan-wrap frame-sm p-2">
+            <div class="scan-wrap art-frame-sm p-2">
                 <img src="{{ url_for('static', filename='showcase/05_reverse-page.jpg') }}"
                      width="1000" height="1500" loading="lazy" decoding="async"
                      alt="黑白漫画页: 六格竖排, 荒山、枯树、水井与村落, 含系统提示方框" class="block w-full h-auto">
@@ -540,38 +640,43 @@
         <dl class="space-y-10 lg:pt-6">
             <div class="rev-step reveal">
                 <dt>逐页识别</dt>
-                <dd>一次最多 50 张，按上传顺序排好，逐页读画面与气泡里的字。</dd>
+                <dd>一次支持多张批量上传，按上传顺序排好，逐页识别画面细节与气泡里的对白文字。</dd>
             </div>
             <div class="rev-step reveal">
-                <dt>连成故事</dt>
-                <dd>处理下一页时会带上上一页的结果，前后衔接不断。</dd>
+                <dt>上下文连成故事</dt>
+                <dd>处理下一页时会自动携带上一页剧情上下文，保证人称、情节与节奏前后衔接不断。</dd>
             </div>
             <div class="rev-step reveal">
-                <dt>对白入文</dt>
-                <dd>台词写进正文，用第三人称叙述还原画面，而不是逐格罗列。</dd>
+                <dt>对白自然入文</dt>
+                <dd>台词与动作描写自然融入第三人称小说正文，而不是生硬的逐格看图说话罗列。</dd>
             </div>
             <div class="rev-step reveal">
-                <dt>导出文本</dt>
-                <dd>结果按页存好，页数多也不会丢，可一键复制或下载 txt。</dd>
+                <dt>一键复制与导出</dt>
+                <dd>结果自动留存在会话里，页数多也不会丢，支持一键复制到剪贴板或下载为 <code class="mono">.txt</code>。</dd>
             </div>
         </dl>
     </div>
 </section>
 
-<!-- ========== 本地运行: 非对称堆叠 + 真实配置板 (不用分栏) ========== -->
+<!-- ========== 04 / 本地运行与隐私 ========== -->
 <section id="local" class="relative overflow-hidden" style="background: var(--paper-2); border-top: 2px solid var(--ink); border-bottom: 2px solid var(--ink);">
     <span class="absolute -right-10 -top-10 w-72 h-72 halftone rounded-full pointer-events-none" aria-hidden="true"></span>
     <div class="wrap relative py-20 md:py-28">
-        <p class="label mb-4">本地运行</p>
+        <p class="kicker mb-3"><span class="kicker-num">04 /</span><span>LOCAL FIRST</span></p>
         <h2 class="h2 mb-6 reveal max-w-[22ch]">接口自带，数据留在本机</h2>
         <p class="body-copy mb-14 max-w-[54ch] reveal">
-            程序不绑定任何一家模型服务。填上你自己的接口地址和 Key，生成出来的图片、分镜与写作都存在本机目录里。
+            程序不绑定任何一家模型服务。填上你自己的接口地址和 Key，生成出来的图片、分镜与写作都安静地存在本机目录里。
         </p>
 
         <div class="grid lg:grid-cols-12">
             <div class="lg:col-span-7 lg:col-start-6 reveal">
-                <div class="code-slab mono">
-<span class="s">// config.local.json (节选, 不含密钥)</span><br>
+                <div class="code-window">
+                    <div class="code-window-bar mono">
+                        <span>config.local.json</span>
+                        <span style="color: var(--spot);">LOCAL CONFIG</span>
+                    </div>
+                    <div class="code-slab mono">
+<span class="s">// 节选，不含敏感密钥</span><br>
 {<br>
 &nbsp;&nbsp;<span class="k">"llm_model"</span>: "deepseek-chat",<br>
 &nbsp;&nbsp;<span class="k">"img_model"</span>: "doubao-seedream-4-5-251128",<br>
@@ -580,29 +685,34 @@
 &nbsp;&nbsp;<span class="k">"reference_strength"</span>: 0.75,<br>
 &nbsp;&nbsp;<span class="k">"segments_per_page"</span>: 0<br>
 }
+                    </div>
                 </div>
                 <p class="mt-4 text-sm" style="color: var(--ink-soft);">
-                    黑白还是彩色、气泡走本地还是交给模型，都写在这一份配置里。
+                    黑白还是彩色、气泡走本地 PIL 还是交给模型，都清晰地写在这一份配置里。
                 </p>
             </div>
         </div>
 
-        <div class="grid sm:grid-cols-2 gap-x-12 gap-y-8 mt-16 max-w-[78ch]">
-            <div class="reveal">
-                <p class="font-bold mb-2">任意 OpenAI 格式接口</p>
-                <p class="body-copy" style="font-size: .95rem;">文本与图像分两个地址填，豆包、DeepSeek、MiniMax 这类都能接，配置页里能一键测试。</p>
+        <div class="grid sm:grid-cols-2 gap-6 mt-16 max-w-[84ch]">
+            <div class="feature-card reveal">
+                <p class="mono text-xs font-bold mb-2" style="color: var(--spot);">01 · OPEN PROTOCOL</p>
+                <p class="font-bold text-base mb-2">任意 OpenAI 格式接口</p>
+                <p class="body-copy" style="font-size: .92rem;">文本与图像分两个地址填写，豆包、DeepSeek、MiniMax、OpenAI 等都能接，配置页里可一键测通。</p>
             </div>
-            <div class="reveal">
-                <p class="font-bold mb-2">凭据不进代码</p>
-                <p class="body-copy" style="font-size: .95rem;">管理员密码写在 .env，首次启动随机生成；API Key 只存在本机配置文件里。</p>
+            <div class="feature-card reveal">
+                <p class="mono text-xs font-bold mb-2" style="color: var(--spot);">02 · CREDENTIAL SAFETY</p>
+                <p class="font-bold text-base mb-2">凭据不进代码仓库</p>
+                <p class="body-copy" style="font-size: .92rem;">管理员密码写在 .env，首次启动随机生成；API Key 只存在本机配置文件里，不上传任何第三方。</p>
             </div>
-            <div class="reveal">
-                <p class="font-bold mb-2">参考图本地缓存</p>
-                <p class="body-copy" style="font-size: .95rem;">人设图缓存成 base64 复用，同一个角色第二次生成不必重新下载。</p>
+            <div class="feature-card reveal">
+                <p class="mono text-xs font-bold mb-2" style="color: var(--spot);">03 · LOCAL CACHE</p>
+                <p class="font-bold text-base mb-2">参考图本地复用</p>
+                <p class="body-copy" style="font-size: .92rem;">角色人设图自动缓存复用，同一个角色连续生成多页不必反复上传下载。</p>
             </div>
-            <div class="reveal">
-                <p class="font-bold mb-2">按账号分开存</p>
-                <p class="body-copy" style="font-size: .95rem;">每个账号一个目录，作品状态、图片、写作历史互不干扰，可整体备份。</p>
+            <div class="feature-card reveal">
+                <p class="mono text-xs font-bold mb-2" style="color: var(--spot);">04 · MULTI-ACCOUNT</p>
+                <p class="font-bold text-base mb-2">按账号独立存档</p>
+                <p class="body-copy" style="font-size: .92rem;">每个账号独立目录存放作品状态、图片与写作历史，互不干扰，也可一键公开分享或整体备份。</p>
             </div>
         </div>
     </div>
@@ -612,23 +722,29 @@
 <section id="start" class="closing relative overflow-hidden">
     <span class="absolute inset-0 halftone mask-b pointer-events-none" aria-hidden="true"></span>
     <div class="wrap relative py-24 md:py-32 text-center">
+        <p class="mono text-xs tracking-[0.2em] uppercase opacity-65 mb-4">READY TO PRINT</p>
         <h2 class="display mb-8" data-anim="close">现在就把第一章贴进去</h2>
-        <a href="/app" class="btn btn-primary text-lg" style="padding: 16px 34px;" data-cta data-magnetic>开始使用</a>
-        <p class="mt-8 text-sm" style="opacity: .7;">第一次启动会随机生成管理员密码，写在同目录的 .env 文件里。</p>
+        <div class="flex flex-wrap justify-center gap-4">
+            <a href="/app" class="btn landing-cta text-lg" style="padding: 15px 34px;" data-cta data-magnetic>开始使用 →</a>
+        </div>
+        <p class="mt-8 text-sm" style="opacity: .7;">普通用户可直接注册体验；本地部署首次启动会随机生成管理员密码并写入 .env。</p>
     </div>
 </section>
 
 <footer class="wrap py-10 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-sm" style="color: var(--ink-soft);">
-    <p>小说⇄漫画 双向转换器</p>
-    <p>MIT License</p>
+    <p class="font-semibold">小说⇄漫画 双向转换器 · Manga Print Studio</p>
+    <div class="flex items-center gap-6">
+        <a href="#top" class="hover:underline">回到顶部 ↑</a>
+        <a href="/" class="hover:underline">账号登录</a>
+        <span class="mono">MIT License</span>
+    </div>
 </footer>
 
-<!-- 进页面幕布 (点击开始使用时的转场) -->
+<!-- 进页面幕布 -->
 <div id="curtain" aria-hidden="true">
     <span></span><span></span><span></span><span></span><span></span><span></span>
 </div>
 
-<!-- Legacy landing.js kept as backup in static/ -->
-    <script src="{{ url_for('static', filename='dist/landing.js') }}"></script>
+<script src="{{ url_for('static', filename='dist/landing.js') }}"></script>
 </body>
 </html>

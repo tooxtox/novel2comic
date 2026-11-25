@@ -44,14 +44,20 @@ export function renderGallery(): void {
                         && state.fullPageBubbles[pageIdx]
                         && state.fullPageBubbles[pageIdx].length > 0;
                     return `
-                    <div class="comic-page p-4">
-                        <h3 class="text-lg font-bold mb-3 text-center border-b-2 border-black pb-2">第 ${page.page_number} 页</h3>
-                        <div class="border-2 border-black">
-                            <img src="${img}" class="w-full cursor-pointer" onclick="openModal('${img}')">
+                    <div class="comic-page p-4 md:p-5">
+                        <div class="flex items-center justify-between gap-2 mb-3 pb-2.5 border-b-2 border-[#111112]">
+                            <h3 class="text-base md:text-lg font-black flex items-center gap-2">
+                                <span class="ink-badge mono">PAGE ${String(page.page_number).padStart(2, '0')}</span>
+                                <span>第 ${page.page_number} 页</span>
+                            </h3>
+                            <span class="text-xs text-[#7d7d84]">点击漫画可全屏放大</span>
+                        </div>
+                        <div class="border-2 border-[#111112] bg-[#f7f6f2]">
+                            <img src="${img}" class="w-full cursor-pointer block" onclick="openModal('${img}')">
                         </div>
                         ${canEdit ? `
-                        <div class="mt-3 flex justify-end">
-                            <button data-page-idx="${pageIdx}" onclick="openBubbleEditor(${pageIdx})" class="edit-bubble-btn border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">✏️ 编辑气泡位置</button>
+                        <div class="mt-3.5 flex justify-end">
+                            <button data-page-idx="${pageIdx}" onclick="openBubbleEditor(${pageIdx})" class="edit-bubble-btn btn-ghost px-4 py-2 text-xs md:text-sm"><span data-icon="pencil" class="ico-14"></span> 拖拽编辑气泡位置</button>
                         </div>
                         ` : ''}
                     </div>

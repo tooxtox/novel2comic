@@ -13,7 +13,11 @@ export function switchTab(tabName: string): void {
     // 顶部 tab / 移动 tab 样式立即切换 (独立于面板退场动画)
     state.tabs.forEach(t => {
         const topTab = document.getElementById(`tab-${t}`);
-        if (topTab) topTab.className = t === tabName ? 'tab-active pb-2 px-1 text-lg transition-all' : 'tab-inactive pb-2 px-1 text-lg transition-all';
+        if (topTab) {
+            const active = t === tabName;
+            topTab.className = active ? 'tab-active' : 'tab-inactive';
+            topTab.setAttribute('aria-selected', active ? 'true' : 'false');
+        }
         const mtab = document.getElementById(`mtab-${t}`);
         if (mtab) mTabClass(mtab, t === tabName);
     });

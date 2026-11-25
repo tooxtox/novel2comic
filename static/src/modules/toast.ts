@@ -13,7 +13,7 @@ export function showToast(message: string, type: 'success' | 'error' | 'info' = 
     if (typeof w.hydrateIcons === 'function') w.hydrateIcons(toast);
     const textEl = toast.querySelector('.toast-text');
     if (textEl) textEl.textContent = message;
-    toast.style.background = type === 'error' ? '#dc2626' : type === 'success' ? '#16a34a' : '#1a1a1a';
+    toast.style.background = type === 'error' ? '#b91c1c' : type === 'success' ? '#15803d' : '#111112';
     toast.style.transform = 'translateY(0)';
     toast.style.opacity = '1';
     // 入场: 普通/成功弹入, 错误先弹入再抖一下
@@ -44,10 +44,10 @@ export function showToast(message: string, type: 'success' | 'error' | 'info' = 
 export function showLoadingToast(message: string): string {
     const toast = document.getElementById('toast');
     if (!toast) return 'toast';
-    toast.innerHTML = '<div class="toast-inner"><span class="toast-icon">⏳</span><span class="toast-text"></span></div>';
+    toast.innerHTML = '<div class="toast-inner"><span class="loading-spinner" style="width:15px;height:15px;border-width:2px;border-color:rgba(255,255,255,0.28);border-top-color:#ffffff;"></span><span class="toast-text"></span></div>';
     const textEl = toast.querySelector('.toast-text');
     if (textEl) textEl.textContent = message;
-    toast.style.background = '#1a1a1a';
+    toast.style.background = '#111112';
     toast.style.transform = 'translateY(0)';
     toast.style.opacity = '1';
     // 弹入 + 持续呼吸光晕, 表示"还在跑"

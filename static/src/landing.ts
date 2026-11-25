@@ -11,7 +11,7 @@
  * 三个前提: 没有 GSAP、系统偏好减少动效、或任何一步抛错时, 内容必须完整可见可点。
  */
 
-import type {} from '../types/index';
+import type {} from './types/index';
 
 // TODO: strict type - GSAP 类型未在项目类型库中, 整个文件以 any 形式描述第三方 API 交互
 declare const gsap: any;
@@ -104,7 +104,7 @@ declare const ScrollTrigger: any;
     // ================= 4. 跑马灯 (内容复制一份实现无缝循环) =================
     const track: HTMLElement | null = document.querySelector('[data-marquee-track]');
     if (track) {
-        const clone: Node = track.cloneNode(true);
+        const clone: HTMLElement = track.cloneNode(true) as HTMLElement;
         clone.setAttribute('aria-hidden', 'true');
         Array.prototype.forEach.call(clone.children, (child: Element) => { track.appendChild(child); });
         const loop: any = g.to(track, { xPercent: -50, duration: 30, ease: 'none', repeat: -1 });

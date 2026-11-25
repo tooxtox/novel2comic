@@ -166,7 +166,8 @@
   function escapeHtml(s) {
     if (!s)
       return "";
-    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+    const map = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+    return String(s).replace(/[&<>"']/g, (c) => map[c] || c);
   }
   function formatDateTime(iso) {
     if (!iso)
@@ -229,7 +230,9 @@
     root.dataset.browser = browser;
     const body = document.body;
     body.classList.remove("device-mobile", "device-tablet", "device-desktop", "touch-device", "browser-wechat");
-    body.classList.add("device-" + device, "touch-device");
+    body.classList.add("device-" + device);
+    if (hasTouch)
+      body.classList.add("touch-device");
     if (browser === "wechat")
       body.classList.add("browser-wechat");
     const w = window;
@@ -266,8 +269,11 @@
     const fromTab = state.currentTab;
     state.tabs.forEach((t2) => {
       const topTab = document.getElementById(`tab-${t2}`);
-      if (topTab)
-        topTab.className = t2 === tabName ? "tab-active pb-2 px-1 text-lg transition-all" : "tab-inactive pb-2 px-1 text-lg transition-all";
+      if (topTab) {
+        const active = t2 === tabName;
+        topTab.className = active ? "tab-active" : "tab-inactive";
+        topTab.setAttribute("aria-selected", active ? "true" : "false");
+      }
       const mtab = document.getElementById(`mtab-${t2}`);
       if (mtab)
         mTabClass(mtab, t2 === tabName);
@@ -370,7 +376,7 @@
     const textEl = toast.querySelector(".toast-text");
     if (textEl)
       textEl.textContent = message;
-    toast.style.background = type === "error" ? "#dc2626" : type === "success" ? "#16a34a" : "#1a1a1a";
+    toast.style.background = type === "error" ? "#b91c1c" : type === "success" ? "#15803d" : "#111112";
     toast.style.transform = "translateY(0)";
     toast.style.opacity = "1";
     toast.classList.remove("toast-pop", "shake", "toast-loading");
@@ -397,11 +403,11 @@
     const toast = document.getElementById("toast");
     if (!toast)
       return "toast";
-    toast.innerHTML = '<div class="toast-inner"><span class="toast-icon">\u23F3</span><span class="toast-text"></span></div>';
+    toast.innerHTML = '<div class="toast-inner"><span class="loading-spinner" style="width:15px;height:15px;border-width:2px;border-color:rgba(255,255,255,0.28);border-top-color:#ffffff;"></span><span class="toast-text"></span></div>';
     const textEl = toast.querySelector(".toast-text");
     if (textEl)
       textEl.textContent = message;
-    toast.style.background = "#1a1a1a";
+    toast.style.background = "#111112";
     toast.style.transform = "translateY(0)";
     toast.style.opacity = "1";
     toast.classList.remove("toast-pop", "shake", "is-counting");
@@ -870,6 +876,10 @@
     _setCountChip("chars-count-chip", `${charCount} \u4E2A\u89D2\u8272`, charCount > 0);
     _setCountChip("seg-count-chip", `${pages} \u9875 / ${segCount} \u683C`, segCount > 0);
     _setCountChip("gallery-count-chip", `${fullPages} \u5F20`, fullPages > 0);
+    const wbCounts = document.getElementById("wb-counts");
+    if (wbCounts) {
+      wbCounts.textContent = `${chars} \u5B57 / ${charCount} \u89D2\u8272 / ${segCount} \u5206\u955C / ${fullPages} \u6574\u9875`;
+    }
     let cfg = {};
     try {
       cfg = JSON.parse(localStorage.getItem("manga_config") || "{}");
@@ -1050,15 +1060,15 @@
       const groupDiv = document.createElement("div");
       groupDiv.className = "mb-3";
       const title = document.createElement("div");
-      title.className = "text-xs font-bold text-gray-700 mb-2 flex items-center gap-1";
-      const categoryEmoji = {
-        "\u65E5\u6F2B": "A",
-        "\u7F8E\u6F2B": "B",
-        "\u97E9\u6F2B": "C",
-        "\u56FD\u6F2B": "D",
-        "\u5176\u4ED6": "E"
+      title.className = "text-xs font-extrabold text-[#4e4e54] mb-2 flex items-center gap-1.5";
+      const categoryCode = {
+        "\u65E5\u6F2B": "JP",
+        "\u7F8E\u6F2B": "US",
+        "\u97E9\u6F2B": "KR",
+        "\u56FD\u6F2B": "CN",
+        "\u5176\u4ED6": "EX"
       };
-      title.innerHTML = `<span>${categoryEmoji[category] || "\u{1F3A8}"}</span><span>${category}</span>`;
+      title.innerHTML = `<span class="mono px-1.5 py-0.5 text-[10px] bg-[#111112] text-white">${categoryCode[category] || "ST"}</span><span>${category}</span>`;
       groupDiv.appendChild(title);
       const btnGroup = document.createElement("div");
       btnGroup.className = "flex flex-wrap gap-2";
@@ -1067,7 +1077,7 @@
         btn.type = "button";
         btn.dataset.id = preset.id;
         const isSelected = state.selectedPresetIds.has(preset.id);
-        btn.className = isSelected ? "px-3 py-1.5 text-sm font-medium border-2 border-black bg-black text-white transition-all" : "px-3 py-1.5 text-sm font-medium border-2 border-gray-300 hover:border-black transition-all";
+        btn.className = isSelected ? "px-3 py-1.5 text-xs md:text-sm font-bold border-2 border-[#111112] bg-[#111112] text-white shadow-[2px_2px_0_#c23623] transition-all" : "px-3 py-1.5 text-xs md:text-sm font-medium border-2 border-[#d4d1c7] bg-white text-[#111112] hover:border-[#111112] transition-all";
         btn.textContent = preset.label;
         btn.onclick = () => togglePresetStyle(preset.id);
         btnGroup.appendChild(btn);
@@ -1168,7 +1178,7 @@
   }
   function syncBubbleMini(selectEl) {
     const mini = selectEl && selectEl.parentElement ? selectEl.parentElement.querySelector(".bubble-mini") : null;
-    if (!mini)
+    if (!selectEl || !mini)
       return;
     mini.dataset.type = selectEl.value;
     mini.classList.remove("is-changed");
@@ -1257,8 +1267,12 @@
     document.getElementById("img-api-key").value = "";
     document.getElementById("img-model").value = "";
     localStorage.removeItem("manga_config");
-    document.getElementById("test-llm-result").innerHTML = "";
-    document.getElementById("test-image-result").innerHTML = "";
+    const llmRes = document.getElementById("test-llm-result");
+    if (llmRes)
+      llmRes.innerHTML = "";
+    const imgRes = document.getElementById("test-image-result");
+    if (imgRes)
+      imgRes.innerHTML = "";
     showToast("\u914D\u7F6E\u5DF2\u6E05\u7A7A\uFF01", "success");
   }
   async function testLLM() {
@@ -1429,7 +1443,9 @@
   }
   function updateCharCount() {
     const text = document.getElementById("novel-text").value;
-    document.getElementById("char-count").textContent = String(text.length);
+    const cc = document.getElementById("char-count");
+    if (cc)
+      cc.textContent = String(text.length);
     markDirty();
     scheduleWorkspaceUI();
   }
@@ -1819,8 +1835,12 @@
     const modal = document.getElementById("polish-compare-modal");
     if (!modal)
       return;
-    document.getElementById("polish-original").textContent = state._polishOriginal;
-    document.getElementById("polish-result").textContent = state._polishResult;
+    const origEl = document.getElementById("polish-original");
+    if (origEl)
+      origEl.textContent = state._polishOriginal;
+    const resEl = document.getElementById("polish-result");
+    if (resEl)
+      resEl.textContent = state._polishResult;
     const t = window.__t2cTransitions;
     if (t) {
       t.openModal("polish-compare-modal");
@@ -1877,6 +1897,55 @@
     updateStyleSummary();
     updateCharCount();
     mirrorNovelText();
+  }
+
+  // static/src/modules/dragdrop.ts
+  function bindDropZone(input, zone) {
+    if (zone.dataset.ddBound === "1")
+      return;
+    zone.dataset.ddBound = "1";
+    ["dragenter", "dragover"].forEach((ev) => {
+      zone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        zone.classList.add("is-drag-over");
+      });
+    });
+    ["dragleave", "drop"].forEach((ev) => {
+      zone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        zone.classList.remove("is-drag-over");
+      });
+    });
+    zone.addEventListener("drop", (e) => {
+      const files = e.dataTransfer && e.dataTransfer.files;
+      if (!files || !files.length)
+        return;
+      try {
+        const dt = new DataTransfer();
+        Array.from(files).forEach((f) => dt.items.add(f));
+        input.files = dt.files;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        showToast("\u5DF2\u63A5\u6536 " + files.length + " \u4E2A\u6587\u4EF6", "success");
+      } catch (err) {
+        showToast("\u62D6\u62FD\u4E0A\u4F20\u5931\u8D25: " + err.message, "error");
+      }
+    });
+  }
+  function setupDragDropUpload() {
+    const charInputs = document.querySelectorAll('[id^="char-upload-"]');
+    charInputs.forEach((node) => {
+      const input = node;
+      const zone = input.closest(".upload-zone, label, div") || input.parentElement;
+      if (zone)
+        bindDropZone(input, zone);
+    });
+    const comicInput = document.getElementById("comic-file-input");
+    const comicZone = document.getElementById("comic-upload-zone");
+    if (comicInput && comicZone) {
+      bindDropZone(comicInput, comicZone);
+    }
   }
 
   // static/src/modules/characters.ts
@@ -2002,43 +2071,50 @@
     container.innerHTML = state.characters.map((char, idx) => {
       const safeImageUrl = escapeHtml(char.image_url || "");
       return `
-        <div class="bg-white p-4 manga-border panel-shadow upload-zone">
-            <div class="flex justify-between items-start mb-2">
-                <h3 class="text-lg font-bold">${escapeHtml(char.name)}</h3>
-                <button onclick="togglePromptEditor(${idx})" class="text-xs border border-gray-300 rounded px-2 py-0.5 hover:bg-gray-100 transition-colors" title="\u7F16\u8F91\u4EBA\u8BBE\u56FE\u751F\u6210\u63D0\u793A\u8BCD" id="prompt-toggle-${idx}">\u270F\uFE0F Prompt</button>
+        <div class="bg-white p-4 manga-border panel-shadow upload-zone flex flex-col">
+            <div class="flex justify-between items-start gap-2 mb-2">
+                <h3 class="text-base md:text-lg font-black truncate">${escapeHtml(char.name)}</h3>
+                <button onclick="togglePromptEditor(${idx})" class="text-xs font-semibold border border-[#d4d1c7] hover:border-[#111112] px-2 py-0.5 bg-[#f7f6f2] hover:bg-white transition-colors inline-flex items-center gap-1 shrink-0" title="\u7F16\u8F91\u4EBA\u8BBE\u56FE\u751F\u6210\u63D0\u793A\u8BCD" id="prompt-toggle-${idx}"><span data-icon="pencil" class="ico-12"></span> Prompt</button>
             </div>
-            <p class="text-sm text-gray-600 mb-3">${escapeHtml(char.description)}</p>
+            <p class="text-xs md:text-sm text-[#4e4e54] leading-relaxed mb-3">${escapeHtml(char.description)}</p>
             ${char.image_url ? `
-            <div class="mb-3 border-2 border-gray-300 relative group">
-                <img src="${safeImageUrl}" class="w-full h-48 object-cover cursor-pointer" onclick="openModal('${safeImageUrl}')">
-                <div class="absolute top-1 right-1 hidden group-hover:flex gap-1">
-                    <button onclick="event.stopPropagation(); uploadCharacterImage(${idx})" class="bg-white border-2 border-black text-xs px-2 py-1 hover:bg-yellow-200" title="\u624B\u52A8\u4E0A\u4F20/\u66F4\u6362\u56FE\u7247">\u{1F4C1} \u6362\u56FE</button>
+            <div class="mb-3 border-2 border-[#111112] relative group bg-[#f7f6f2] overflow-hidden">
+                <img src="${safeImageUrl}" class="w-full h-52 object-cover cursor-pointer transition-transform duration-300 group-hover:scale-[1.02]" onclick="openModal('${safeImageUrl}')">
+                <div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                    <button onclick="event.stopPropagation(); uploadCharacterImage(${idx})" class="bg-white border-2 border-[#111112] text-xs font-bold px-2.5 py-1 hover:bg-[#faeae6] inline-flex items-center gap-1" title="\u624B\u52A8\u4E0A\u4F20/\u66F4\u6362\u56FE\u7247"><span data-icon="upload" class="ico-12"></span> \u6362\u56FE</button>
                 </div>
             </div>
-            ` : ""}
+            ` : `
+            <div class="mb-3 border-2 border-dashed border-[#d4d1c7] bg-[#f7f6f2] py-6 px-3 text-center text-xs text-[#7d7d84]">
+                \u53EF\u70B9\u51FB\u4E0B\u65B9\u751F\u6210\uFF0C\u6216\u76F4\u63A5\u62D6\u62FD\u4EBA\u8BBE\u56FE\u5230\u5361\u7247\u4E0A\u4F20
+            </div>
+            `}
             <div id="prompt-editor-${idx}" class="hidden mb-3">
-                <label class="block text-xs font-medium text-gray-600 mb-1">\u56FE\u50CF\u751F\u6210\u63D0\u793A\u8BCD (\u7A7A=\u81EA\u52A8\u751F\u6210)</label>
-                <textarea id="char-prompt-${idx}" rows="3" class="w-full text-xs border border-gray-300 rounded p-2 font-mono" oninput="saveCharPrompt(${idx}, this.value)" onblur="saveCharPrompt(${idx}, this.value)">${escapeHtml(char.char_prompt || "")}</textarea>
-                <div class="text-xs text-gray-500 mt-1">
-                    \u5B9E\u65F6\u540C\u6B65 \xB7 \u5F53\u524D\u63D0\u793A\u8BCD:
-                    <code class="text-gray-800" id="char-prompt-preview-${idx}">${escapeHtml(char.char_prompt || "(\u81EA\u52A8\u751F\u6210)")}</code>
+                <label class="block text-xs font-bold text-[#4e4e54] mb-1">\u56FE\u50CF\u751F\u6210\u63D0\u793A\u8BCD\uFF08\u7559\u7A7A\u5219\u81EA\u52A8\u751F\u6210\uFF09</label>
+                <textarea id="char-prompt-${idx}" rows="3" class="w-full text-xs input-ink p-2 font-mono" oninput="saveCharPrompt(${idx}, this.value)" onblur="saveCharPrompt(${idx}, this.value)">${escapeHtml(char.char_prompt || "")}</textarea>
+                <div class="text-xs text-[#7d7d84] mt-1">
+                    \u5B9E\u65F6\u540C\u6B65 \xB7 \u5F53\u524D\u63D0\u793A\u8BCD\uFF1A
+                    <code class="text-[#111112]" id="char-prompt-preview-${idx}">${escapeHtml(char.char_prompt || "(\u81EA\u52A8\u751F\u6210)")}</code>
                 </div>
             </div>
-            <div class="flex gap-2">
-                <button onclick="generateCharacterImage(${idx}, this)" class="flex-1 btn-primary py-2 text-sm">
+            <div class="flex gap-2 mt-auto pt-1">
+                <button onclick="generateCharacterImage(${idx}, this)" class="flex-1 btn-primary py-2 text-xs md:text-sm">
                     ${char.image_url ? "\u91CD\u65B0\u751F\u6210" : "\u751F\u6210\u4EBA\u8BBE\u56FE"}
                 </button>
-                <button onclick="uploadCharacterImage(${idx})" class="flex-1 bg-gray-700 text-white py-2 text-sm hover:bg-gray-800 transition-colors">
-                    \u{1F4C1} ${char.image_url ? "\u66F4\u6362" : "\u4E0A\u4F20"}
+                <button onclick="uploadCharacterImage(${idx})" class="flex-1 btn-ghost py-2 text-xs md:text-sm">
+                    <span data-icon="upload" class="ico-14"></span> ${char.image_url ? "\u66F4\u6362\u56FE\u7247" : "\u4E0A\u4F20\u53C2\u8003\u56FE"}
                 </button>
             </div>
             <input type="file" id="char-upload-${idx}" accept="image/*" class="hidden" onchange="handleCharacterImageFile(${idx}, this)">
         </div>
     `;
     }).join("");
+    setupDragDropUpload();
+    const w = window;
+    if (typeof w.hydrateIcons === "function")
+      w.hydrateIcons(container);
     playStagger(container);
     markDirtyLocal();
-    const w = window;
     if (typeof w.scheduleWorkspaceUI === "function")
       w.scheduleWorkspaceUI();
   }
@@ -2381,27 +2457,31 @@
         }
       });
       return `
-        <div class="comic-page p-6">
-            <div class="flex justify-between items-center mb-4 pb-2 border-b-2 border-gray-200">
-                <h3 class="text-lg font-bold">\u7B2C ${page.page_number} \u9875</h3>
+        <div class="comic-page p-5 md:p-6">
+            <div class="flex flex-wrap justify-between items-center gap-3 mb-4 pb-3 border-b-2 border-[#111112]">
+                <h3 class="text-base md:text-lg font-black flex items-center gap-2">
+                    <span class="ink-badge mono">PAGE ${String(page.page_number).padStart(2, "0")}</span>
+                    <span>\u7B2C ${page.page_number} \u9875</span>
+                </h3>
                 <div class="flex gap-2">
-                    <button onclick="generateFullPage(${pageIdx}, false, null, this)" class="text-sm bg-black text-white px-3 py-1 hover:bg-gray-800 transition-colors flex items-center gap-1">
+                    <button onclick="generateFullPage(${pageIdx}, false, null, this)" class="btn-primary text-xs md:text-sm px-4 py-1.5">
                         <span>\u6574\u9875\u751F\u6210</span>
-                        <span id="full-page-spinner-${pageIdx}" class="loading-spinner hidden" style="width:12px;height:12px;border-width:1px;"></span>
+                        <span id="full-page-spinner-${pageIdx}" class="loading-spinner hidden" style="width:13px;height:13px;border-width:2px;"></span>
                     </button>
                 </div>
             </div>
+            <div id="fullpage-progress-${pageIdx}" class="mb-3"></div>
             ${hasFullPageImage ? `
-            <div class="mb-6 border-2 border-black p-1">
-                <div class="text-sm text-gray-600 mb-2 flex items-center gap-1"><span data-icon="check-circle" style="width:14px;height:14px;color:#16a34a;"></span>\u6574\u9875\u6F2B\u753B</div>
-                <img src="${hasFullPageImage}" class="w-full cursor-pointer" onclick="openModal('${hasFullPageImage}')">
+            <div class="mb-6 border-2 border-[#111112] p-2 bg-[#f7f6f2]">
+                <div class="text-xs font-bold text-[#15803d] mb-2 flex items-center gap-1.5"><span data-icon="check-circle" class="ico-14"></span>\u672C\u9875\u5DF2\u751F\u6210\u6574\u9875\u6F2B\u753B\uFF08\u70B9\u51FB\u5927\u56FE\u9884\u89C8\uFF09</div>
+                <img src="${hasFullPageImage}" class="w-full cursor-pointer border border-[#d4d1c7]" onclick="openModal('${hasFullPageImage}')">
             </div>
             ` : ""}
-            <div class="text-xs text-gray-500 mb-3">
-                \u672C\u9875\u51FA\u573A\u89D2\u8272: ${allSelectedChars.length > 0 ? allSelectedChars.map((cIdx) => {
+            <div class="text-xs text-[#4e4e54] bg-[#f7f6f2] border border-[#e6e3da] px-3 py-1.5 mb-4">
+                <span class="font-bold text-[#111112]">\u672C\u9875\u51FA\u573A\u89D2\u8272\uFF1A</span>${allSelectedChars.length > 0 ? allSelectedChars.map((cIdx) => {
         var _a;
-        return ((_a = state.characters[cIdx]) == null ? void 0 : _a.name) || cIdx;
-      }).join(", ") : "\uFF08\u672A\u9009\u62E9\u89D2\u8272\uFF09"}
+        return escapeHtml(((_a = state.characters[cIdx]) == null ? void 0 : _a.name) || cIdx);
+      }).join("\u3001") : "\uFF08\u672A\u6307\u5B9A\u89D2\u8272\uFF0C\u751F\u6210\u65F6\u5C06\u81EA\u52A8\u53C2\u8003\u5168\u90E8\u89D2\u8272\uFF09"}
             </div>
             <div class="grid md:grid-cols-2 gap-4">
                 ${page.segments.map((seg, segIdx) => {
@@ -2888,14 +2968,20 @@
           return "";
         const canEdit = state.bubbleRenderMode === "pil" && state.fullPageCleanImages[pageIdx] && state.fullPageBubbles[pageIdx] && state.fullPageBubbles[pageIdx].length > 0;
         return `
-                    <div class="comic-page p-4">
-                        <h3 class="text-lg font-bold mb-3 text-center border-b-2 border-black pb-2">\u7B2C ${page.page_number} \u9875</h3>
-                        <div class="border-2 border-black">
-                            <img src="${img}" class="w-full cursor-pointer" onclick="openModal('${img}')">
+                    <div class="comic-page p-4 md:p-5">
+                        <div class="flex items-center justify-between gap-2 mb-3 pb-2.5 border-b-2 border-[#111112]">
+                            <h3 class="text-base md:text-lg font-black flex items-center gap-2">
+                                <span class="ink-badge mono">PAGE ${String(page.page_number).padStart(2, "0")}</span>
+                                <span>\u7B2C ${page.page_number} \u9875</span>
+                            </h3>
+                            <span class="text-xs text-[#7d7d84]">\u70B9\u51FB\u6F2B\u753B\u53EF\u5168\u5C4F\u653E\u5927</span>
+                        </div>
+                        <div class="border-2 border-[#111112] bg-[#f7f6f2]">
+                            <img src="${img}" class="w-full cursor-pointer block" onclick="openModal('${img}')">
                         </div>
                         ${canEdit ? `
-                        <div class="mt-3 flex justify-end">
-                            <button data-page-idx="${pageIdx}" onclick="openBubbleEditor(${pageIdx})" class="edit-bubble-btn border-2 border-black px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">\u270F\uFE0F \u7F16\u8F91\u6C14\u6CE1\u4F4D\u7F6E</button>
+                        <div class="mt-3.5 flex justify-end">
+                            <button data-page-idx="${pageIdx}" onclick="openBubbleEditor(${pageIdx})" class="edit-bubble-btn btn-ghost px-4 py-2 text-xs md:text-sm"><span data-icon="pencil" class="ico-14"></span> \u62D6\u62FD\u7F16\u8F91\u6C14\u6CE1\u4F4D\u7F6E</button>
                         </div>
                         ` : ""}
                     </div>
@@ -3272,8 +3358,8 @@
     const writingWrap = document.getElementById("history-writing-wrap");
     const saveBtn = document.getElementById("history-save-current-btn");
     const countLabel = document.getElementById("history-count-label");
-    const activeCls = "pb-2 px-1 text-base font-bold border-b-[3px] border-transparent";
-    const inactiveCls = "pb-2 px-1 text-base text-gray-500 border-b-[3px] border-transparent hover:border-gray-300";
+    const activeCls = "pb-2.5 px-1 text-sm md:text-base font-extrabold text-[#111112] border-b-[3px] border-transparent flex items-center gap-1.5";
+    const inactiveCls = "pb-2.5 px-1 text-sm md:text-base font-medium text-[#7d7d84] border-b-[3px] border-transparent hover:text-[#111112] flex items-center gap-1.5";
     if (sub === "writing") {
       if (comicBtn)
         comicBtn.className = inactiveCls;
@@ -3837,12 +3923,12 @@
     modal.className = "fixed inset-0 z-50 flex flex-col";
     modal.innerHTML = `
         <div class="modal-backdrop absolute inset-0 bg-black bg-opacity-70"></div>
-        <div class="modal-card relative flex flex-col h-full max-w-6xl mx-auto w-full bg-white">
-            <div class="flex items-center justify-between p-4 border-b-2 border-black">
-                <h2 class="text-lg font-bold">\u270F\uFE0F \u62D6\u52A8\u6C14\u6CE1\u8C03\u6574\u4F4D\u7F6E</h2>
+        <div class="modal-card relative flex flex-col h-full max-w-6xl mx-auto w-full bg-white manga-border">
+            <div class="flex items-center justify-between p-4 border-b-2 border-[#111112] bg-[#f7f6f2]">
+                <h2 class="text-base md:text-lg font-black flex items-center gap-2"><span data-icon="pencil" class="ico-18" style="color: var(--spot);"></span><span>\u62D6\u52A8\u6C14\u6CE1\u8C03\u6574\u4F4D\u7F6E\uFF08\u53EF\u70B9\u51FB\u53F3\u4E0A\u89D2\u5207\u6362\u6C14\u6CE1\u5F62\u72B6\uFF09</span></h2>
                 <div class="flex gap-2">
-                    <button id="bubble-editor-cancel" class="border-2 border-gray-400 px-4 py-2 text-sm font-medium hover:bg-gray-100 transition-colors">\u53D6\u6D88</button>
-                    <button id="bubble-editor-save" class="btn-primary px-4 py-2 text-sm font-medium">\u4FDD\u5B58</button>
+                    <button id="bubble-editor-cancel" class="btn-ghost px-4 py-1.5 text-sm">\u53D6\u6D88</button>
+                    <button id="bubble-editor-save" class="btn-accent px-5 py-1.5 text-sm">\u4FDD\u5B58\u5E76\u91CD\u65B0\u6E32\u67D3</button>
                 </div>
             </div>
             <div class="flex-1 overflow-auto bg-gray-200 p-4 flex justify-center">
@@ -3979,20 +4065,24 @@
         positionBubbles();
       };
     }
-    document.getElementById("bubble-editor-cancel").onclick = closeModalEditor;
-    document.getElementById("bubble-editor-save").onclick = async function() {
-      const btn = this;
-      btn.disabled = true;
-      btn.textContent = "\u4FDD\u5B58\u4E2D...";
-      try {
-        await saveBubblePositions(pageIdx, editBubbles);
-        closeModalEditor();
-      } catch (e) {
-        btn.disabled = false;
-        btn.textContent = "\u4FDD\u5B58";
-        showToast("\u4FDD\u5B58\u5931\u8D25: " + (e.message || e), "error");
-      }
-    };
+    const cancelBtn = document.getElementById("bubble-editor-cancel");
+    if (cancelBtn)
+      cancelBtn.onclick = closeModalEditor;
+    const saveBtn = document.getElementById("bubble-editor-save");
+    if (saveBtn) {
+      saveBtn.onclick = async function() {
+        saveBtn.disabled = true;
+        saveBtn.textContent = "\u4FDD\u5B58\u4E2D...";
+        try {
+          await saveBubblePositions(pageIdx, editBubbles);
+          closeModalEditor();
+        } catch (e) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = "\u4FDD\u5B58\u5E76\u91CD\u65B0\u6E32\u67D3";
+          showToast("\u4FDD\u5B58\u5931\u8D25: " + (e.message || e), "error");
+        }
+      };
+    }
   }
   async function saveBubblePositions(pageIdx, bubbles) {
     const resp = await fetch("/api/reposition-bubbles", {
@@ -4100,44 +4190,6 @@
       ripple.style.top = e.clientY - rect.top + "px";
       btn.appendChild(ripple);
       setTimeout(() => ripple.remove(), 700);
-    });
-  }
-
-  // static/src/modules/dragdrop.ts
-  function setupDragDropUpload() {
-    const inputs = document.querySelectorAll('[id^="char-upload-"]');
-    inputs.forEach((input) => {
-      const zone = input.closest(".upload-zone, label, div") || input.parentElement;
-      if (!zone)
-        return;
-      ["dragenter", "dragover"].forEach((ev) => {
-        zone.addEventListener(ev, (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          zone.classList.add("is-drag-over");
-        });
-      });
-      ["dragleave", "drop"].forEach((ev) => {
-        zone.addEventListener(ev, (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          zone.classList.remove("is-drag-over");
-        });
-      });
-      zone.addEventListener("drop", (e) => {
-        const files = e.dataTransfer && e.dataTransfer.files;
-        if (!files || !files.length)
-          return;
-        try {
-          const dt = new DataTransfer();
-          Array.from(files).forEach((f) => dt.items.add(f));
-          input.files = dt.files;
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-          showToast("\u5DF2\u63A5\u6536 " + files.length + " \u4E2A\u6587\u4EF6", "success");
-        } catch (err) {
-          showToast("\u62D6\u62FD\u4E0A\u4F20\u5931\u8D25: " + err.message, "error");
-        }
-      });
     });
   }
 
@@ -4287,6 +4339,195 @@
   } else {
     startObserver();
   }
+
+  // static/src/modules/transitions.ts
+  (function(global) {
+    "use strict";
+    if (global.__t2cTransitions)
+      return;
+    const REDUCE_MOTION = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    function reflow(el) {
+      void el.offsetWidth;
+    }
+    function onAnimEnd(el, name) {
+      return new Promise((resolve) => {
+        if (REDUCE_MOTION)
+          return resolve();
+        const handler = (e) => {
+          if (e.target !== el)
+            return;
+          if (name && e.animationName !== name)
+            return;
+          el.removeEventListener("animationend", handler);
+          resolve();
+        };
+        el.addEventListener("animationend", handler);
+        setTimeout(() => {
+          el.removeEventListener("animationend", handler);
+          resolve();
+        }, 800);
+      });
+    }
+    async function swapPanel(fromId, toId, dir = "right") {
+      const fromEl = fromId ? document.getElementById(fromId) : null;
+      const toEl = toId ? document.getElementById(toId) : null;
+      if (!toEl)
+        return;
+      if (REDUCE_MOTION) {
+        if (fromEl)
+          fromEl.classList.add("hidden");
+        toEl.classList.remove("hidden");
+        return;
+      }
+      if (fromEl && !fromEl.classList.contains("hidden")) {
+        fromEl.classList.remove("panel-in-left", "panel-in-right");
+        fromEl.classList.add("panel-out");
+        await onAnimEnd(fromEl, "panelOut");
+        fromEl.classList.add("hidden");
+        fromEl.classList.remove("panel-out");
+      }
+      toEl.classList.remove("hidden", "panel-in-left", "panel-in-right");
+      reflow(toEl);
+      toEl.classList.add(dir === "right" ? "panel-in-right" : "panel-in-left");
+      cascadeChildren(toEl);
+    }
+    function cascadeChildren(container, selector = ":scope > *", className = "view-fade") {
+      if (!container)
+        return;
+      const kids = container.querySelectorAll(selector);
+      kids.forEach((el, i) => {
+        if (i > 12)
+          return;
+        el.classList.remove(className);
+        el.style.setProperty("--i", String(i));
+        reflow(el);
+        el.classList.add(className);
+      });
+    }
+    function openModal2(modalId) {
+      const el = document.getElementById(modalId);
+      if (!el)
+        return;
+      if (REDUCE_MOTION) {
+        el.classList.remove("hidden", "modal-closing");
+        return;
+      }
+      el.classList.remove("hidden", "modal-closing");
+      el.classList.add("modal-opening");
+      reflow(el);
+      setTimeout(() => el.classList.remove("modal-opening"), 350);
+    }
+    function closeModal2(modalId, onAfterClose) {
+      const el = document.getElementById(modalId);
+      if (!el)
+        return;
+      if (REDUCE_MOTION) {
+        el.classList.add("hidden", "modal-closing");
+        if (onAfterClose)
+          onAfterClose();
+        return;
+      }
+      if (el._closing)
+        return;
+      el._closing = true;
+      el.classList.add("modal-closing");
+      setTimeout(() => {
+        el.classList.add("hidden");
+        el.classList.remove("modal-closing");
+        el._closing = false;
+        if (onAfterClose)
+          onAfterClose();
+      }, 160);
+    }
+    function celebrateSave(el) {
+      if (!el || REDUCE_MOTION)
+        return;
+      el.classList.remove("celebrate-save");
+      reflow(el);
+      el.classList.add("celebrate-save");
+      setTimeout(() => el.classList.remove("celebrate-save"), 600);
+    }
+    function staggerIn(container, selector) {
+      if (!container)
+        return;
+      if (REDUCE_MOTION) {
+        container.querySelectorAll(selector || ":scope > *").forEach((el) => {
+          el.classList.remove("stagger-ready");
+          el.classList.remove("stagger-item");
+        });
+        return;
+      }
+      const kids = selector ? container.querySelectorAll(selector) : container.children;
+      Array.from(kids).forEach((el, i) => {
+        el.style.setProperty("--i", String(i));
+        el.classList.remove("stagger-ready", "stagger-item");
+        reflow(el);
+        el.classList.add("stagger-item");
+      });
+    }
+    function resetStagger(container) {
+      if (container)
+        delete container._staggerDone;
+    }
+    let _viewObserver = null;
+    function ensureViewObserver() {
+      if (_viewObserver)
+        return _viewObserver;
+      if (!("IntersectionObserver" in window))
+        return null;
+      _viewObserver = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting)
+            return;
+          const el = entry.target;
+          _viewObserver.unobserve(el);
+          if (el._viewFaded)
+            return;
+          el._viewFaded = true;
+          el.style.opacity = "";
+          el.style.transform = "";
+        });
+      }, { rootMargin: "0px 0px -8% 0px", threshold: 0.05 });
+      return _viewObserver;
+    }
+    function viewFadeOn(els) {
+      if (REDUCE_MOTION)
+        return;
+      const obs = ensureViewObserver();
+      if (!obs) {
+        els.forEach((el) => el.classList.add("view-fade"));
+        return;
+      }
+      els.forEach((el, i) => {
+        el.style.setProperty("--i", String(Math.min(i, 12)));
+        el.classList.add("view-fade");
+        el.style.opacity = "0";
+        el.style.transform = "translate3d(0, 12px, 0)";
+        obs.observe(el);
+      });
+    }
+    function bumpNumber(el) {
+      if (!el || REDUCE_MOTION)
+        return;
+      el.classList.remove("is-bump");
+      reflow(el);
+      el.classList.add("is-bump");
+    }
+    global.__t2cTransitions = {
+      reflow,
+      onAnimEnd,
+      swapPanel,
+      cascadeChildren,
+      openModal: openModal2,
+      closeModal: closeModal2,
+      celebrateSave,
+      staggerIn,
+      resetStagger,
+      viewFadeOn,
+      bumpNumber,
+      reduceMotion: REDUCE_MOTION
+    };
+  })(window);
 
   // static/src/main.ts
   state.primaryActions = {

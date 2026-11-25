@@ -34,7 +34,7 @@ export function playStagger(container: any, selector?: string): void {
         });
     }, { rootMargin: '0px 0px -8% 0px', threshold: 0.01 });
 
-    Array.from(nodes).forEach(el => {
+    Array.from(nodes as ArrayLike<Element>).forEach((el: Element) => {
         if (el.classList.contains('stagger-item')) return;  // 已播放过的不重播
         el.classList.add('stagger-ready');
         io.observe(el);
@@ -62,7 +62,8 @@ export function popIn(el: HTMLElement | null): void {
 /** HTML escape: 旧版本 (供 segment 等场景使用) */
 export function escapeHtml(s: any): string {
     if (!s) return '';
-    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const map: Record<string, string> = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
+    return String(s).replace(/[&<>"']/g, c => map[c] || c);
 }
 
 /** ISO 时间格式化 */
@@ -137,7 +138,8 @@ export function detectBrowserDevice(): DeviceInfo {
     root.dataset.browser = browser;
     const body = document.body;
     body.classList.remove('device-mobile', 'device-tablet', 'device-desktop', 'touch-device', 'browser-wechat');
-    body.classList.add('device-' + device, 'touch-device');
+    body.classList.add('device-' + device);
+    if (hasTouch) body.classList.add('touch-device');
     if (browser === 'wechat') body.classList.add('browser-wechat');
 
     const w: any = window;
